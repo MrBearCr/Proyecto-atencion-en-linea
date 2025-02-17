@@ -1,0 +1,14 @@
+"""  mensaje = (
+        f"!Hola! Te escribimos desde Casapro Cabudare para informarte que *{descripcion}* está disponible.\n\n"
+        "Casapro HomeCenter"
+            )
+
+        # Construir cuerpo del mensaje
+        payload = {
+        "messaging_product": "whatsapp",
+        "to": numero_limpio,
+        "type": "text",
+        "text": {
+            "body": mensaje
+            }
+        }"""

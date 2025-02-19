@@ -17,9 +17,48 @@ import http.server
 import socketserver
 import threading
 import requests
+from enum import Enum
+
 
 CONFIG_FILE = 'db_config.ini'
 
+
+class ErrorCode(Enum):
+    # Errores de base de datos (1000-1999)
+    DB_CONNECTION_FAILED = (1001, "Error de conexión a la base de datos")
+    DB_QUERY_EXECUTION = (1002, "Error al ejecutar consulta SQL")
+    DB_TABLE_CREATION = (1003, "Error creando tabla en la base de datos")
+    DB_RECORD_NOT_FOUND = (1004, "Registro no encontrado")
+    
+    # Errores de validación (2000-2999)
+    INVALID_CLIENT_NUMBER = (2001, "Número de cliente inválido")
+    INVALID_PRODUCT_CODE = (2002, "Código de producto inválido")
+    DANGEROUS_INPUT = (2003, "Entrada con caracteres potencialmente peligrosos")
+    
+    # Errores de cifrado (3000-3999)
+    ENCRYPTION_FAILED = (3001, "Error al cifrar datos")
+    DECRYPTION_FAILED = (3002, "Error al descifrar datos")
+    KEY_GENERATION = (3003, "Error generando clave de cifrado")
+    
+    # Errores de API (4000-4999)
+    WHATSAPP_API_FAILURE = (4001, "Error en comunicación con API de WhatsApp")
+    INVALID_API_TOKEN = (4002, "Token de API inválido o expirado")
+    
+    # Autenticación y sesión (5000-5999)
+    AUTH_FAILED = (5001, "Error de autenticación")
+    SESSION_EXPIRED = (5002, "Sesión expirada por inactividad")
+    
+    # Configuración (6000-6999)
+    MISSING_CONFIG = (6001, "Configuración faltante")
+    INVALID_CONFIG = (6002, "Configuración inválida")
+
+    def __init__(self, code, description):
+        self.code = code
+        self.description = description
+
+    def __str__(self):
+        return f"[{self.code}] {self.description}"
+    
 class SessionManager:
     def __init__(self, root: tk.Tk)-> None:
         self.root: tk.Tk= root
@@ -63,7 +102,6 @@ class SessionManager:
         
         messagebox.showinfo("Sesión Expirada", "La sesión ha expirado por inactividad")
         self.root.destroy()
-        
 
 class AuditLogger:
     def __init__(self):
@@ -81,9 +119,10 @@ class AuditLogger:
         handler.setFormatter(formatter)
         self.logger.addHandler(handler)
 
-    def log_event(self, action, user, status):
-        ip_address = socket.gethostbyname(socket.gethostname())
-        log_entry = f"USER: {user} | ACTION: {action} | STATUS: {status} | IP: {ip_address}"
+    def log_event(self, action, user, status, error_code=None):
+        log_entry = f"USER: {user} | ACTION: {action} | STATUS: {status}"
+        if error_code:
+            log_entry += f" | ERROR: {error_code.code} - {error_code.description}"
         self.logger.info(log_entry)
 
         
@@ -100,10 +139,18 @@ class SecureCredentialsManager:
         return key.encode()
 
     def encrypt(self, data):
-        return Fernet(self.key).encrypt(data.encode()).decode()
+        try:
+            return Fernet(self.key).encrypt(data.encode()).decode()
+        except Exception as e:
+            error_msg = f"{ErrorCode.ENCRYPTION_FAILED}: {str(e)}"
+            raise Exception(error_msg) from e
 
     def decrypt(self, encrypted_data):
-        return Fernet(self.key).decrypt(encrypted_data.encode()).decode()
+        try:
+            return Fernet(self.key).decrypt(encrypted_data.encode()).decode()
+        except Exception as e:
+            error_msg = f"{ErrorCode.DECRYPTION_FAILED}: {str(e)}"
+            raise Exception(error_msg) from e
 
     def store_temp_password(self, password):
         if password:
@@ -119,9 +166,12 @@ class SecureCredentialsManager:
         return self.decrypt(encrypted_token) if encrypted_token else None
 
     def store_whatsapp_token(self, token):
-        if token:
-            encrypted = self.encrypt(token)
+        try:
+            encrypted = self.encrypt(token) if token else ""
             keyring.set_password(self.service_name, "whatsapp_token", encrypted)
+        except Exception as e:
+            error_msg = f"{ErrorCode.ENCRYPTION_FAILED}: {str(e)}"
+            raise Exception(error_msg) from e
 
 class DatabaseManager:
     def __init__(self):
@@ -157,7 +207,8 @@ class DatabaseManager:
                 temp_conn.commit()
                 temp_conn.close()
             except pyodbc.Error as e:
-                raise Exception(f"Error creando base de datos: {str(e)}")
+                error_msg = f"{ErrorCode.DB_CONNECTION_FAILED}: {str(e)}"
+                raise Exception(error_msg) from e
             finally:
                 conn_str += f"DATABASE={database}"
 
@@ -168,9 +219,9 @@ class DatabaseManager:
             self.create_table()
             return True
         except pyodbc.Error as e:
-            self.conn = None  # <-- Asegura que sea None si falla
-            self.cursor = None
-            raise Exception(f"Error de conexión: {str(e)}")
+            error_msg = f"{ErrorCode.DB_CONNECTION_FAILED}: {str(e)}"
+            raise Exception(error_msg) from e
+
 
     def create_table(self):
         try:
@@ -184,7 +235,8 @@ class DatabaseManager:
             """)
             self.conn.commit()
         except pyodbc.Error as e:
-            raise Exception(f"Error creando tabla: {str(e)}")
+            error_msg = f"{ErrorCode.DB_TABLE_CREATION}: {str(e)}"
+            raise Exception(error_msg) from e
 
     def execute_query(self, query, params=None):
         try:
@@ -196,11 +248,13 @@ class DatabaseManager:
             return True
         except pyodbc.Error as e:
             self.conn.rollback()
-            raise Exception(f"Error en consulta: {str(e)}")
+            error_msg = f"{ErrorCode.DB_QUERY_EXECUTION}: {str(e)}"
+            raise Exception(error_msg) from e
 
     def fetch_data(self, query, params=None):
         if not self.conn:  # <-- Validación crítica
-            raise Exception("No hay conexión a la base de datos")
+            error_msg = f"{ErrorCode.DB_CONNECTION_FAILED}: No hay conexión activa"
+            raise Exception(error_msg)
         try:
             if params:
                 self.cursor.execute(query, params)
@@ -208,7 +262,8 @@ class DatabaseManager:
                 self.cursor.execute(query)
             return self.cursor.fetchall()
         except pyodbc.Error as e:
-            raise Exception(f"Error obteniendo datos: {str(e)}")
+            error_msg = f"{ErrorCode.DB_QUERY_EXECUTION}: {str(e)}"
+            raise Exception(error_msg) from e
 
 class DatabaseApp:
     def __init__(self, root):
@@ -299,16 +354,21 @@ class DatabaseApp:
                      background=[('active', self.colors['secondary'])],
                      foreground=[('active', 'white')])
 
-    def save_connection_settings(self, server, database, user):
+    def save_connection_settings(self, server, database, user, token=None):
         config = configparser.ConfigParser()
         config['Connection'] = {
             'Server': self.cred_manager.encrypt(server),
             'Database': self.cred_manager.encrypt(database),
             'User': self.cred_manager.encrypt(user)
         }
+
+        if token is not None:
+            self.cred_manager.store_whatsapp_token(token)
+
         with open(CONFIG_FILE, 'w') as configfile:
             config.write(configfile)
-    
+        # Guardar token si se proporcionó
+  
     def load_connection_settings(self):
         if os.path.exists(CONFIG_FILE):
             try:
@@ -321,8 +381,12 @@ class DatabaseApp:
                     'user': self.cred_manager.decrypt(config['Connection']['User'])
                 }
             except Exception as e:
-                messagebox.showerror("Error de Configuracion", f"Configuración inválida. Se creará una nueva configuración. {str(e)}"
-                                     )
+                self.audit_log.log_event(
+                    "CONFIG_LOAD_ERROR", os.getlogin(), "FAILED",
+                    ErrorCode.INVALID_CONFIG
+                )
+                error_msg = f"{ErrorCode.INVALID_CONFIG}: {str(e)}"
+                messagebox.showerror("Error de Configuración", error_msg)
                 os.remove(CONFIG_FILE)
                 return None
         return None
@@ -572,7 +636,7 @@ class DatabaseApp:
          # Ventana de configuración 
         self.settings_window = tk.Toplevel(self.root)
         self.settings_window.title("Configuración de Conexión")
-        self.settings_window.geometry("500x300")
+        self.settings_window.geometry("550x300")
 
         # Contenedor principal
         container = ttk.Frame(self.settings_window)
@@ -599,7 +663,18 @@ class DatabaseApp:
         ttk.Label(container, text="Contraseña:").grid(row=1, column=2, padx=5, pady=5, sticky=tk.W)
         self.pwd_entry = ttk.Entry(container, show="*", width=20)
         self.pwd_entry.grid(row=1, column=3, padx=5, pady=5, sticky=tk.EW)
-         
+
+        # Campo para el token de WhatsApp
+        ttk.Label(container, text="Token WhatsApp:").grid(row=3, column=0, sticky='w', pady=5)
+        self.token_entry = ttk.Entry(container, show="*", width=25)  # Asegurar esta línea
+        self.token_entry.grid(row=3, column=1, padx=5, pady=5, sticky='ew')
+
+        try:
+            saved_token = self.cred_manager.get_whatsapp_token() or ""
+            self.token_entry.insert(0, saved_token)
+        except Exception as e:
+            print(f"Error cargando token: {str(e)}")
+            self.token_entry.insert(0, "")
         # Checkbox para mostrar contraseña
         self.show_pwd_var = tk.BooleanVar()
         ttk.Checkbutton(container, 
@@ -640,8 +715,11 @@ class DatabaseApp:
         database = self.db_entry.get()
         user = self.user_entry.get()
         password = self.pwd_entry.get()
+        token = self.token_entry.get()
+    
         if not password:
-            self.cred_manager.get_temp_password() or ''
+            password = self.cred_manager.get_temp_password() or ''
+    
         if password:
             self.cred_manager.store_temp_password(password)
 
@@ -651,18 +729,20 @@ class DatabaseApp:
 
         try:
             if self.db_manager.connect(server, database, user, password):
-                self.save_connection_settings(server, database, user)
-                self.update_status(
-                    'connected', 
-                    server=server
-                )
+                self.save_connection_settings(server, database, user, token)
+                self.update_status('connected', server=server)
                 self.settings_window.destroy()
                 self.show_temp_notification("Conexión exitosa")
                 self.search_records()
+            
         except Exception as e:
-             self.update_status('error', message=str(e))
-             self.show_temp_notification("Error de conexión", duration=5000)
-             self.settings_window.lift()
+            self.audit_log.log_event(
+                "DB_CONNECTION_ATTEMPT", os.getlogin(), "FAILED",
+                ErrorCode.DB_CONNECTION_FAILED
+            )
+            self.update_status('error', message=str(e))
+            self.show_temp_notification("Error de conexión", duration=5000)
+            self.settings_window.lift()
 
     def validate_input(self):
         num = self.num_cliente.get().strip()
@@ -673,24 +753,35 @@ class DatabaseApp:
         }
 
         if not num or not cod:
-               messagebox.showwarning("Error", "Complete todos los campos")
-               return False
+            self.audit_log.log_event(
+                "VALIDATION_ERROR", os.getlogin(), "FAILED", 
+                ErrorCode.INVALID_CLIENT_NUMBER
+            )
+            messagebox.showwarning("Error", "Complete todos los campos")
+
+            return False
 
         #Validar formato numerico
 
         if not re.match(r'^\d{1,11}$', num):
-            messagebox.showwarning("Error", "Numero de cliente invalido ( 1-11 digitos)")
+            self.audit_log.log_event(
+                "INVALID_CLIENT_NUMBER", os.getlogin(), "FAILED",
+                ErrorCode.INVALID_CLIENT_NUMBER
+            )
+            messagebox.showwarning("Error", str(ErrorCode.INVALID_CLIENT_NUMBER))
             return False
         
-        #Detectar patrones Peligrosos
         dangerous_patterns = [r";.*--", r"/\*.*\*/", r"xp_", r"exec\(", r"union.*select"]
         for field, value in inputs.items():
             if any(re.search(pattern, value, re.IGNORECASE) for pattern in dangerous_patterns):
-                messagebox.showwarning("Error", f"Caracteres no permitidos en {field}")
-                self.audit_log.log_event(f"INVALID_INPUT_ATTEMPT_{field}",success=False)
+                self.audit_log.log_event(
+                    f"DANGEROUS_INPUT_{field}", os.getlogin(), "FAILED",
+                    ErrorCode.DANGEROUS_INPUT
+                )
+                messagebox.showwarning("Error", str(ErrorCode.DANGEROUS_INPUT))
                 return False
               
-        return True      
+        return True 
 
     def clear_inputs(self):
         self.num_cliente.delete(0, tk.END)
@@ -1061,6 +1152,15 @@ class DatabaseApp:
         self.root.after(7000, self.procesar_envio)
 
     def enviar_mensaje_whatsapp(self, numero_cliente, descripcion):
+        whatsapp_token = self.cred_manager.get_whatsapp_token()
+        if not whatsapp_token:
+            self.audit_log.log_event(
+                "WHATSAPP_API_ERROR", os.getlogin(), "FAILED",
+                ErrorCode.INVALID_API_TOKEN
+            )
+            messagebox.showerror("Error", str(ErrorCode.INVALID_API_TOKEN))
+            self.show_settings()
+            return
         # Formatear número telefónico (eliminar caracteres no numéricos)
         numero_limpio = re.sub(r'\D', '', numero_cliente)
         # Si el número inicia con '0', se elimina dicho dígito
@@ -1097,7 +1197,7 @@ class DatabaseApp:
                 
             # Configuración de la API
             url = "https://graph.facebook.com/v21.0/490677417472051/messages"
-            token = "EAARBMa8Ew54BO0tywqsohCQMHA9CP3x0mdov6FpYdUnvF2zQB5Wdqv1LqGBCOgIHrgDxoMur04fRAGy16HimPsvZA9mC16MCmSStMiSBKDZBuHpPnY2o9TIdG5kfdON82fZAOZCLJLJFb4S9IHkNb2ZAyKAB73FZAJ71sva1YoAPRZAZCxKwazS7Nmfkl2Ldi3edQwZDZD"
+            token = whatsapp_token
         
             headers = {
                 "Authorization": f"Bearer {token}",

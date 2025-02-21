@@ -35,6 +35,8 @@ graph TD
     D -->|Accede a token| F
     B -->|Envía datos| F
     H -->|Registra eventos| E
+    #	modified:   docs/development/architecture.md
+
 ```
     
 ```   

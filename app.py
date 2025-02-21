@@ -125,7 +125,6 @@ class AuditLogger:
             log_entry += f" | ERROR: {error_code.code} - {error_code.description}"
         self.logger.info(log_entry)
 
-        
 class SecureCredentialsManager:
     def __init__(self):
         self.service_name = "DBClientApp"

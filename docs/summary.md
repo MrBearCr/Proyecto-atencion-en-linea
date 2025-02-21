@@ -1,13 +1,19 @@
-# Table of contents
+# Tabla de Contenidos
 
-* [Gestión de Clientes - Documentación](README.md)
-* [Guía de Contribución](CONTRIBUTING.md)
-* [Tabla de Contenidos](summary.md)
-* [configuration](configuration/README.md)
-  * [Configuración de Base de Datos](configuration/database.md)
-* [development](development/README.md)
-  * [error-codes](development/error-codes.md)
-* [installation](installation/README.md)
-  * [Requisitos del Sistema](installation/requeriments.md)
-* [usage](usage/README.md)
-  * [bulk-messages](usage/bulk-messages.md)
+* [Introducción](./)
+* [Instalación](installation/)
+  * [Requisitos](installation/requirements.md)
+  * [Configuración Inicial](installation/setup.md)
+* [Configuración](configuration/)
+  * [Base de Datos](configuration/database.md)
+  * [API de WhatsApp](configuration/whatsapp-api.md)
+* [Uso de la Aplicación](usage/)
+  * [Interfaz Gráfica](usage/interface.md)
+  * [Gestión de Registros](usage/records.md)
+  * [Envío Masivo](usage/bulk-messages.md)
+* [Desarrollo](development/)
+  * [Arquitectura](development/architecture.md)
+  * [Manejo de Errores](development/error-codes.md)
+* [Contribución](CONTRIBUTING.md)
+
+asdasdasdasdsadasdsa

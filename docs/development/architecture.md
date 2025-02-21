@@ -3,12 +3,38 @@
 ## Diagrama de Componentes
 ```mermaid
 graph TD
-    A[Interfaz Gráfica] --> B[DatabaseManager]
-    A --> C[SessionManager]
-    A --> D[SecureCredentialsManager]
-    B --> E[SQL Server]
-    A --> F[WhatsApp API]
-    C --> G[System Keyring]
+    subgraph UI
+        A[Interfaz Gráfica]
+    end
+
+    subgraph Backend
+        B[DatabaseManager]
+        C[SessionManager]
+        D[SecureCredentialsManager]
+        H[AuditLogger]
+    end
+
+    subgraph Storage
+        E[SQL Server]
+        I[TEMP_ENVIO]
+    end
+
+    subgraph External
+        F[WhatsApp API]
+        G[System Keyring]
+    end
+
+    A -->|Maneja sesión| C
+    A -->|Encripta credenciales| D
+    A -->|Consulta DB| B
+    A -->|Envía logs| H
+    B -->|Accede| E
+    B -->|Usa| I
+    C -->|Guarda sesión| G
+    D -->|Guarda credenciales| G
+    D -->|Accede a token| F
+    B -->|Envía datos| F
+    H -->|Registra eventos| E
 ```
     
 ```   

@@ -1,6 +1,6 @@
 # Tabla de Contenidos
 
-* [Introducción](../)
+* [Introducción](./)
 * [Instalación](installation/)
   * [Requisitos](installation/requirements.md)
   * [Configuración Inicial](installation/setup.md)

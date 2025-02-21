@@ -1,5 +1,6 @@
 # Arquitectura del Sistema
 
+
 ## Diagrama de Componentes
 ```mermaid
 graph TD

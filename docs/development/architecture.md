@@ -12,4 +12,4 @@ graph TD
 ```
     
    
-    > **Nota Técnica**: El sistema usa _connection pooling_ para manejar hasta 50 solicitudes concurrentes a la base de datos, optimizando el uso de recursos durante operaciones masivas.
+> **Nota Técnica**: El sistema usa _connection pooling_ para manejar hasta 50 solicitudes concurrentes a la base de datos, optimizando el uso de recursos durante operaciones masivas.

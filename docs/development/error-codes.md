@@ -1,5 +1,3 @@
-# Códigos de Error
-
 | Código | Tipo                  | Descripción                                      | Posibles Soluciones                  |
 |--------|-----------------------|-------------------------------------------------|---------------------------------------|
 | 1001   | Base de Datos         | Error de conexión a la base de datos            | Verificar credenciales y servidor    |

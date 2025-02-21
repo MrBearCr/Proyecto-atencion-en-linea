@@ -1,4 +1,4 @@
-**5. usage/bulk-messages.md**
+
 ```markdown
 ## Envío Masivo de Mensajes
 
@@ -9,5 +9,3 @@
    - Agrupa productos por cliente
    - Usa plantillas pre-aprobadas de WhatsApp
    - Proporciona barra de progreso
-
-![Envío Masivo](screenshots/bulk-send.png)

@@ -1,3 +1,18 @@
+# Sistema de Gestión de Errores
+
+## Estructura de la Clase ErrorCode
+```python
+class ErrorCode(Enum):
+    DB_CONNECTION_FAILED = (1001, "Error de conexión a la base de datos")
+    
+    def __init__(self, code, description):
+        self.code = code
+        self.description = description
+        
+    def __str__(self):
+        return f"[{self.code}] {self.description}"
+```
+
 | Código | Tipo                  | Descripción                                      | Posibles Soluciones                  |
 |--------|-----------------------|-------------------------------------------------|---------------------------------------|
 | 1001   | Base de Datos         | Error de conexión a la base de datos            | Verificar credenciales y servidor    |

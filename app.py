@@ -627,7 +627,7 @@ class DatabaseApp:
 
         # Iniciar animación después del tiempo de visualización
         self.root.after(duration, animate)
-    
+
     def setup_bindings(self):
         self.tree.bind("<Double-1>", self.on_tree_double_click)
 
@@ -695,6 +695,13 @@ class DatabaseApp:
     
         ttk.Button(btn_frame, text="Cancelar", command=self.settings_window.destroy).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Conectar", command=self.connect_db).pack(side=tk.LEFT, padx=5)
+
+    def create_system_status_frame(self):
+        status_frame = ttk.Frame(self.root)
+        self.lbl_db_status = ttk.Label(status_frame, text="DB: Desconectado")
+        self.lbl_api_status = ttk.Label(status_frame, text="API: Inactiva")
+        self.btn_refresh_status = ttk.Button(status_frame, text="Actualizar", command=self.check_system_status)
+    
 
     def toggle_buttons(self, estado):
         for btn_data in self.buttons.values():
@@ -1174,8 +1181,6 @@ class DatabaseApp:
             MAX_TOTAL_LENGTH = 1024 #Limite de Whatsapp
             SEPARADOR = "  •  "  # Usar espacios y viñeta simple
 
-        
-
         # Procesar descripciones
             productos_limpios = []
             adicionales = len(descripcion) - MAX_ITEMS if len(descripcion) > MAX_ITEMS else 0
@@ -1250,15 +1255,12 @@ class DatabaseApp:
             )
             messagebox.showerror("Error", f"{str(e)}")
            
-            
     def actualizar_descripcion(self, texto):
         self.descripcion.config(state='normal')
         self.descripcion.delete(0, tk.END)
         self.descripcion.insert(0, texto)
         self.descripcion.config(state='readonly')
 
-
-    
 if __name__ == "__main__":
     root = tk.Tk()
     app = DatabaseApp(root)

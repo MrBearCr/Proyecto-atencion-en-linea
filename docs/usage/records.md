@@ -15,4 +15,5 @@ Módulo para administrar clientes y sus productos asociados.
 # Ejemplo de validación
 def validate_input(self):
     if not re.match(r'^\d{1,11}$', self.num_cliente.get()):
-        raise ValueError(ErrorCode.INVALID_CLIENT_NUMBER)
+        raise ValueError(ErrorCode.INVALID_CLIENT_NUMBER) 
+```

@@ -1476,7 +1476,7 @@ class DatabaseApp:
         except Exception as e:
             messagebox.showerror("Error", f"Error obteniendo descripción o cantidad: {str(e)}")
 
-    def procesar_envio(self):
+    def procesar_envio(self,):
         try:
             if self.actual == 0:
                 # Crear tabla temporal si no existe
@@ -1543,6 +1543,12 @@ class DatabaseApp:
         self.root.after(7000, self.procesar_envio)
 
     def enviar_mensaje_whatsapp(self, numero_cliente: str) -> bool:
+        codigo = self.obtener_codigo_producto_cliente(numero_cliente)
+        if not codigo:
+            self.log(f"Cliente {numero_cliente} sin producto asociado", "ERROR")
+            return False
+        descripcion = self.obtener_descripcion_producto(codigo)
+        stock_ok = self.validar_stock_producto(codigo)
         if not self.cred_manager.get_whatsapp_token():
             self.update_status('api_error', message="Token no configurado")
             return
@@ -1572,9 +1578,6 @@ class DatabaseApp:
         numero_formateado = '58' + numero_limpio
     
         try:
-            codigo = self.obtener_codigo_producto_cliente(numero_cliente)
-            descripcion = self.obtener_descripcion_producto(codigo)
-            stock_ok = self.validar_stock_producto(codigo)
 
             MAX_LENGTH_PER_ITEM = 45  # Deja espacio para número de secuencia
             MAX_ITEMS = 10  # Máximo de productos por mensaje

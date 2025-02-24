@@ -16,12 +16,85 @@ import socket
 import http.server
 import socketserver
 import threading
+from tkcalendar import Calendar
+from datetime import datetime
 import requests
 from enum import Enum
 
 
 CONFIG_FILE = 'db_config.ini'
 
+class CacheDescripciones:
+    def __init__(self, ttl=3600):
+        self.cache = {}
+        self.ttl = ttl
+
+    def obtener(self, codigo):
+        item = self.cache.get(codigo)
+        if item and (time.time() - item['timestamp']) < self.ttl:
+            return item['descripcion']
+        return None
+
+    def guardar(self, codigo, descripcion):
+        self.cache[codigo] = {
+            'descripcion': descripcion,
+            'timestamp': time.time()
+        }
+
+class EnvioProgramado:
+    def __init__(self, db_manager):
+        self.db_manager = db_manager
+
+    def programar_envio(self, numero_cliente, mensaje, fecha):
+        try:
+            self.db_manager.execute_query(
+                "INSERT INTO envios_programados (numero_cliente, mensaje, fecha_programada, estado) VALUES (?, ?, ?, 'PENDIENTE')",
+                (numero_cliente, mensaje, fecha)
+            )
+            return True
+        except Exception as e:
+            print(f"Error programando envío: {str(e)}")
+            return False
+
+# Clase ProgramadorEnvios (adaptada)
+class ProgramadorEnvios:
+    def __init__(self, db_manager, app):
+        self.db_manager = db_manager
+        self.app = app
+        self.hilo = threading.Thread(target=self.verificar_envios, daemon=True)
+        self.hilo.start()
+
+    def verificar_envios(self):
+        while True:
+            try:
+                if not self.db_manager.conn:
+                    time.sleep(10)
+                    continue
+
+                ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                pendientes = self.db_manager.fetch_data(
+                    "SELECT id, numero_cliente, mensaje FROM envios_programados "
+                    "WHERE fecha_programada <= ? AND estado = 'PENDIENTE'",
+                    (ahora,)
+                )
+
+                for envio in pendientes:
+                    id_envio, numero, mensaje = envio
+                    self.procesar_envio(id_envio, numero, mensaje)
+
+            except Exception as e:
+                self.app.log(f"Error en programador: {str(e)}", "ERROR")
+            time.sleep(60)
+
+    def procesar_envio(self, id_envio, numero, mensaje):
+        try:
+            if self.app.enviar_mensaje_whatsapp(numero, [mensaje]):
+                self.db_manager.execute_query(
+                    "UPDATE envios_programados SET estado = 'ENVIADO' WHERE id = ?",
+                    (id_envio,)
+                )
+        except Exception as e:
+            self.app.log(f"Error enviando programado ID {id_envio}: {str(e)}", "ERROR")
 
 class ErrorCode(Enum):
     # Errores de base de datos (1000-1999)
@@ -125,7 +198,6 @@ class AuditLogger:
             log_entry += f" | ERROR: {error_code.code} - {error_code.description}"
         self.logger.info(log_entry)
 
-        
 class SecureCredentialsManager:
     def __init__(self):
         self.service_name = "DBClientApp"
@@ -234,6 +306,19 @@ class DatabaseManager:
                 )
             """)
             self.conn.commit()
+
+            self.cursor.execute("""
+                IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='envios_programados' AND xtype='U')
+                CREATE TABLE envios_programados (
+                    id INT IDENTITY(1,1) PRIMARY KEY,
+                    numero_cliente NVARCHAR(50) NOT NULL,
+                    mensaje TEXT NOT NULL,
+                    fecha_programada DATETIME NOT NULL,
+                    estado NVARCHAR(20) DEFAULT 'PENDIENTE'
+                )
+            """)
+            self.conn.commit()
+
         except pyodbc.Error as e:
             error_msg = f"{ErrorCode.DB_TABLE_CREATION}: {str(e)}"
             raise Exception(error_msg) from e
@@ -285,6 +370,9 @@ class DatabaseApp:
         self.setup_modern_ui()
         self.setup_bindings()
         self.attempt_auto_connect()
+        self.cache = CacheDescripciones()
+        self.programador = ProgramadorEnvios(self.db_manager, self)
+        self.envios_programados = EnvioProgramado(self.db_manager)
         
         # Sistema de notificaciones y ayuda
         self.notification_manager = self.NotificationManager(self.root)  # Corregido
@@ -436,6 +524,55 @@ class DatabaseApp:
         # Contador de mensajes
         self.log_counter = 0
         self.max_logs = 200  # Máximo de líneas antes de limpiar
+
+        programar_frame = ttk.Frame(frame)
+        programar_frame.pack(fill=tk.X, pady=10)
+
+        ttk.Button(programar_frame, 
+                    text="⏰ Programar Envío", 
+                    command=self.mostrar_ventana_programacion).pack(side=tk.LEFT)
+
+    def mostrar_ventana_programacion(self):
+        ventana = tk.Toplevel(self.root)
+        ventana.title("Programar Envío Masivo")
+    
+        # Selector de fecha/hora
+        ttk.Label(ventana, text="Fecha/Hora Programada:").grid(row=0, column=0, padx=5, pady=5)
+        calendario = Calendar(ventana, selectmode='day')
+        calendario.grid(row=0, column=1, padx=5, pady=5)
+
+        # Selector de hora
+        ttk.Label(ventana, text="Hora:").grid(row=1, column=0, padx=5, pady=5)
+        spin_hora = ttk.Spinbox(ventana, from_=0, to=23, width=5)
+        spin_hora.grid(row=1, column=1, padx=5, pady=5)
+        spin_minuto = ttk.Spinbox(ventana, from_=0, to=59, width=5)
+        spin_minuto.grid(row=1, column=2, padx=5, pady=5)
+    
+    
+        ttk.Button(ventana, text="Programar", 
+             command=lambda: self.guardar_envio_pro(
+                 calendario.get_date(),
+                 spin_hora.get(),
+                 spin_minuto.get()
+             )).grid(row=2, columnspan=3, pady=10)
+        
+    def guardar_envio_programado(self, fecha, hora, minuto):
+        try:
+            # Construir datetime
+            fecha_completa = datetime.strptime(
+                f"{fecha} {hora.zfill(2)}:{minuto.zfill(2)}:00", 
+                "%m/%d/%y %H:%M:%S"
+            )
+        
+            # Registrar en la base de datos
+            self.db_manager.execute_query(
+                "INSERT INTO envios_programados_masivos (fecha_programada) VALUES (?)",
+                (fecha_completa,)
+            )
+            self.show_temp_notification("Envío masivo programado")
+        
+        except Exception as e:
+            messagebox.showerror("Error", f"Error de programación: {str(e)}")
 
     def limpiar_logs(self):
         self.logs_text.delete('1.0', tk.END)
@@ -1034,6 +1171,8 @@ class DatabaseApp:
             records = self.db_manager.fetch_data("SELECT numero_cliente, C_CODIGO FROM clientes")
             
             # Agrupar clientes
+            clientes_con_error = set()
+
             clientes_dict = {}
             for numero, codigo in records:
                 if numero not in clientes_dict:

@@ -16,12 +16,84 @@ import socket
 import http.server
 import socketserver
 import threading
+from tkcalendar import Calendar
+from datetime import datetime
 import requests
 from enum import Enum
 
 
 CONFIG_FILE = 'db_config.ini'
 
+class CacheDescripciones:
+    def __init__(self, ttl=3600):
+        self.cache = {}
+        self.ttl = ttl
+
+    def obtener(self, codigo):
+        item = self.cache.get(codigo)
+        if item and (time.time() - item['timestamp']) < self.ttl:
+            return item['descripcion']
+        return None
+
+    def guardar(self, codigo, descripcion):
+        self.cache[codigo] = {
+            'descripcion': descripcion,
+            'timestamp': time.time()
+        }
+
+class EnvioProgramado:
+    def __init__(self, db_manager):
+        self.db_manager = db_manager
+
+    def programar_envio(self, numero_cliente, fecha):
+        try:
+            self.db_manager.execute_query(
+                "INSERT INTO envios_programados (numero_cliente, fecha_programada, estado) VALUES (?, ?, 'PENDIENTE')",
+                (numero_cliente, fecha)
+            )
+            return True
+        except Exception as e:
+            print(f"Error programando envío: {str(e)}")
+            return False
+
+class ProgramadorEnvios:
+    def __init__(self, db_manager, app):
+        self.db_manager = db_manager
+        self.app = app
+        self.hilo = threading.Thread(target=self.verificar_envios, daemon=True)
+        self.hilo.start()
+
+    def verificar_envios(self):
+        while True:
+            try:
+                if not self.db_manager.conn:
+                    time.sleep(10)
+                    continue
+
+                ahora = datetime.now()
+                pendientes = self.db_manager.fetch_data(
+                    "SELECT id, numero_cliente FROM envios_programados "
+                    "WHERE fecha_programada <= ? AND estado = 'PENDIENTE'",
+                    (ahora,)
+                )
+
+                for envio in pendientes:
+                    id_envio, numero_cliente = envio
+                    self.procesar_envio(id_envio, numero_cliente)
+
+            except Exception as e:
+                self.app.log(f"Error en programador: {str(e)}", "ERROR")
+            time.sleep(60)
+
+    def procesar_envio(self, id_envio, numero_cliente):
+        try:
+            if self.app.enviar_mensaje_whatsapp(numero_cliente):
+                self.db_manager.execute_query(
+                    "UPDATE envios_programados SET estado = 'ENVIADO' WHERE id = ?",
+                    (id_envio,)
+                )
+        except Exception as e:
+            self.app.log(f"Error enviando programado ID {id_envio}: {str(e)}", "ERROR")
 
 class ErrorCode(Enum):
     # Errores de base de datos (1000-1999)
@@ -29,6 +101,7 @@ class ErrorCode(Enum):
     DB_QUERY_EXECUTION = (1002, "Error al ejecutar consulta SQL")
     DB_TABLE_CREATION = (1003, "Error creando tabla en la base de datos")
     DB_RECORD_NOT_FOUND = (1004, "Registro no encontrado")
+    DB_DESCRIPTION_NOT_FOUND = (1005, "Descripción no encontrada")
     
     # Errores de validación (2000-2999)
     INVALID_CLIENT_NUMBER = (2001, "Número de cliente inválido")
@@ -179,6 +252,20 @@ class DatabaseManager:
         self.connected_server = ""
         self.config = configparser.ConfigParser()
 
+    def table_exists(self, table_name: str) -> bool:
+        """Verifica si una tabla existe en la base de datos."""
+        try:
+            query = """
+                SELECT COUNT(*) 
+                FROM INFORMATION_SCHEMA.TABLES 
+                WHERE TABLE_NAME = ?
+            """
+            result = self.fetch_data(query, (table_name,))
+            return result[0][0] > 0
+        except Exception as e:
+            print(f"Error verificando existencia de tabla: {str(e)}")
+            return False
+
     def connect(self, server, database, user, password):
         conn_str = (
         f"DRIVER={{SQL Server}};"
@@ -233,6 +320,19 @@ class DatabaseManager:
                 )
             """)
             self.conn.commit()
+
+            self.cursor.execute("""
+                IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='envios_programados' AND xtype='U')
+                CREATE TABLE envios_programados (
+                    id INT IDENTITY(1,1) PRIMARY KEY,
+                    numero_cliente NVARCHAR(50) NOT NULL,
+                    fecha_programada DATETIME NOT NULL,
+                    fecha_creacion DATETIME DEFAULT GETDATE(),
+                    estado NVARCHAR(20) DEFAULT 'PENDIENTE'
+                )
+            """)
+            self.conn.commit()
+
         except pyodbc.Error as e:
             error_msg = f"{ErrorCode.DB_TABLE_CREATION}: {str(e)}"
             raise Exception(error_msg) from e
@@ -284,11 +384,51 @@ class DatabaseApp:
         self.setup_modern_ui()
         self.setup_bindings()
         self.attempt_auto_connect()
+        self.cache = CacheDescripciones()
+        self.programador = ProgramadorEnvios(self.db_manager, self)
+        self.envios_programados = EnvioProgramado(self.db_manager)
         
         # Sistema de notificaciones y ayuda
         self.notification_manager = self.NotificationManager(self.root)  # Corregido
         self.help_tooltips = self.HelpTooltips(self.root)  # Corregido
         self.setup_tooltips()
+
+    def obtener_descripcion_producto(self, codigo: str) -> Optional[str]:
+        """Obtiene la descripción de un producto desde la base de datos."""
+        try:
+            result = self.db_manager.fetch_data(
+                "SELECT C_DESCRI FROM MA_PRODUCTOS WHERE C_CODIGO = ?", 
+                (codigo,)
+            )
+            # Devolver cadena directamente, sin formateo adicional
+            return str(result[0][0]) if result and result[0][0] else None
+        except Exception as e:
+            self.log(f"Error obteniendo descripción: {str(e)}", "ERROR")
+            return None
+        
+    def validar_stock_producto(self, codigo: str) -> bool:
+        """Valida si un producto tiene stock en el depósito 0301."""
+        try:
+            result = self.db_manager.fetch_data(
+                "SELECT n_cantidad FROM MA_DEPOPROD WHERE c_codarticulo = ? AND c_coddeposito = '0301'",
+                (codigo,)
+            )
+            return result and result[0][0] > 0
+        except Exception as e:
+            self.log(f"Error validando stock: {str(e)}", "ERROR")
+            return False
+        
+    def obtener_codigo_producto_cliente(self, numero_cliente: str) -> Optional[str]:
+        """Obtiene el código de producto asociado a un cliente."""
+        try:
+            result = self.db_manager.fetch_data(
+                "SELECT C_CODIGO FROM clientes WHERE numero_cliente = ?", 
+                (numero_cliente,)
+            )
+            return result[0][0] if result else None
+        except Exception as e:
+            self.log(f"Error obteniendo código de producto: {str(e)}", "ERROR")
+            return None
 
     def setup_styles(self):
         self.style = ttk.Style()
@@ -325,7 +465,7 @@ class DatabaseApp:
         self.tree.bind("<Double-1>", self.on_tree_double_click)
         
         # Validación en tiempo real del código de producto
-        self.cod_producto.bind("<KeyRelease>", lambda e: self.buscar_descripcion())
+        self.cod_producto.bind("<KeyRelease>", self.buscar_descripcion)
 
     def setup_modern_ui(self):   
         self.root.title("Gestión de Clientes - Corporativo")
@@ -436,6 +576,66 @@ class DatabaseApp:
         self.log_counter = 0
         self.max_logs = 200  # Máximo de líneas antes de limpiar
 
+        programar_frame = ttk.Frame(frame)
+        programar_frame.pack(fill=tk.X, pady=10)
+
+        ttk.Button(programar_frame, 
+                    text="⏰ Programar Envío", 
+                    command=self.mostrar_ventana_programacion).pack(side=tk.LEFT)
+
+    def mostrar_ventana_programacion(self):
+        ventana = tk.Toplevel(self.root)
+        ventana.title("Programar Envío Masivo")
+    
+        # Selector de fecha/hora
+        ttk.Label(ventana, text="Fecha/Hora Programada:").grid(row=0, column=0, padx=5, pady=5)
+        calendario = Calendar(ventana, selectmode='day')
+        calendario.grid(row=0, column=1, padx=5, pady=5)
+
+        # Selector de hora
+        ttk.Label(ventana, text="Hora:").grid(row=1, column=0, padx=5, pady=5)
+        spin_hora = ttk.Spinbox(ventana, from_=0, to=23, width=5)
+        spin_hora.grid(row=1, column=1, padx=5, pady=5)
+        spin_minuto = ttk.Spinbox(ventana, from_=0, to=59, width=5)
+        spin_minuto.grid(row=1, column=2, padx=5, pady=5)
+    
+    
+        ttk.Button(ventana, text="Programar", 
+             command=lambda: self.guardar_envio_programado(
+                 calendario.get_date(),
+                 spin_hora.get(),
+                 spin_minuto.get()
+             )).grid(row=2, columnspan=3, pady=10)
+        
+    def guardar_envio_programado(self, fecha, hora, minuto,):
+        try:
+            # Construir datetime
+            fecha_completa = datetime.strptime(
+            f"{fecha} {hora.zfill(2)}:{minuto.zfill(2)}:00.000",
+            "%m/%d/%Y %H:%M:%S.%f"  # Formato con milisegundos
+            )
+
+            result = self.db_manager.fetch_data("SELECT TOP 1 numero_cliente FROM clientes")  # Ajusta según el criterio
+            if not result:
+                messagebox.showerror("Error", "No hay clientes registrados para programar el envío.")
+                return
+
+            numero_cliente = result[0][0]  # Obtener el primer número de cliente disponible
+
+
+            if not self.db_manager.table_exists("envios_programados"):
+                self.db_manager.create_table()
+        
+            # Registrar en la base de datos
+            self.db_manager.execute_query(
+                "INSERT INTO envios_programados (numero_cliente, fecha_programada, estado) VALUES (?, ?, 'PENDIENTE')",
+                (numero_cliente, fecha_completa)
+            )
+            self.show_temp_notification("Envío programado guardado✅")
+        
+        except Exception as e:
+            messagebox.showerror("Error", f"Error de programación: {str(e)}")
+
     def limpiar_logs(self):
         self.logs_text.delete('1.0', tk.END)
         self.log_counter = 0
@@ -443,7 +643,7 @@ class DatabaseApp:
     def log(self, message: str, level: str = 'INFO'):
         """Registrar mensaje en el panel de debug"""
         levels = ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'SUCCESS']
-        if level not in levels:
+        if level not in levels  :
             level = 'INFO'
     
         timestamp = time.strftime("%H:%M:%S")
@@ -512,6 +712,7 @@ class DatabaseApp:
             if server and database:
                 if self.db_manager.connect(server, database, user, password):
                     self.update_status('connected', server=server, api_token=api_token)
+                    self.log("Conexión a BD exitosa", "SUCCESS")
                     self.search_records()
                     return
 
@@ -1033,6 +1234,8 @@ class DatabaseApp:
             records = self.db_manager.fetch_data("SELECT numero_cliente, C_CODIGO FROM clientes")
             
             # Agrupar clientes
+            clientes_con_error = set()
+
             clientes_dict = {}
             for numero, codigo in records:
                 if numero not in clientes_dict:
@@ -1161,39 +1364,42 @@ class DatabaseApp:
         except Exception as e:
             messagebox.showerror("Error", str(e))
 
-    def buscar_descripcion(self):
+    def buscar_descripcion(self, event=None):
         """Obtiene la descripción y actualiza el campo correspondiente"""
         codigo = self.cod_producto.get().strip()
         clean_codigo = re.sub(r'\D', '', codigo)  # Limpieza del código
-        
+    
         try:
             if not clean_codigo:
                 self.actualizar_descripcion("Código no ingresado")
                 return
-
             # Actualizar campo de código con versión limpia
             if clean_codigo != codigo:
                 self.cod_producto.delete(0, tk.END)
                 self.cod_producto.insert(0, clean_codigo)
-
-            # Consultar descripción
-            query = "SELECT C_DESCRI FROM dbo.MA_PRODUCTOS WHERE C_CODIGO = ?"
-            result = self.db_manager.fetch_data(query, (clean_codigo,))
-            descripcion = result[0][0] if result else "Descripción no encontrada"
-            self.actualizar_descripcion(descripcion)
-
-             # Consultar cantidad
-            query_cantidad = "SELECT n_cantidad FROM dbo.MA_DEPOPROD WHERE c_codarticulo = ? AND c_coddeposito = '0301'"
-            result_cantidad = self.db_manager.fetch_data(query_cantidad, (clean_codigo,))
-            if result_cantidad and result_cantidad[0][0] > 0:
-                cantidad = int(result_cantidad[0][0])
-                self.show_temp_notification(f"Cantidad: {cantidad}")
+        
+            # Usar método reutilizable
+            descripcion = self.obtener_descripcion_producto(clean_codigo)
+            if descripcion:
+                self.actualizar_descripcion(descripcion)
+                print(f"Descripción: {descripcion}")
             else:
-                self.show_temp_notification(f"Cantidad no disponible o igual a 0")  
+                self.actualizar_descripcion("Descripción no encontrada")
+
+            # Validar stock usando el método reutilizable
+            if self.validar_stock_producto(clean_codigo):
+                stock_result = self.db_manager.fetch_data(
+                    "SELECT n_cantidad FROM MA_DEPOPROD WHERE c_codarticulo = ? AND c_coddeposito = '0301'",
+                    (clean_codigo,)
+                )
+                cantidad = int(stock_result[0][0]) if stock_result else 0
+                self.show_temp_notification(f"Stock disponible: {cantidad} unidades ✅")
+            else:
+                self.show_temp_notification("No disponible o igual a 0 ❌")
             
         except Exception as e:
             self.actualizar_descripcion("Error en consulta")
-            messagebox.showerror("Error", f"Error obteniendo descripción: {str(e)}")
+            messagebox.showerror("Error", f"Error obteniendo datos: {str(e)}")
     
                        
     def on_tree_double_click(self, event):
@@ -1336,7 +1542,7 @@ class DatabaseApp:
         self.lbl_progreso.config(text=mensaje_estado)
         self.root.after(7000, self.procesar_envio)
 
-    def enviar_mensaje_whatsapp(self, numero_cliente, descripcion):
+    def enviar_mensaje_whatsapp(self, numero_cliente: str) -> bool:
         if not self.cred_manager.get_whatsapp_token():
             self.update_status('api_error', message="Token no configurado")
             return
@@ -1366,6 +1572,10 @@ class DatabaseApp:
         numero_formateado = '58' + numero_limpio
     
         try:
+            codigo = self.obtener_codigo_producto_cliente(numero_cliente)
+            descripcion = self.obtener_descripcion_producto(codigo)
+            stock_ok = self.validar_stock_producto(codigo)
+
             MAX_LENGTH_PER_ITEM = 45  # Deja espacio para número de secuencia
             MAX_ITEMS = 10  # Máximo de productos por mensaje
             MAX_TOTAL_LENGTH = 1024 #Limite de Whatsapp
@@ -1448,11 +1658,12 @@ class DatabaseApp:
             )
             messagebox.showerror("Error", f"{str(e)}")
            
-    def actualizar_descripcion(self, texto):
+    def actualizar_descripcion(self, texto: str):
         self.descripcion.config(state='normal')
         self.descripcion.delete(0, tk.END)
         self.descripcion.insert(0, texto)
         self.descripcion.config(state='readonly')
+        self.descripcion.update_idletasks()
 
 if __name__ == "__main__":
     root = tk.Tk()

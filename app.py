@@ -449,11 +449,11 @@ class DatabaseApp:
         self.style.configure("Nav.TButton", 
                            font=("Segoe UI", 11), 
                            anchor="w",
-                           padding=(20, 10),
-                           background="#e9ecef")
+                           padding=(20, 10),      #e9ecef
+                           background="#e9ecef")    #004C97
         self.style.map("Nav.TButton",
                       background=[("active", "#004C97"), ("!active", "#e9ecef")],
-                      foreground=[("active", "white")])
+                      foreground=[("active", "white")]) 
 
         self.style.configure("Disabled.TButton", 
                        foreground="#666666",
@@ -612,7 +612,7 @@ class DatabaseApp:
             # Construir datetime
             fecha_completa = datetime.strptime(
             f"{fecha} {hora.zfill(2)}:{minuto.zfill(2)}:00.000",
-            "%m/%d/%Y %H:%M:%S.%f"  # Formato con milisegundos
+            "%m/%d/%y %H:%M:%S.%f"  # Formato con milisegundos
             )
 
             result = self.db_manager.fetch_data("SELECT TOP 1 numero_cliente FROM clientes")  # Ajusta según el criterio
@@ -1685,7 +1685,7 @@ class DatabaseApp:
                     f"Cliente: {numero_formateado} | Productos: {len(productos)}"
                 )
                 return True
-                
+                f
             error_data = response.json().get('error', {})
             error_msg = error_data.get('message', 'Error desconocido')
             error_code = error_data.get('code', 'DESCONOCIDO')

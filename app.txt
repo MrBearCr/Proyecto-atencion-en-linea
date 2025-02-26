@@ -45,18 +45,17 @@ class EnvioProgramado:
     def __init__(self, db_manager):
         self.db_manager = db_manager
 
-    def programar_envio(self, numero_cliente, mensaje, fecha):
+    def programar_envio(self, numero_cliente, fecha):
         try:
             self.db_manager.execute_query(
-                "INSERT INTO envios_programados (numero_cliente, mensaje, fecha_programada, estado) VALUES (?, ?, ?, 'PENDIENTE')",
-                (numero_cliente, mensaje, fecha)
+                "INSERT INTO envios_programados (numero_cliente, fecha_programada, estado) VALUES (?, ?, 'PENDIENTE')",
+                (numero_cliente, fecha)
             )
             return True
         except Exception as e:
             print(f"Error programando envío: {str(e)}")
             return False
 
-# Clase ProgramadorEnvios (adaptada)
 class ProgramadorEnvios:
     def __init__(self, db_manager, app):
         self.db_manager = db_manager
@@ -71,24 +70,24 @@ class ProgramadorEnvios:
                     time.sleep(10)
                     continue
 
-                ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                ahora = datetime.now()
                 pendientes = self.db_manager.fetch_data(
-                    "SELECT id, numero_cliente, mensaje FROM envios_programados "
+                    "SELECT id, numero_cliente FROM envios_programados "
                     "WHERE fecha_programada <= ? AND estado = 'PENDIENTE'",
                     (ahora,)
                 )
 
                 for envio in pendientes:
-                    id_envio, numero, mensaje = envio
-                    self.procesar_envio(id_envio, numero, mensaje)
+                    id_envio, numero_cliente = envio
+                    self.app.procesar_envio_programado(id_envio, numero_cliente)
 
             except Exception as e:
                 self.app.log(f"Error en programador: {str(e)}", "ERROR")
             time.sleep(60)
 
-    def procesar_envio(self, id_envio, numero, mensaje):
+    def procesar_envio(self, id_envio, numero_cliente):
         try:
-            if self.app.enviar_mensaje_whatsapp(numero, [mensaje]):
+            if self.app.enviar_mensaje_whatsapp(numero_cliente):
                 self.db_manager.execute_query(
                     "UPDATE envios_programados SET estado = 'ENVIADO' WHERE id = ?",
                     (id_envio,)
@@ -102,6 +101,7 @@ class ErrorCode(Enum):
     DB_QUERY_EXECUTION = (1002, "Error al ejecutar consulta SQL")
     DB_TABLE_CREATION = (1003, "Error creando tabla en la base de datos")
     DB_RECORD_NOT_FOUND = (1004, "Registro no encontrado")
+    DB_DESCRIPTION_NOT_FOUND = (1005, "Descripción no encontrada")
     
     # Errores de validación (2000-2999)
     INVALID_CLIENT_NUMBER = (2001, "Número de cliente inválido")
@@ -252,6 +252,20 @@ class DatabaseManager:
         self.connected_server = ""
         self.config = configparser.ConfigParser()
 
+    def table_exists(self, table_name: str) -> bool:
+        """Verifica si una tabla existe en la base de datos."""
+        try:
+            query = """
+                SELECT COUNT(*) 
+                FROM INFORMATION_SCHEMA.TABLES 
+                WHERE TABLE_NAME = ?
+            """
+            result = self.fetch_data(query, (table_name,))
+            return result[0][0] > 0
+        except Exception as e:
+            print(f"Error verificando existencia de tabla: {str(e)}")
+            return False
+
     def connect(self, server, database, user, password):
         conn_str = (
         f"DRIVER={{SQL Server}};"
@@ -312,8 +326,8 @@ class DatabaseManager:
                 CREATE TABLE envios_programados (
                     id INT IDENTITY(1,1) PRIMARY KEY,
                     numero_cliente NVARCHAR(50) NOT NULL,
-                    mensaje TEXT NOT NULL,
                     fecha_programada DATETIME NOT NULL,
+                    fecha_creacion DATETIME DEFAULT GETDATE(),
                     estado NVARCHAR(20) DEFAULT 'PENDIENTE'
                 )
             """)
@@ -379,6 +393,69 @@ class DatabaseApp:
         self.help_tooltips = self.HelpTooltips(self.root)  # Corregido
         self.setup_tooltips()
 
+    def obtener_descripcion_producto(self, codigo: str) -> Optional[str]:
+        """Obtiene la descripción de un producto desde la base de datos."""
+        try:
+            result = self.db_manager.fetch_data(
+                "SELECT C_DESCRI FROM MA_PRODUCTOS WHERE C_CODIGO = ?", 
+                (codigo,)
+            )
+            # Devolver cadena directamente, sin formateo adicional
+            return str(result[0][0]) if result and result[0][0] else None
+        except Exception as e:
+            self.log(f"Error obteniendo descripción: {str(e)}", "ERROR")
+            return None
+        
+    def validar_stock_producto(self, codigo: str) -> bool:
+        """Valida si un producto tiene stock en el depósito 0301."""
+        try:
+            result = self.db_manager.fetch_data(
+                "SELECT n_cantidad FROM MA_DEPOPROD WHERE c_codarticulo = ? AND c_coddeposito = '0301'",
+                (codigo,)
+            )
+            return result and result[0][0] > 0
+        except Exception as e:
+            self.log(f"Error validando stock: {str(e)}", "ERROR")
+            return False
+        
+    def obtener_codigo_producto_cliente(self, numero_cliente: str) -> Optional[str]:
+        """Obtiene el código de producto asociado a un cliente."""
+        try:
+            result = self.db_manager.fetch_data(
+                "SELECT C_CODIGO FROM clientes WHERE numero_cliente = ?", 
+                (numero_cliente,)
+            )
+            return result[0][0] if result else None
+        except Exception as e:
+            self.log(f"Error obteniendo código de producto: {str(e)}", "ERROR")
+            return None
+        
+    def create_gradient_header(self):
+        """Genera un degradado suave de azul corporativo"""
+        width = 1200  # Ancho de la ventana
+        height = 50   # Altura del encabezado
+    
+        self.bg_image = tk.PhotoImage(width=width, height=height)
+    
+        # Colores base
+        start_color = (0, 76, 151)    # #004C97
+        end_color = (0, 45, 92)       # #002D5C
+    
+        # Generar degradado vertical
+        for y in range(height):
+        # Calcular interpolación de color
+            r = start_color[0] + (end_color[0] - start_color[0]) * y // height
+            g = start_color[1] + (end_color[1] - start_color[1]) * y // height
+            b = start_color[2] + (end_color[2] - start_color[2]) * y // height
+        
+            # Crear línea horizontal con el color calculado
+            color = f"#{r:02x}{g:02x}{b:02x}"
+            self.bg_image.put(color, (0, y, width, y+1))
+
+        # Aplicar al frame del encabezado
+        self.style.element_create("Header.TFrame", "image", self.bg_image)
+        self.style.configure("Header.TFrame", background="#004C97")
+
     def setup_styles(self):
         self.style = ttk.Style()
         self.style.theme_create("modern", parent="alt", settings={
@@ -398,15 +475,29 @@ class DatabaseApp:
         self.style.configure("Nav.TButton", 
                            font=("Segoe UI", 11), 
                            anchor="w",
-                           padding=(20, 10),
-                           background="#e9ecef")
+                           padding=(20, 10),      #e9ecef
+                           background="#e9ecef")    #004C97
         self.style.map("Nav.TButton",
                       background=[("active", "#004C97"), ("!active", "#e9ecef")],
                       foreground=[("active", "white")])
+        
+
+        
 
         self.style.configure("Disabled.TButton", 
                        foreground="#666666",
                        background="#e0e0e0")
+        self.style.configure(
+            "HeaderMenu.TMenubutton",
+            background="#004C97",
+            foreground="white",
+            font=("Segoe UI", 12),
+            relief="flat"
+        )
+        self.style.map("HeaderMenu.TMenubutton",
+            background=[("active", "#0066CC")],  # Color al hacer hover
+            foreground=[("active", "white")]
+        )
 
     def setup_bindings(self):
         """Configurar eventos del teclado y widgets"""
@@ -414,7 +505,7 @@ class DatabaseApp:
         self.tree.bind("<Double-1>", self.on_tree_double_click)
         
         # Validación en tiempo real del código de producto
-        self.cod_producto.bind("<KeyRelease>", lambda e: self.buscar_descripcion())
+        self.cod_producto.bind("<KeyRelease>", self.buscar_descripcion)
 
     def setup_modern_ui(self):   
         self.root.title("Gestión de Clientes - Corporativo")
@@ -433,21 +524,42 @@ class DatabaseApp:
               foreground=[('active', '#003f7e')])
 
     def create_header(self):
-        header = ttk.Frame(self.root, style="Header.TFrame")
-        header.pack(fill=tk.X, padx=10, pady=5)
-        
-        # Logo y título
-        ttk.Label(header, text="⚡", font=("Segoe UI", 24)).pack(side=tk.LEFT, padx=10)
-        ttk.Label(header, text="Gestión de Clientes", 
-                font=("Segoe UI", 16, "bold")).pack(side=tk.LEFT)
+        # Crear canvas para efectos avanzados
+        header_canvas = tk.Canvas(
+            self.root, 
+            bg="#004C97",
+            height=80,
+            highlightthickness=0
+        )
+        header_canvas.pack(fill=tk.X)
+    
+        # Generar degradado
+        for i in range(80):
+            intensity = i / 80
+            r = int(0 * (1 - intensity) + 0 * intensity)
+            g = int(76 * (1 - intensity) + 45 * intensity)
+            b = int(151 * (1 - intensity) + 92 * intensity)
+            color = f"#{r:02x}{g:02x}{b:02x}"
+            header_canvas.create_line(0, i, 2000, i, fill=color)
+    
+        # Añadir texto
+        text_y = 80 // 2
+        header_canvas.create_text(
+            20, 
+            text_y,
+            text="Gestión de Clientes",
+            fill="white",
+            font=("Segoe UI", 14, "bold"),
+            anchor="w"
+        )
         
         # Menú de usuario
-        self.user_menu = ttk.Menubutton(header, text="☰", style="Nav.TButton")
+        self.user_menu = ttk.Menubutton(header_canvas, text="☰", style="HeaderMenu.TMenubutton")
         menu = tk.Menu(self.user_menu, tearoff=0)
         menu.add_command(label="Configuración", command=self.show_settings)
         menu.add_command(label="Salir", command=self.root.quit)
         self.user_menu['menu'] = menu
-        self.user_menu.pack(side=tk.RIGHT, padx=10)
+        self.user_menu.pack(side=tk.RIGHT, padx=20, pady=10)
 
     def create_sidebar(self):
         sidebar = ttk.Frame(self.root, width=250, style="Sidebar.TFrame")
@@ -550,26 +662,37 @@ class DatabaseApp:
     
     
         ttk.Button(ventana, text="Programar", 
-             command=lambda: self.guardar_envio_pro(
+             command=lambda: self.guardar_envio_programado(
                  calendario.get_date(),
                  spin_hora.get(),
                  spin_minuto.get()
              )).grid(row=2, columnspan=3, pady=10)
         
-    def guardar_envio_programado(self, fecha, hora, minuto):
+    def guardar_envio_programado(self, fecha, hora, minuto,):
         try:
             # Construir datetime
             fecha_completa = datetime.strptime(
-                f"{fecha} {hora.zfill(2)}:{minuto.zfill(2)}:00", 
-                "%m/%d/%y %H:%M:%S"
+            f"{fecha} {hora.zfill(2)}:{minuto.zfill(2)}:00.000",
+            "%m/%d/%y %H:%M:%S.%f"  # Formato con milisegundos
             )
+
+            result = self.db_manager.fetch_data("SELECT TOP 1 numero_cliente FROM clientes")  # Ajusta según el criterio
+            if not result:
+                messagebox.showerror("Error", "No hay clientes registrados para programar el envío.")
+                return
+
+            numero_cliente = result[0][0]  # Obtener el primer número de cliente disponible
+
+
+            if not self.db_manager.table_exists("envios_programados"):
+                self.db_manager.create_table()
         
             # Registrar en la base de datos
             self.db_manager.execute_query(
-                "INSERT INTO envios_programados_masivos (fecha_programada) VALUES (?)",
-                (fecha_completa,)
+                "INSERT INTO envios_programados (numero_cliente, fecha_programada, estado) VALUES (?, ?, 'PENDIENTE')",
+                (numero_cliente, fecha_completa)
             )
-            self.show_temp_notification("Envío masivo programado")
+            self.show_temp_notification("Envío programado guardado✅")
         
         except Exception as e:
             messagebox.showerror("Error", f"Error de programación: {str(e)}")
@@ -581,7 +704,7 @@ class DatabaseApp:
     def log(self, message: str, level: str = 'INFO'):
         """Registrar mensaje en el panel de debug"""
         levels = ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'SUCCESS']
-        if level not in levels:
+        if level not in levels  :
             level = 'INFO'
     
         timestamp = time.strftime("%H:%M:%S")
@@ -650,6 +773,7 @@ class DatabaseApp:
             if server and database:
                 if self.db_manager.connect(server, database, user, password):
                     self.update_status('connected', server=server, api_token=api_token)
+                    self.log("Conexión a BD exitosa", "SUCCESS")
                     self.search_records()
                     return
 
@@ -1197,8 +1321,8 @@ class DatabaseApp:
             self.lbl_progreso.pack()
             self.progress["maximum"] = self.total
 
-            self.root.after(1000, self.procesar_envio)
-        
+            self.root.after(1000, self.procesar_envio_masivo)
+            
         except Exception as e:
             self.log(f"Error en envío masivo: {str(e)}", "ERROR")
             self.toggle_buttons('normal')
@@ -1301,39 +1425,42 @@ class DatabaseApp:
         except Exception as e:
             messagebox.showerror("Error", str(e))
 
-    def buscar_descripcion(self):
+    def buscar_descripcion(self, event=None):
         """Obtiene la descripción y actualiza el campo correspondiente"""
         codigo = self.cod_producto.get().strip()
         clean_codigo = re.sub(r'\D', '', codigo)  # Limpieza del código
-        
+    
         try:
             if not clean_codigo:
                 self.actualizar_descripcion("Código no ingresado")
                 return
-
             # Actualizar campo de código con versión limpia
             if clean_codigo != codigo:
                 self.cod_producto.delete(0, tk.END)
                 self.cod_producto.insert(0, clean_codigo)
-
-            # Consultar descripción
-            query = "SELECT C_DESCRI FROM dbo.MA_PRODUCTOS WHERE C_CODIGO = ?"
-            result = self.db_manager.fetch_data(query, (clean_codigo,))
-            descripcion = result[0][0] if result else "Descripción no encontrada"
-            self.actualizar_descripcion(descripcion)
-
-             # Consultar cantidad
-            query_cantidad = "SELECT n_cantidad FROM dbo.MA_DEPOPROD WHERE c_codarticulo = ? AND c_coddeposito = '0301'"
-            result_cantidad = self.db_manager.fetch_data(query_cantidad, (clean_codigo,))
-            if result_cantidad and result_cantidad[0][0] > 0:
-                cantidad = int(result_cantidad[0][0])
-                self.show_temp_notification(f"Cantidad: {cantidad}")
+        
+            # Usar método reutilizable
+            descripcion = self.obtener_descripcion_producto(clean_codigo)
+            if descripcion:
+                self.actualizar_descripcion(descripcion)
+                print(f"Descripción: {descripcion}")
             else:
-                self.show_temp_notification(f"Cantidad no disponible o igual a 0")  
+                self.actualizar_descripcion("Descripción no encontrada")
+
+            # Validar stock usando el método reutilizable
+            if self.validar_stock_producto(clean_codigo):
+                stock_result = self.db_manager.fetch_data(
+                    "SELECT n_cantidad FROM MA_DEPOPROD WHERE c_codarticulo = ? AND c_coddeposito = '0301'",
+                    (clean_codigo,)
+                )
+                cantidad = int(stock_result[0][0]) if stock_result else 0
+                self.show_temp_notification(f"Stock disponible: {cantidad} unidades ✅")
+            else:
+                self.show_temp_notification("No disponible o igual a 0 ❌")
             
         except Exception as e:
             self.actualizar_descripcion("Error en consulta")
-            messagebox.showerror("Error", f"Error obteniendo descripción: {str(e)}")
+            messagebox.showerror("Error", f"Error obteniendo datos: {str(e)}")
     
                        
     def on_tree_double_click(self, event):
@@ -1410,7 +1537,59 @@ class DatabaseApp:
         except Exception as e:
             messagebox.showerror("Error", f"Error obteniendo descripción o cantidad: {str(e)}")
 
-    def procesar_envio(self):
+    def procesar_envio_programado(self, id_envio, numero_cliente):
+        """Envía un mensaje programado y actualiza el estado en la base de datos"""
+        try:
+            # 1. Obtener código de producto asociado al cliente
+            codigo = self.obtener_codigo_producto_cliente(numero_cliente)
+            if not codigo:
+                self.log(f"Cliente {numero_cliente} sin producto asociado", "ERROR")
+                return False
+
+            # 2. Validar stock en depósito 0301
+            stock_result = self.db_manager.fetch_data(
+                "SELECT n_cantidad FROM MA_DEPOPROD WHERE c_codarticulo = ? AND c_coddeposito = '0301'",
+                (codigo,)
+            )
+            if not stock_result or stock_result[0][0] <= 0:
+                self.log(f"Sin stock para cliente {numero_cliente}", "WARNING")
+                return False
+
+            # 3. Obtener descripción del producto
+            descripcion = self.obtener_descripcion_producto(codigo)
+            if not descripcion:
+                self.log(f"Descripción no encontrada para código {codigo}", "ERROR")
+                return False
+
+            # 4. Enviar mensaje por WhatsApp
+            if self.enviar_mensaje_whatsapp(numero_cliente, [descripcion]):
+                # 5. Actualizar estado del envío programado
+                self.db_manager.execute_query(
+                    "UPDATE envios_programados SET estado = 'ENVIADO' WHERE id = ?",
+                    (id_envio,)
+                )
+                self.audit_log.log_event(
+                    "ENVIO_PROGRAMADO_EXITOSO",
+                    os.getlogin(),
+                    f"ID {id_envio} - Cliente {numero_cliente}"
+                )
+                return True
+
+            return False
+
+        except Exception as e:
+            self.log(f"Error en envío programado ID {id_envio}: {str(e)}", "ERROR")
+            self.audit_log.log_event(
+                "ENVIO_PROGRAMADO_ERROR",
+                os.getlogin(),
+                "FAILED",
+                error_code=ErrorCode.WHATSAPP_API_FAILURE
+            )
+            return False
+
+
+    def procesar_envio_masivo(self,):
+
         try:
             if self.actual == 0:
                 # Crear tabla temporal si no existe
@@ -1474,127 +1653,126 @@ class DatabaseApp:
         self.actual += 1
         self.progress["value"] = self.actual
         self.lbl_progreso.config(text=mensaje_estado)
-        self.root.after(7000, self.procesar_envio)
+        self.root.after(7000, self.procesar_envio_masivo)
 
-    def enviar_mensaje_whatsapp(self, numero_cliente, descripcion):
-        if not self.cred_manager.get_whatsapp_token():
-            self.update_status('api_error', message="Token no configurado")
-            return
-        whatsapp_token = self.cred_manager.get_whatsapp_token()
-        if not whatsapp_token:
-            self.audit_log.log_event(
-                "WHATSAPP_API_ERROR", os.getlogin(), "FAILED",
-                ErrorCode.INVALID_API_TOKEN
-            )
-            messagebox.showerror("Error", str(ErrorCode.INVALID_API_TOKEN))
-            self.show_settings()
-            return
-        
-        if not whatsapp_token:
-            self.show_settings()
-            self.update_status('error', message="Token de WhatsApp no configurado")
-            return
-    
-        # Añadir debug
-        self.log(f"Token usado: {whatsapp_token[:8]}...", "DEBUG") 
-        
-        # Formatear número telefónico (eliminar caracteres no numéricos)
-        numero_limpio = re.sub(r'\D', '', numero_cliente)
-        # Si el número inicia con '0', se elimina dicho dígito
-        if numero_limpio.startswith('0'):
-            numero_limpio = numero_limpio[1:]
-        numero_formateado = '58' + numero_limpio
-    
+    def enviar_mensaje_whatsapp(self, numero_cliente: str, productos: list = None) -> bool:
+        """Envía mensaje por WhatsApp usando plantilla con lista de productos"""
         try:
-            MAX_LENGTH_PER_ITEM = 45  # Deja espacio para número de secuencia
-            MAX_ITEMS = 10  # Máximo de productos por mensaje
-            MAX_TOTAL_LENGTH = 1024 #Limite de Whatsapp
-            SEPARADOR = "  •  "  # Usar espacios y viñeta simple
-
-        # Procesar descripciones
-            productos_limpios = []
-            adicionales = len(descripcion) - MAX_ITEMS if len(descripcion) > MAX_ITEMS else 0
-
-            
-
-            for idx, desc in enumerate(descripcion[:MAX_ITEMS], 1):
-                clean_desc = re.sub(r'[\n\t]', ' ', desc)
-
-                truncated = (clean_desc[:MAX_LENGTH_PER_ITEM-3] + '...') if len(clean_desc) > MAX_LENGTH_PER_ITEM else clean_desc
-                productos_limpios.append(f"{idx}. {truncated}")
-
-            # Unir todos los items con separador
-            lista_productos = SEPARADOR.join(productos_limpios)
-
-            if adicionales > 0:
-                lista_productos += f"{SEPARADOR}... (+{adicionales} productos más)"
-
+            # 1. Obtener productos si no se proporcionan
+            if productos is None:
+                codigo = self.obtener_codigo_producto_cliente(numero_cliente)
+                if not codigo:
+                    self.log(f"Cliente {numero_cliente} sin producto asociado", "ERROR")
+                    return False
                 
-            # Configuración de la API
-            url = "https://graph.facebook.com/v21.0/490677417472051/messages"
-            token = whatsapp_token   
-        
-            headers = {
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json"
-            }
-        
-        # Construir el mensaje de texto simple
+                descripcion = self.obtener_descripcion_producto(codigo)
+                productos = [descripcion] if descripcion else []
+
+            # 2. Validar token
+            whatsapp_token = self.cred_manager.get_whatsapp_token()
+            if not whatsapp_token:
+                self.update_status('api_error', message="Token no configurado")
+                self.audit_log.log_event(
+                    "WHATSAPP_API_ERROR", 
+                    os.getlogin(), 
+                    "FAILED",
+                    ErrorCode.INVALID_API_TOKEN
+                )
+                messagebox.showerror("Error", str(ErrorCode.INVALID_API_TOKEN))
+                self.show_settings()
+                return False
+
+            # 3. Formatear número telefónico
+            numero_limpio = re.sub(r'\D', '', numero_cliente)
+            if numero_limpio.startswith('0'):
+                numero_limpio = numero_limpio[1:]
+            numero_formateado = '58' + numero_limpio
+
+            # 4. Construir lista de productos para plantilla
+            MAX_ITEMS = 10
+            MAX_LENGTH = 45
+            SEPARADOR = " • "
+            
+            items_procesados = []
+            for idx, producto in enumerate(productos[:MAX_ITEMS], 1):
+                # Limpiar y truncar descripción
+                producto_limpio = re.sub(r'[\n\t]', ' ', str(producto))
+                if len(producto_limpio) > MAX_LENGTH:
+                    producto_limpio = producto_limpio[:MAX_LENGTH-3] + "..."
+                
+                items_procesados.append(f"{idx}. {producto_limpio}")
+
+            # 5. Construir texto final
+            texto_plantilla = SEPARADOR.join(items_procesados)
+            if len(productos) > MAX_ITEMS:
+                texto_plantilla += f"{SEPARADOR}... (+{len(productos) - MAX_ITEMS} productos más)"
+
+            # 6. Configurar payload para plantilla
             payload = {
                 "messaging_product": "whatsapp",
                 "to": numero_formateado,
                 "type": "template",
                 "template": {
-                    "name": "alerta_stock",  # Nombre de tu plantilla aprobada
-                    "language": {
-                        "code": "es"  # Código de idioma, ajusta según sea necesario
-                    },
-                    "components": [
-                        {
-                            "type": "body",
-                            "parameters": [
-                                {
-                                    "type": "text",
-                                    "text": lista_productos  # Este valor reemplazará el marcador {{1}} en tu plantilla
-                                }
-                            ]
-                        }
-                    ]
+                    "name": "alerta_stock",
+                    "language": {"code": "es"},
+                    "components": [{
+                        "type": "body",
+                        "parameters": [{
+                            "type": "text",
+                            "text": texto_plantilla
+                        }]
+                    }]
                 }
             }
-        
-            response = requests.post(url, headers=headers, json=payload)
-            self.log("Respuesta API:", response.json())
+
+            # 7. Enviar solicitud a la API
+            headers = {
+                "Authorization": f"Bearer {whatsapp_token}",
+                "Content-Type": "application/json"
+            }
             
-            if response.status_code != 200:
-                self.log("Error en API:", response.json(), "ERROR")
-                error_data = response.json().get('error', {})
-                error_msg = error_data.get('message', 'Error desconocido')
-                error_details = error_data.get('error_data', {}).get('details', '')
-                raise Exception(f"API Error:({error_msg}) - {error_details}")
-        
-            # Registrar en auditoría
-            self.audit_log.log_event(
-                "ENVIO_MASIVO", 
-                os.getlogin(), 
-                f"Enviado a {numero_formateado}"
+            response = requests.post(
+                "https://graph.facebook.com/v21.0/490677417472051/messages",
+                headers=headers,
+                json=payload
             )
-    
+
+            # 8. Manejar respuesta
+            if response.status_code == 200:
+                self.log(f"Mensaje enviado a {numero_formateado}", "SUCCESS")
+                self.audit_log.log_event(
+                    "ENVIO_EXITOSO",
+                    os.getlogin(),
+                    f"Cliente: {numero_formateado} | Productos: {len(productos)}"
+                )
+                return True
+                f
+            error_data = response.json().get('error', {})
+            error_msg = error_data.get('message', 'Error desconocido')
+            error_code = error_data.get('code', 'DESCONOCIDO')
+            
+            self.log(f"Error API ({error_code}): {error_msg}", "ERROR")
+            messagebox.showerror("Error API", f"{error_code}: {error_msg}")
+            return False
+
         except Exception as e:
+            self.log(f"Error crítico al enviar mensaje: {str(e)}", "ERROR")
             self.audit_log.log_event(
-                "ENVIO_MASIVO_ERROR",
+                "ERROR_ENVIO",
                 os.getlogin(),
-                f"enviado a {numero_formateado}: {str(e)}"
+                "CRITICAL",
+                error_code=ErrorCode.WHATSAPP_API_FAILURE
             )
-            messagebox.showerror("Error", f"{str(e)}")
+            return False
            
-    def actualizar_descripcion(self, texto):
+    def actualizar_descripcion(self, texto: str):
         self.descripcion.config(state='normal')
         self.descripcion.delete(0, tk.END)
         self.descripcion.insert(0, texto)
         self.descripcion.config(state='readonly')
+        self.descripcion.update_idletasks()
 
 if __name__ == "__main__":
     root = tk.Tk()
     app = DatabaseApp(root)
-    root.mainloop()
+    root.mainloop() 

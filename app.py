@@ -76,6 +76,7 @@ class ProgramadorEnvios:
                     "WHERE fecha_programada <= ? AND estado = 'PENDIENTE'",
                     (ahora,)
                 )
+                self.app.log(f"Envíos pendientes encontrados: {len(pendientes)}", "DEBUG")
 
                 for envio in pendientes:
                     id_envio, numero_cliente = envio
@@ -311,16 +312,24 @@ class DatabaseManager:
 
     def create_table(self):
         try:
+            # Crear tabla clientes con índices
             self.cursor.execute("""
                 IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='clientes' AND xtype='U')
                 CREATE TABLE clientes (
                     id INT IDENTITY(1,1) PRIMARY KEY,
                     numero_cliente NVARCHAR(50) NOT NULL,
                     C_CODIGO NVARCHAR(15) NOT NULL
-                )
+                );
+
+                IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name='idx_clientes_numero')
+                CREATE INDEX idx_clientes_numero ON clientes (numero_cliente);
+                
+                IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name='idx_clientes_codigo')
+                CREATE INDEX idx_clientes_codigo ON clientes (C_CODIGO);
             """)
             self.conn.commit()
 
+            # Crear tabla envios_programados con índices
             self.cursor.execute("""
                 IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='envios_programados' AND xtype='U')
                 CREATE TABLE envios_programados (
@@ -329,7 +338,13 @@ class DatabaseManager:
                     fecha_programada DATETIME NOT NULL,
                     fecha_creacion DATETIME DEFAULT GETDATE(),
                     estado NVARCHAR(20) DEFAULT 'PENDIENTE'
-                )
+                );
+
+                IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name='idx_envios_fecha_estado')
+                CREATE INDEX idx_envios_fecha_estado ON envios_programados (fecha_programada, estado);
+                
+                IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name='idx_envios_numero')
+                CREATE INDEX idx_envios_numero ON envios_programados (numero_cliente);
             """)
             self.conn.commit()
 
@@ -926,6 +941,14 @@ class DatabaseApp:
             password = self.pwd_entry.get()
             token = self.token_entry.get()
 
+            ahora = datetime.now()
+            pendientes = self.db_manager.fetch_data(
+                    "SELECT id, numero_cliente FROM envios_programados "
+                    "WHERE fecha_programada <= ? AND estado = 'PENDIENTE'",
+                    (ahora,)
+                )
+            
+
             if not server:
                 messagebox.showwarning("Error", "El campo Servidor es obligatorio")
                 return
@@ -941,6 +964,7 @@ class DatabaseApp:
                 self.update_status('connected', server=server, api_token=token)
                 self.settings_window.destroy()
                 self.log("Conexión a BD exitosa", "SUCCESS")
+                self.log(f"Envíos pendientes encontrados: {len(pendientes)}", "DEBUG")
                 self.show_temp_notification("Conexión exitosa")
                 self.search_records()
             

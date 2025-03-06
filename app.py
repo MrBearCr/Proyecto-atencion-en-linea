@@ -16,10 +16,13 @@ import socket
 import http.server
 import socketserver
 import threading
-from tkcalendar import Calendar
-from datetime import datetime
+from tkcalendar import Calendar, DateEntry
+from datetime import datetime, timedelta
 import requests
 from enum import Enum
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
 
 
 CONFIG_FILE = 'db_config.ini'
@@ -82,19 +85,23 @@ class ProgramadorEnvios:
                     id_envio, numero_cliente = envio
                     self.app.procesar_envio_programado(id_envio, numero_cliente)
 
+                    self.verificar_recordatorios()
+
             except Exception as e:
                 self.app.log(f"Error en programador: {str(e)}", "ERROR")
             time.sleep(60)
 
-    def procesar_envio(self, id_envio, numero_cliente):
-        try:
-            if self.app.enviar_mensaje_whatsapp(numero_cliente):
-                self.db_manager.execute_query(
-                    "UPDATE envios_programados SET estado = 'ENVIADO' WHERE id = ?",
-                    (id_envio,)
-                )
-        except Exception as e:
-            self.app.log(f"Error enviando programado ID {id_envio}: {str(e)}", "ERROR")
+  
+    def verificar_recordatorios(self):
+        ahora = datetime.now()
+        recordatorios = self.db_manager.fetch_data(
+        "SELECT id, numero_cliente, tipo_envio FROM envios_programados "
+        "WHERE fecha_programada BETWEEN ? AND ? AND estado = 'PENDIENTE'",
+        (ahora, ahora + timedelta(hours=24)))
+    
+        for id_envio, numero_cliente, tipo_envio in recordatorios:
+            self.log(f"Enviando recordatorio ({tipo_envio}) a {numero_cliente}", "INFO")
+            self.enviar_mensaje_whatsapp(numero_cliente, tipo_envio=tipo_envio)
 
 class ErrorCode(Enum):
     # Errores de base de datos (1000-1999)
@@ -331,21 +338,38 @@ class DatabaseManager:
 
             # Crear tabla envios_programados con índices
             self.cursor.execute("""
-                IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='envios_programados' AND xtype='U')
+            IF NOT EXISTS (
+            SELECT * FROM sys.tables 
+            WHERE name = 'envios_programados' AND type = 'U'
+            )
                 CREATE TABLE envios_programados (
                     id INT IDENTITY(1,1) PRIMARY KEY,
                     numero_cliente NVARCHAR(50) NOT NULL,
                     fecha_programada DATETIME NOT NULL,
                     fecha_creacion DATETIME DEFAULT GETDATE(),
-                    estado NVARCHAR(20) DEFAULT 'PENDIENTE'
+                    estado NVARCHAR(20) DEFAULT 'PENDIENTE',
+                    tipo_envio NVARCHAR(20) NOT NULL 
+                    CHECK (tipo_envio IN ('ENTREGA', 'DISPONIBILIDAD'))
                 );
-
-                IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name='idx_envios_fecha_estado')
-                CREATE INDEX idx_envios_fecha_estado ON envios_programados (fecha_programada, estado);
-                
-                IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name='idx_envios_numero')
-                CREATE INDEX idx_envios_numero ON envios_programados (numero_cliente);
             """)
+
+            self.cursor.execute("""
+                IF NOT EXISTS (
+                    SELECT * FROM sys.indexes 
+                    WHERE name = 'idx_envios_fecha_estado'
+                )
+                CREATE INDEX idx_envios_fecha_estado 
+                ON envios_programados (fecha_programada, estado);
+                """)
+
+            self.cursor.execute("""
+            IF NOT EXISTS (
+                SELECT * FROM sys.indexes 
+                WHERE name = 'idx_envios_numero'
+            )
+            CREATE INDEX idx_envios_numero 
+            ON envios_programados (numero_cliente);
+        """)
             self.conn.commit()
 
         except pyodbc.Error as e:
@@ -444,6 +468,14 @@ class DatabaseApp:
         except Exception as e:
             self.log(f"Error obteniendo código de producto: {str(e)}", "ERROR")
             return None
+    
+    def buscar_por_fecha(self):
+        query = "SELECT * FROM envios_programados WHERE fecha_programada BETWEEN ? AND ?"
+        params = (self.fecha_inicio.get_date(), self.fecha_fin.get_date())
+        records = self.db_manager.fetch_data(query, params)
+        self.tree.delete(*self.tree.get_children())
+        for row in records:
+            self.tree.insert("", tk.END, values=row)
         
     def create_gradient_header(self):
         """Genera un degradado suave de azul corporativo"""
@@ -603,7 +635,46 @@ class DatabaseApp:
         self.messaging_tab = ttk.Frame(self.main_notebook)
         self.main_notebook.add(self.messaging_tab, text="Mensajería")
         self.setup_messaging_tab()
+
+        # Pestaña de Estadísticas
+        self.stats_tab = ttk.Frame(self.main_notebook)
+        self.main_notebook.add(self.stats_tab, text="📊 Estadísticas")
+        self.setup_stats_tab()  # Nuevo método para configurar la pestaña
     
+    def setup_stats_tab(self):
+        self.stats_frame = ttk.Frame(self.stats_tab)
+        self.stats_frame.pack(fill=tk.BOTH, expand=True)
+    
+        # Botón para actualizar gráficos
+        ttk.Button(
+            self.stats_frame, 
+            text="Actualizar Gráficos", 
+            command=self.mostrar_estadisticas
+        ).pack(pady=10)
+    
+        # Contenedor para gráficos
+        self.graph_container = ttk.Frame(self.stats_frame)
+        self.graph_container.pack(fill=tk.BOTH, expand=True)
+
+    def mostrar_estadisticas(self):
+        # Limpiar gráficos anteriores
+        for widget in self.graph_container.winfo_children():
+            widget.destroy()
+    
+        # Gráfico 1: Envíos por estado
+        data = self.db_manager.fetch_data(
+            "SELECT tipo_envio, COUNT(*) FROM envios_programados GROUP BY tipo_envio"
+        )
+        if data:
+            tipos, cantidades = zip(*data)
+            fig, ax = plt.subplots(figsize=(6, 3))
+            ax.pie(cantidades, labels=tipos, autopct='%1.1f%%', colors=['#4CAF50', '#2196F3'])
+            ax.set_title("Distribución de Tipos de Envío")
+        
+            canvas = FigureCanvasTkAgg(fig, self.graph_container)
+            canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+            canvas.draw()
+
     def show_records_view(self):
         self.main_notebook.select(self.records_tab)
 
@@ -661,34 +732,54 @@ class DatabaseApp:
 
     def mostrar_ventana_programacion(self):
         ventana = tk.Toplevel(self.root)
-        ventana.title("Programar Envío Masivo")
-    
+        ventana.title("Programar Envío")
+        ventana.geometry("400x310")  # Tamaño fijo para garantizar espacio
+
+        # Configurar grid para mejor organización
+        ventana.grid_columnconfigure(0, weight=1)
+        ventana.grid_columnconfigure(1, weight=1)
+
         # Selector de fecha/hora
-        ttk.Label(ventana, text="Fecha/Hora Programada:").grid(row=0, column=0, padx=5, pady=5)
-        calendario = Calendar(ventana, selectmode='day')
-        calendario.grid(row=0, column=1, padx=5, pady=5)
+        ttk.Label(ventana, text="Fecha/Hora:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        calendario = Calendar(ventana, selectmode='day', date_pattern='mm/dd/y')
+        calendario.grid(row=0, column=1, padx=5, pady=5, columnspan=2)
 
         # Selector de hora
-        ttk.Label(ventana, text="Hora:").grid(row=1, column=0, padx=5, pady=5)
+        ttk.Label(ventana, text="Hora:").grid(row=1, column=0, padx=5, pady=5, sticky="w")
         spin_hora = ttk.Spinbox(ventana, from_=0, to=23, width=5)
-        spin_hora.grid(row=1, column=1, padx=5, pady=5)
+        spin_hora.grid(row=1, column=1, padx=5, pady=5, sticky="w")
         spin_minuto = ttk.Spinbox(ventana, from_=0, to=59, width=5)
-        spin_minuto.grid(row=1, column=2, padx=5, pady=5)
+        spin_minuto.grid(row=1, column=2, padx=5, pady=5, sticky="w")
+
+        # Selector de tipo de envío (nueva fila)
+        ttk.Label(ventana, text="Tipo:").grid(row=2, column=0, padx=5, pady=5, sticky="w")
+        tipo_frame = ttk.Frame(ventana)
+        tipo_frame.grid(row=2, column=1, columnspan=2, sticky="ew")
     
-    
-        ttk.Button(ventana, text="Programar", 
-             command=lambda: self.guardar_envio_programado(
-                 calendario.get_date(),
-                 spin_hora.get(),
-                 spin_minuto.get()
-             )).grid(row=2, columnspan=3, pady=10)
+        self.tipo_envio_var = tk.StringVar(value="ENTREGA")
+        ttk.Radiobutton(tipo_frame, text="Entrega", variable=self.tipo_envio_var, value="ENTREGA").pack(side=tk.LEFT, padx=10)
+        ttk.Radiobutton(tipo_frame, text="Disponibilidad", variable=self.tipo_envio_var, value="DISPONIBILIDAD").pack(side=tk.LEFT)
+
+        # Botón en fila separada
+        btn_frame = ttk.Frame(ventana)
+        btn_frame.grid(row=3, column=0, columnspan=3, pady=10)
+        ttk.Button(
+            btn_frame, 
+            text="Programar", 
+            command=lambda: self.guardar_envio_programado(
+                calendario.get_date(),
+                spin_hora.get(),
+                spin_minuto.get(),
+                self.tipo_envio_var.get()
+            )
+        ).pack(padx=10, ipadx=20)
         
-    def guardar_envio_programado(self, fecha, hora, minuto,):
+    def guardar_envio_programado(self, fecha, hora, minuto, tipo_envio):
         try:
             # Construir datetime
             fecha_completa = datetime.strptime(
-            f"{fecha} {hora.zfill(2)}:{minuto.zfill(2)}:00.000",
-            "%m/%d/%y %H:%M:%S.%f"  # Formato con milisegundos
+            f"{fecha} {hora.zfill(2)}:{minuto.zfill(2)}:00",
+            "%m/%d/%Y %H:%M:%S"  
             )
 
             result = self.db_manager.fetch_data("SELECT TOP 1 numero_cliente FROM clientes")  # Ajusta según el criterio
@@ -696,22 +787,17 @@ class DatabaseApp:
                 messagebox.showerror("Error", "No hay clientes registrados para programar el envío.")
                 return
 
-            numero_cliente = result[0][0]  # Obtener el primer número de cliente disponible
+            numero_cliente = result[0][0]  # Asume que hay al menos un cliente
 
-
-            if not self.db_manager.table_exists("envios_programados"):
-                self.db_manager.create_table()
-        
-            # Registrar en la base de datos
+        # Insertar con TODOS los parámetros requeridos
             self.db_manager.execute_query(
-                "INSERT INTO envios_programados (numero_cliente, fecha_programada, estado) VALUES (?, ?, 'PENDIENTE')",
-                (numero_cliente, fecha_completa)
-            )
-            self.show_temp_notification("Envío programado guardado✅")
+                "INSERT INTO envios_programados (numero_cliente, fecha_programada, tipo_envio, estado) VALUES (?, ?, ?, 'PENDIENTE')",  # 3 "?"
+                (numero_cliente, fecha_completa, tipo_envio)  # 3 valores
+            )   
+            self.show_temp_notification("✅ Envío programado guardado")
         
         except Exception as e:
             messagebox.showerror("Error", f"Error de programación: {str(e)}")
-
     def limpiar_logs(self):
         self.logs_text.delete('1.0', tk.END)
         self.log_counter = 0
@@ -857,6 +943,24 @@ class DatabaseApp:
             btn = ttk.Button(btn_frame, text=text, command=cmd)
             btn.pack(side=tk.LEFT, padx=2, fill=tk.X, expand=True)
             self.buttons[key] = btn
+
+        # Filtro por fecha
+        fecha_frame = ttk.Frame(parent)
+        fecha_frame.pack(fill=tk.X, pady=5)
+    
+        ttk.Label(fecha_frame, text="Desde:").pack(side=tk.LEFT)
+        self.fecha_inicio = DateEntry(fecha_frame)
+        self.fecha_inicio.pack(side=tk.LEFT, padx=5)
+        
+        ttk.Label(fecha_frame, text="Hasta:").pack(side=tk.LEFT)
+        self.fecha_fin = DateEntry(fecha_frame)
+        self.fecha_fin.pack(side=tk.LEFT, padx=5)
+    
+        ttk.Button(
+            fecha_frame, 
+            text="Filtrar por Fecha", 
+            command=self.buscar_por_fecha
+        ).pack(side=tk.RIGHT)
 
     def create_records_list(self, parent):
         # Treeview
@@ -1564,8 +1668,19 @@ class DatabaseApp:
     def procesar_envio_programado(self, id_envio, numero_cliente):
         """Envía un mensaje programado y actualiza el estado en la base de datos"""
         try:
+            envio_data = self.db_manager.fetch_data(
+                "SELECT tipo_envio FROM envios_programados WHERE id = ?", 
+                (id_envio,)
+            )
+
+            tipo_envio = envio_data[0][0] if envio_data else None
+
+            if tipo_envio in ("ENTREGA", "DISPONIBILIDAD"):
+                return self.enviar_mensaje_whatsapp(numero_cliente, tipo_envio=tipo_envio)
+            else:
+
             # 1. Obtener código de producto asociado al cliente
-            codigo = self.obtener_codigo_producto_cliente(numero_cliente)
+                codigo = self.obtener_codigo_producto_cliente(numero_cliente)
             if not codigo:
                 self.log(f"Cliente {numero_cliente} sin producto asociado", "ERROR")
                 return False
@@ -1679,7 +1794,7 @@ class DatabaseApp:
         self.lbl_progreso.config(text=mensaje_estado)
         self.root.after(7000, self.procesar_envio_masivo)
 
-    def enviar_mensaje_whatsapp(self, numero_cliente: str, productos: list = None) -> bool:
+    def enviar_mensaje_whatsapp(self, numero_cliente: str, productos: list = None, tipo_envio: str) -> bool:
         """Envía mensaje por WhatsApp usando plantilla con lista de productos"""
         try:
             # 1. Obtener productos si no se proporcionan

@@ -76,6 +76,7 @@ class ProgramadorEnvios:
                     "WHERE fecha_programada <= ? AND estado = 'PENDIENTE'",
                     (ahora,)
                 )
+                self.app.log(f"Envíos pendientes encontrados: {len(pendientes)}", "DEBUG")
 
                 for envio in pendientes:
                     id_envio, numero_cliente = envio
@@ -407,42 +408,30 @@ class DatabaseApp:
         self.help_tooltips = self.HelpTooltips(self.root)  # Corregido
         self.setup_tooltips()
 
-    def obtener_clientes_con_productos(self):
-        """Obtiene todos los clientes con sus productos asociados usando JOIN."""
+    def obtener_descripcion_producto(self, codigo: str) -> Optional[str]:
+        """Obtiene la descripción de un producto desde la base de datos."""
         try:
-            query = """
-                SELECT 
-                    c.numero_cliente, 
-                    c.C_CODIGO,
-                    p.C_DESCRI,
-                    d.n_cantidad
-                FROM clientes c
-                INNER JOIN MA_PRODUCTOS p ON c.C_CODIGO = p.C_CODIGO
-                LEFT JOIN MA_DEPOPROD d ON p.C_CODIGO = d.c_codarticulo AND d.c_coddeposito = '0301'
-            """
-            return self.db_manager.fetch_data(query)
+            result = self.db_manager.fetch_data(
+                "SELECT C_DESCRI FROM MA_PRODUCTOS WHERE C_CODIGO = ?", 
+                (codigo,)
+            )
+            # Devolver cadena directamente, sin formateo adicional
+            return str(result[0][0]) if result and result[0][0] else None
         except Exception as e:
-            self.log(f"Error obteniendo clientes: {str(e)}", "ERROR")
-        return []
-
-    def obtener_info_producto(self, codigo: str) -> tuple:
-        """Obtiene descripción y stock en una sola consulta."""
-        try:
-            result = self.db_manager.fetch_data("""
-                SELECT 
-                    P.C_DESCRI, 
-                    CAST(D.n_cantidad AS INT) AS stock  # Convertir a entero
-                FROM MA_PRODUCTOS P
-                LEFT JOIN MA_DEPOPROD D 
-                    ON P.C_CODIGO = D.c_codarticulo 
-                    AND D.c_coddeposito = '0301'
-                WHERE P.C_CODIGO = ?
-            """, (codigo,))
+            self.log(f"Error obteniendo descripción: {str(e)}", "ERROR")
+            return None
         
-            return (result[0][0], result[0][1]) if result else (None, 0)
+    def validar_stock_producto(self, codigo: str) -> bool:
+        """Valida si un producto tiene stock en el depósito 0301."""
+        try:
+            result = self.db_manager.fetch_data(
+                "SELECT n_cantidad FROM MA_DEPOPROD WHERE c_codarticulo = ? AND c_coddeposito = '0301'",
+                (codigo,)
+            )
+            return result and result[0][0] > 0
         except Exception as e:
-            self.log(f"Error obteniendo info producto: {str(e)}", "ERROR")
-            return (None, 0)
+            self.log(f"Error validando stock: {str(e)}", "ERROR")
+            return False
         
     def obtener_codigo_producto_cliente(self, numero_cliente: str) -> Optional[str]:
         """Obtiene el código de producto asociado a un cliente."""
@@ -456,6 +445,32 @@ class DatabaseApp:
             self.log(f"Error obteniendo código de producto: {str(e)}", "ERROR")
             return None
         
+    def create_gradient_header(self):
+        """Genera un degradado suave de azul corporativo"""
+        width = 1200  # Ancho de la ventana
+        height = 50   # Altura del encabezado
+    
+        self.bg_image = tk.PhotoImage(width=width, height=height)
+    
+        # Colores base
+        start_color = (0, 76, 151)    # #004C97
+        end_color = (0, 45, 92)       # #002D5C
+    
+        # Generar degradado vertical
+        for y in range(height):
+        # Calcular interpolación de color
+            r = start_color[0] + (end_color[0] - start_color[0]) * y // height
+            g = start_color[1] + (end_color[1] - start_color[1]) * y // height
+            b = start_color[2] + (end_color[2] - start_color[2]) * y // height
+        
+            # Crear línea horizontal con el color calculado
+            color = f"#{r:02x}{g:02x}{b:02x}"
+            self.bg_image.put(color, (0, y, width, y+1))
+
+        # Aplicar al frame del encabezado
+        self.style.element_create("Header.TFrame", "image", self.bg_image)
+        self.style.configure("Header.TFrame", background="#004C97")
+
     def setup_styles(self):
         self.style = ttk.Style()
         self.style.theme_create("modern", parent="alt", settings={
@@ -481,11 +496,23 @@ class DatabaseApp:
                       background=[("active", "#004C97"), ("!active", "#e9ecef")],
                       foreground=[("active", "white")])
         
+
+        
+
         self.style.configure("Disabled.TButton", 
                        foreground="#666666",
                        background="#e0e0e0")
-      
-        
+        self.style.configure(
+            "HeaderMenu.TMenubutton",
+            background="#004C97",
+            foreground="white",
+            font=("Segoe UI", 12),
+            relief="flat"
+        )
+        self.style.map("HeaderMenu.TMenubutton",
+            background=[("active", "#0066CC")],  # Color al hacer hover
+            foreground=[("active", "white")]
+        )
 
     def setup_bindings(self):
         """Configurar eventos del teclado y widgets"""
@@ -512,21 +539,42 @@ class DatabaseApp:
               foreground=[('active', '#003f7e')])
 
     def create_header(self):
-        header = ttk.Frame(self.root, style="Header.TFrame")
-        header.pack(fill=tk.X, padx=10, pady=5)
-        
-        # Logo y título
-        ttk.Label(header, text="⚡", font=("Segoe UI", 24)).pack(side=tk.LEFT, padx=10)
-        ttk.Label(header, text="Gestión de Clientes", 
-                font=("Segoe UI", 16, "bold")).pack(side=tk.LEFT)
+        # Crear canvas para efectos avanzados
+        header_canvas = tk.Canvas(
+            self.root, 
+            bg="#004C97",
+            height=80,
+            highlightthickness=0
+        )
+        header_canvas.pack(fill=tk.X)
+    
+        # Generar degradado
+        for i in range(80):
+            intensity = i / 80
+            r = int(0 * (1 - intensity) + 0 * intensity)
+            g = int(76 * (1 - intensity) + 45 * intensity)
+            b = int(151 * (1 - intensity) + 92 * intensity)
+            color = f"#{r:02x}{g:02x}{b:02x}"
+            header_canvas.create_line(0, i, 2000, i, fill=color)
+    
+        # Añadir texto
+        text_y = 80 // 2
+        header_canvas.create_text(
+            20, 
+            text_y,
+            text="Gestión de Clientes",
+            fill="white",
+            font=("Segoe UI", 14, "bold"),
+            anchor="w"
+        )
         
         # Menú de usuario
-        self.user_menu = ttk.Menubutton(header, text="☰", style="Nav.TButton")
+        self.user_menu = ttk.Menubutton(header_canvas, text="☰", style="HeaderMenu.TMenubutton")
         menu = tk.Menu(self.user_menu, tearoff=0)
         menu.add_command(label="Configuración", command=self.show_settings)
         menu.add_command(label="Salir", command=self.root.quit)
         self.user_menu['menu'] = menu
-        self.user_menu.pack(side=tk.RIGHT, padx=10)
+        self.user_menu.pack(side=tk.RIGHT, padx=20, pady=10)
 
     def create_sidebar(self):
         sidebar = ttk.Frame(self.root, width=250, style="Sidebar.TFrame")
@@ -893,6 +941,14 @@ class DatabaseApp:
             password = self.pwd_entry.get()
             token = self.token_entry.get()
 
+            ahora = datetime.now()
+            pendientes = self.db_manager.fetch_data(
+                    "SELECT id, numero_cliente FROM envios_programados "
+                    "WHERE fecha_programada <= ? AND estado = 'PENDIENTE'",
+                    (ahora,)
+                )
+            
+
             if not server:
                 messagebox.showwarning("Error", "El campo Servidor es obligatorio")
                 return
@@ -908,6 +964,7 @@ class DatabaseApp:
                 self.update_status('connected', server=server, api_token=token)
                 self.settings_window.destroy()
                 self.log("Conexión a BD exitosa", "SUCCESS")
+                self.log(f"Envíos pendientes encontrados: {len(pendientes)}", "DEBUG")
                 self.show_temp_notification("Conexión exitosa")
                 self.search_records()
             
@@ -1259,22 +1316,19 @@ class DatabaseApp:
             
     
         try:
-            records = self.obtener_clientes_con_productos()
-            if not records:
-                messagebox.showinfo("Info", "No hay clientes para notificar")
-                return         
+            records = self.db_manager.fetch_data("SELECT numero_cliente, C_CODIGO FROM clientes")
+            
             # Agrupar clientes
             clientes_con_error = set()
 
-            clientes_agrupados = {}
-            for numero, codigo, descripcion, stock in records:
-                if stock > 0:  # Solo incluir productos con stock
-                    if numero not in clientes_agrupados:
-                        clientes_agrupados[numero] = []
-                    clientes_agrupados[numero].append(descripcion)
+            clientes_dict = {}
+            for numero, codigo in records:
+                if numero not in clientes_dict:
+                    clientes_dict[numero] = []
+                clientes_dict[numero].append(codigo)
         
             self.log(f"Enviando a {numero}", "DEBUG")
-            self.clientes_lista = list(clientes_agrupados.items())
+            self.clientes_lista = list(clientes_dict.items())
             self.total = len(self.clientes_lista)
         
             if not self.clientes_lista:
@@ -1410,13 +1464,21 @@ class DatabaseApp:
                 self.cod_producto.insert(0, clean_codigo)
         
             # Usar método reutilizable
-            descripcion, stock = self.obtener_info_producto(codigo)
-    
-            self.actualizar_descripcion(descripcion or "Descripción no encontrada")
-    
-            # Validar stock directamente
-            if stock and stock > 0:
-                self.show_temp_notification(f"Stock disponible: {stock} unidades ✅")
+            descripcion = self.obtener_descripcion_producto(clean_codigo)
+            if descripcion:
+                self.actualizar_descripcion(descripcion)
+                print(f"Descripción: {descripcion}")
+            else:
+                self.actualizar_descripcion("Descripción no encontrada")
+
+            # Validar stock usando el método reutilizable
+            if self.validar_stock_producto(clean_codigo):
+                stock_result = self.db_manager.fetch_data(
+                    "SELECT n_cantidad FROM MA_DEPOPROD WHERE c_codarticulo = ? AND c_coddeposito = '0301'",
+                    (clean_codigo,)
+                )
+                cantidad = int(stock_result[0][0]) if stock_result else 0
+                self.show_temp_notification(f"Stock disponible: {cantidad} unidades ✅")
             else:
                 self.show_temp_notification("No disponible o igual a 0 ❌")
             

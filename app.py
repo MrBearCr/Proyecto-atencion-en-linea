@@ -1672,50 +1672,46 @@ class DatabaseApp:
                 "SELECT tipo_envio FROM envios_programados WHERE id = ?", 
                 (id_envio,)
             )
-
             tipo_envio = envio_data[0][0] if envio_data else None
 
+            # Enviar mensaje según el tipo de envío
             if tipo_envio in ("ENTREGA", "DISPONIBILIDAD"):
-                return self.enviar_mensaje_whatsapp(numero_cliente, tipo_envio=tipo_envio)
+                if self.enviar_mensaje_whatsapp(numero_cliente, tipo_envio=tipo_envio):
+                    # Actualizar estado después de enviar
+                    self.db_manager.execute_query(
+                        "UPDATE envios_programados SET estado = 'ENVIADO' WHERE id = ?",
+                        (id_envio,)
+                    )
+                    return True
+                return False
             else:
-
-            # 1. Obtener código de producto asociado al cliente
+                # Lógica para envíos no tipificados (stock)
                 codigo = self.obtener_codigo_producto_cliente(numero_cliente)
-            if not codigo:
-                self.log(f"Cliente {numero_cliente} sin producto asociado", "ERROR")
-                return False
+                if not codigo:
+                    self.log(f"Cliente {numero_cliente} sin producto asociado", "ERROR")
+                    return False
 
-            # 2. Validar stock en depósito 0301
-            stock_result = self.db_manager.fetch_data(
-                "SELECT n_cantidad FROM MA_DEPOPROD WHERE c_codarticulo = ? AND c_coddeposito = '0301'",
-                (codigo,)
-            )
-            if not stock_result or stock_result[0][0] <= 0:
-                self.log(f"Sin stock para cliente {numero_cliente}", "WARNING")
-                return False
-
-            # 3. Obtener descripción del producto
-            descripcion = self.obtener_descripcion_producto(codigo)
-            if not descripcion:
-                self.log(f"Descripción no encontrada para código {codigo}", "ERROR")
-                return False
-
-            # 4. Enviar mensaje por WhatsApp
-            if self.enviar_mensaje_whatsapp(numero_cliente, [descripcion]):
-                # 5. Actualizar estado del envío programado
-                self.db_manager.execute_query(
-                    "UPDATE envios_programados SET estado = 'ENVIADO' WHERE id = ?",
-                    (id_envio,)
+                stock_result = self.db_manager.fetch_data(
+                    "SELECT n_cantidad FROM MA_DEPOPROD WHERE c_codarticulo = ? AND c_coddeposito = '0301'",
+                    (codigo,)
                 )
-                self.audit_log.log_event(
-                    "ENVIO_PROGRAMADO_EXITOSO",
-                    os.getlogin(),
-                    f"ID {id_envio} - Cliente {numero_cliente}"
-                )
-                return True
+                if not stock_result or stock_result[0][0] <= 0:
+                    self.log(f"Sin stock para cliente {numero_cliente}", "WARNING")
+                    return False
 
-            return False
+                descripcion = self.obtener_descripcion_producto(codigo)
+                if not descripcion:
+                    self.log(f"Descripción no encontrada para código {codigo}", "ERROR")
+                    return False
 
+                if self.enviar_mensaje_whatsapp(numero_cliente, [descripcion]):
+                    # Actualizar estado después de enviar
+                    self.db_manager.execute_query(
+                        "UPDATE envios_programados SET estado = 'ENVIADO' WHERE id = ?",
+                        (id_envio,)
+                    )
+                    return True
+                return False
         except Exception as e:
             self.log(f"Error en envío programado ID {id_envio}: {str(e)}", "ERROR")
             self.audit_log.log_event(
@@ -1794,20 +1790,47 @@ class DatabaseApp:
         self.lbl_progreso.config(text=mensaje_estado)
         self.root.after(7000, self.procesar_envio_masivo)
 
-    def enviar_mensaje_whatsapp(self, numero_cliente: str, productos: list = None, tipo_envio: str) -> bool:
+    def enviar_mensaje_whatsapp(self, numero_cliente: str, productos: list = None, tipo_envio: str = None) -> bool:
         """Envía mensaje por WhatsApp usando plantilla con lista de productos"""
         try:
-            # 1. Obtener productos si no se proporcionan
-            if productos is None:
-                codigo = self.obtener_codigo_producto_cliente(numero_cliente)
-                if not codigo:
-                    self.log(f"Cliente {numero_cliente} sin producto asociado", "ERROR")
-                    return False
+            # Determinar plantilla según el tipo de envío
+            if tipo_envio == "ENTREGA":
+                template_name = "recordatorio_entrega"
+                texto_plantilla = "📦 Tu entrega está programada para mañana. ¡Estaremos listos!"
+            elif tipo_envio == "DISPONIBILIDAD":
+                template_name = "sede"
+                texto_plantilla = "🏪 ¡Tu producto ya está disponible en nuestra sede! Visítanos."
+            else:
+                # Lógica para notificaciones de stock
+                template_name = "alerta_stock"
                 
-                descripcion = self.obtener_descripcion_producto(codigo)
-                productos = [descripcion] if descripcion else []
-
-            # 2. Validar token
+                # Validar productos para stock
+                if productos is None:
+                    codigo = self.obtener_codigo_producto_cliente(numero_cliente)
+                    if not codigo:
+                        self.log(f"Cliente {numero_cliente} sin producto asociado", "ERROR")
+                        return False
+                    
+                    descripcion = self.obtener_descripcion_producto(codigo)
+                    productos = [descripcion] if descripcion else []
+    
+                # Procesar lista de productos solo para stock
+                MAX_ITEMS = 10
+                MAX_LENGTH = 45
+                SEPARADOR = " • "
+                
+                items_procesados = []
+                for idx, producto in enumerate(productos[:MAX_ITEMS], 1):
+                    producto_limpio = re.sub(r'[\n\t]', ' ', str(producto))
+                    if len(producto_limpio) > MAX_LENGTH:
+                        producto_limpio = producto_limpio[:MAX_LENGTH-3] + "..."
+                    items_procesados.append(f"{idx}. {producto_limpio}")
+                
+                texto_plantilla = SEPARADOR.join(items_procesados)
+                if len(productos) > MAX_ITEMS:
+                    texto_plantilla += f"{SEPARADOR}... (+{len(productos) - MAX_ITEMS} productos más)"
+    
+            # Validar token
             whatsapp_token = self.cred_manager.get_whatsapp_token()
             if not whatsapp_token:
                 self.update_status('api_error', message="Token no configurado")
@@ -1820,82 +1843,54 @@ class DatabaseApp:
                 messagebox.showerror("Error", str(ErrorCode.INVALID_API_TOKEN))
                 self.show_settings()
                 return False
-
-            # 3. Formatear número telefónico
+    
+            # Formatear número telefónico
             numero_limpio = re.sub(r'\D', '', numero_cliente)
             if numero_limpio.startswith('0'):
                 numero_limpio = numero_limpio[1:]
             numero_formateado = '58' + numero_limpio
-
-            # 4. Construir lista de productos para plantilla
-            MAX_ITEMS = 10
-            MAX_LENGTH = 45
-            SEPARADOR = " • "
-            
-            items_procesados = []
-            for idx, producto in enumerate(productos[:MAX_ITEMS], 1):
-                # Limpiar y truncar descripción
-                producto_limpio = re.sub(r'[\n\t]', ' ', str(producto))
-                if len(producto_limpio) > MAX_LENGTH:
-                    producto_limpio = producto_limpio[:MAX_LENGTH-3] + "..."
-                
-                items_procesados.append(f"{idx}. {producto_limpio}")
-
-            # 5. Construir texto final
-            texto_plantilla = SEPARADOR.join(items_procesados)
-            if len(productos) > MAX_ITEMS:
-                texto_plantilla += f"{SEPARADOR}... (+{len(productos) - MAX_ITEMS} productos más)"
-
-            # 6. Configurar payload para plantilla
+    
+            # Configurar payload
             payload = {
                 "messaging_product": "whatsapp",
                 "to": numero_formateado,
                 "type": "template",
                 "template": {
-                    "name": "alerta_stock",
+                    "name": template_name,
                     "language": {"code": "es"},
                     "components": [{
                         "type": "body",
-                        "parameters": [{
-                            "type": "text",
-                            "text": texto_plantilla
-                        }]
+                        "parameters": [{"type": "text", "text": texto_plantilla}]
                     }]
                 }
             }
-
-            # 7. Enviar solicitud a la API
-            headers = {
-                "Authorization": f"Bearer {whatsapp_token}",
-                "Content-Type": "application/json"
-            }
-            
+    
+            # Enviar solicitud
             response = requests.post(
                 "https://graph.facebook.com/v21.0/490677417472051/messages",
-                headers=headers,
+                headers={"Authorization": f"Bearer {whatsapp_token}", "Content-Type": "application/json"},
                 json=payload
             )
-
-            # 8. Manejar respuesta
+    
+            # Manejar respuesta
             if response.status_code == 200:
                 self.log(f"Mensaje enviado a {numero_formateado}", "SUCCESS")
                 self.audit_log.log_event(
                     "ENVIO_EXITOSO",
                     os.getlogin(),
-                    f"Cliente: {numero_formateado} | Productos: {len(productos)}"
+                    f"Cliente: {numero_formateado} | Tipo: {tipo_envio or 'Stock'}"
                 )
                 return True
-                f
+            
+            # Manejar errores de API
             error_data = response.json().get('error', {})
             error_msg = error_data.get('message', 'Error desconocido')
-            error_code = error_data.get('code', 'DESCONOCIDO')
-            
-            self.log(f"Error API ({error_code}): {error_msg}", "ERROR")
-            messagebox.showerror("Error API", f"{error_code}: {error_msg}")
+            self.log(f"Error API: {error_msg}", "ERROR")
+            messagebox.showerror("Error API", f"{error_msg}")
             return False
-
+    
         except Exception as e:
-            self.log(f"Error crítico al enviar mensaje: {str(e)}", "ERROR")
+            self.log(f"Error crítico: {str(e)}", "ERROR")
             self.audit_log.log_event(
                 "ERROR_ENVIO",
                 os.getlogin(),

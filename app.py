@@ -470,13 +470,18 @@ class DatabaseApp:
             return None
     
     def buscar_por_fecha(self):
+        # Obtener fechas como objetos datetime.datetime (incluyendo hora)
+        fecha_inicio = datetime.combine(self.fecha_inicio.get_date(), datetime.min.time())
+        fecha_fin = datetime.combine(self.fecha_fin.get_date(), datetime.max.time())
+
         query = "SELECT * FROM envios_programados WHERE fecha_programada BETWEEN ? AND ?"
-        params = (self.fecha_inicio.get_date(), self.fecha_fin.get_date())
+        params = (fecha_inicio, fecha_fin)  # Ahora son datetime.datetime
+
         records = self.db_manager.fetch_data(query, params)
         self.tree.delete(*self.tree.get_children())
         for row in records:
             self.tree.insert("", tk.END, values=row)
-        
+            
     def create_gradient_header(self):
         """Genera un degradado suave de azul corporativo"""
         width = 1200  # Ancho de la ventana
@@ -640,6 +645,11 @@ class DatabaseApp:
         self.stats_tab = ttk.Frame(self.main_notebook)
         self.main_notebook.add(self.stats_tab, text="📊 Estadísticas")
         self.setup_stats_tab()  # Nuevo método para configurar la pestaña
+
+        # Pestaña de Calendario
+        self.calendar_tab = ttk.Frame(self.main_notebook)
+        self.main_notebook.add(self.calendar_tab, text="📅 Calendario")
+        self.setup_calendar_tab()
     
     def setup_stats_tab(self):
         self.stats_frame = ttk.Frame(self.stats_tab)
@@ -674,6 +684,63 @@ class DatabaseApp:
             canvas = FigureCanvasTkAgg(fig, self.graph_container)
             canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
             canvas.draw()
+
+    def setup_calendar_tab(self):
+        frame = ttk.Frame(self.calendar_tab)
+        frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+    # Calendario
+        self.cal = Calendar(
+            frame,
+            selectmode='day',
+            year=datetime.now().year,
+            month=datetime.now().month,
+            day=datetime.now().day,
+            date_pattern='y-mm-dd'
+        )
+        self.cal.pack(fill=tk.BOTH, expand=True, pady=10)
+
+        # Botón para actualizar eventos
+        ttk.Button(frame, text="Actualizar Eventos", command=self.cargar_eventos_calendario).pack(pady=5)
+
+        # Área de detalles
+        self.eventos_text = tk.Text(frame, height=10, wrap=tk.WORD)
+        self.eventos_text.pack(fill=tk.BOTH, expand=True)
+
+        # Cargar eventos iniciales
+        self.cargar_eventos_calendario()
+        self.cal.bind("<<CalendarSelected>>", self.mostrar_eventos_fecha)
+    
+    def mostrar_eventos_fecha(self, event=None):
+        fecha_seleccionada = self.cal.get_date()
+        self.eventos_text.delete(1.0, tk.END)
+    
+        try:
+            # Convertir fecha seleccionada a datetime (inicio y fin del día)
+            fecha_inicio = datetime.strptime(fecha_seleccionada, "%Y-%m-%d")
+            fecha_fin = fecha_inicio + timedelta(days=1)
+        
+            eventos = self.db_manager.fetch_data(
+                "SELECT numero_cliente, fecha_programada, estado, tipo_envio "
+                "FROM envios_programados "
+                "WHERE fecha_programada >= ? AND fecha_programada < ?",  # <-- Nueva consulta
+                (fecha_inicio, fecha_fin)  # <-- Parámetros como objetos datetime
+            )
+        
+            if not eventos:
+                self.eventos_text.insert(tk.END, "No hay eventos para esta fecha")
+                return
+            
+            for num_cliente, fecha, estado, tipo in eventos:
+                self.eventos_text.insert(tk.END, 
+                    f"• Cliente: {num_cliente}\n"
+                    f"  Tipo: {tipo}\n"
+                    f"  Estado: {estado}\n"
+                    f"  Hora: {fecha.strftime('%H:%M')}\n"
+                "------------------------\n")
+                
+        except Exception as e:
+            self.eventos_text.insert(tk.END, f"Error obteniendo eventos: {str(e)}")
 
     def show_records_view(self):
         self.main_notebook.select(self.records_tab)
@@ -887,6 +954,29 @@ class DatabaseApp:
                 ErrorCode.DB_CONNECTION_FAILED
             )
             self.show_settings()
+
+    def cargar_eventos_calendario(self):
+        try:
+            eventos = self.db_manager.fetch_data(
+                "SELECT fecha_programada, estado, tipo_envio FROM envios_programados"
+            )
+        
+            self.cal.calevent_remove('all')
+        
+            for fecha_obj, estado, tipo in eventos:  # Recibir directamente el datetime
+                fecha = fecha_obj.date()  # Convertir datetime a date
+                tags = 'pendiente' if estado == 'PENDIENTE' else 'completado'
+                self.cal.calevent_create(
+                    fecha,
+                    f"{tipo} - {estado}",
+                    tags=tags
+                )
+        
+            self.cal.tag_config('pendiente', background='#FFD700', foreground='black')
+            self.cal.tag_config('completado', background='#90EE90', foreground='black')
+        
+        except Exception as e:
+            self.log(f"Error cargando eventos: {str(e)}", "ERROR")
 
     def setup_records_tab(self):
         # Panel principal

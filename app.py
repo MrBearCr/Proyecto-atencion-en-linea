@@ -1,5 +1,6 @@
 import pyodbc
 import tkinter as tk
+import csv
 from tkinter import ttk, messagebox
 from tkinter import font 
 from cryptography.fernet import Fernet
@@ -22,6 +23,8 @@ import requests
 from enum import Enum
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from win10toast import ToastNotifier
+
 
 
 
@@ -110,6 +113,7 @@ class ErrorCode(Enum):
     DB_TABLE_CREATION = (1003, "Error creando tabla en la base de datos")
     DB_RECORD_NOT_FOUND = (1004, "Registro no encontrado")
     DB_DESCRIPTION_NOT_FOUND = (1005, "Descripción no encontrada")
+    AL_CRITIC_ERROR = (1006, "")
     
     # Errores de validación (2000-2999)
     INVALID_CLIENT_NUMBER = (2001, "Número de cliente inválido")
@@ -149,6 +153,7 @@ class SessionManager:
         self.enviando = False
         self.progress = None
         self.lbl_progreso = None
+        self.after_id: Optional[str] = None
 
 
         #Monitorear actividad
@@ -336,6 +341,20 @@ class DatabaseManager:
             """)
             self.conn.commit()
 
+            # Crear tabla de favoritos si no existe
+            self.cursor.execute("""
+                IF NOT EXISTS (
+                    SELECT * FROM sysobjects 
+                    WHERE name='favoritos_productos' AND xtype='U'
+                )
+                CREATE TABLE favoritos_productos (
+                    codigo NVARCHAR(15) PRIMARY KEY,
+                    favorito BIT DEFAULT 0,
+                    fecha_creacion DATETIME DEFAULT GETDATE()
+                )
+            """)
+            self.conn.commit()
+
             # Crear tabla envios_programados con índices
             self.cursor.execute("""
             IF NOT EXISTS (
@@ -375,6 +394,50 @@ class DatabaseManager:
         except pyodbc.Error as e:
             error_msg = f"{ErrorCode.DB_TABLE_CREATION}: {str(e)}"
             raise Exception(error_msg) from e
+        
+    def obtener_alertas_stock(self):
+        try:
+            query = """
+                SELECT 
+                    c_codarticulo AS codigo,
+                    MAX(p.C_DESCRI) AS descripcion,
+                    CAST(SUM(n_cantidad) AS INT) AS stock,  
+                CASE
+                    WHEN SUM(n_cantidad) BETWEEN 15 AND 20 THEN 'Leve'  
+                    WHEN SUM(n_cantidad) BETWEEN 8 AND 14 THEN 'Media'
+                    ELSE 'Crítica'
+                END AS nivel
+                FROM MA_DEPOPROD d
+                    INNER JOIN MA_PRODUCTOS p ON d.c_codarticulo = p.C_CODIGO
+                    WHERE c_coddeposito = '0301'
+                    GROUP BY c_codarticulo
+                    HAVING SUM(n_cantidad) < 21  
+                    ORDER BY stock ASC
+                """
+            return self.fetch_data(query)
+        except Exception as e:
+            print(f"Error obteniendo alertas de stock: {str(e)}")
+            return []
+        
+    def toggle_favorito(self, codigo_producto):
+        try:
+            self.execute_query(
+                """MERGE INTO favoritos_productos AS target
+                USING (VALUES (?)) AS source(codigo)
+                ON target.codigo = source.codigo
+                WHEN MATCHED THEN
+                   UPDATE SET favorito = ~favorito
+                WHEN NOT MATCHED THEN
+                   INSERT (codigo, favorito) VALUES (source.codigo, 1);""",
+                (codigo_producto,)
+            )
+            return True
+        except Exception as e:
+            print(f"Error actualizando favorito: {str(e)}")
+            return False
+
+    def obtener_favoritos(self):
+        return self.fetch_data("SELECT codigo FROM favoritos_productos WHERE favorito = 1")
 
     def execute_query(self, query, params=None):
         try:
@@ -406,6 +469,7 @@ class DatabaseManager:
 
 class DatabaseApp:
     def __init__(self, root):
+
         self.cred_manager = SecureCredentialsManager()
         self.enviando = False
         self.session = SessionManager(root)
@@ -415,22 +479,34 @@ class DatabaseApp:
         self.db_manager = DatabaseManager()
         self.settings_window = None
         self.show_pwd_var = None
-        self.httpd = None
+        self.httpd = None        
         
-        # Configuración inicial
+        # Configuración de UI y bindings
         self.buttons = {}	
         self.setup_styles()
         self.setup_modern_ui()
         self.setup_bindings()
-        self.attempt_auto_connect()
         self.cache = CacheDescripciones()
         self.programador = ProgramadorEnvios(self.db_manager, self)
         self.envios_programados = EnvioProgramado(self.db_manager)
+
+         #Sistema de Paginacion
+        self.last_refresh = None
+        self.current_page = 1
+        self.page_size = 250
+        self.current_filter = 'TODAS'
+        self.cached_alertas = []  
         
+        self.attempt_auto_connect()
+        self.programar_actualizaciones_stock()
+
         # Sistema de notificaciones y ayuda
-        self.notification_manager = self.NotificationManager(self.root)  # Corregido
-        self.help_tooltips = self.HelpTooltips(self.root)  # Corregido
+        self.notification_manager = self.NotificationManager(self.root)  
+        self.help_tooltips = self.HelpTooltips(self.root)  
         self.setup_tooltips()
+        #Notificaciones de Win10
+        self.toaster = ToastNotifier()
+        self.ultimas_notificaciones = set()
 
     def obtener_descripcion_producto(self, codigo: str) -> Optional[str]:
         """Obtiene la descripción de un producto desde la base de datos."""
@@ -469,14 +545,138 @@ class DatabaseApp:
             self.log(f"Error obteniendo código de producto: {str(e)}", "ERROR")
             return None
     
+    def actualizar_alertas_stock(self, force_refresh=False):
+        """Actualiza las alertas con paginación y caché"""
+        try:
+            if not hasattr(self, 'last_refresh'):  # <-- Prevenir acceso prematuro
+                self.last_refresh = None
+            # Forzar refresco si han pasado más de 30 minutos
+            refresh_needed = (
+                force_refresh or 
+                not self.last_refresh or 
+                (datetime.now() - self.last_refresh).seconds > 1800
+            )
+        
+            if refresh_needed:
+                self.cached_alertas = self.db_manager.obtener_alertas_stock()
+                self.last_refresh = datetime.now()
+                self.log("Datos de alertas actualizados desde BD", "INFO")
+        
+            # Aplicar filtro
+            filtered = [
+                r for r in self.cached_alertas 
+                if (self.current_filter == 'TODAS' or 
+                    r[3].upper() == self.current_filter.upper())
+            ]
+        
+            # Calcular paginación
+            total_items = len(filtered)
+            total_pages = max(1, (total_items + self.page_size - 1) // self.page_size)
+            start_index = (self.current_page - 1) * self.page_size
+            end_index = start_index + self.page_size
+        
+            # Mostrar datos paginados
+            self.mostrar_alertas_paginadas(filtered[start_index:end_index])
+            self.actualizar_contador_paginacion(total_pages)
+            self.stock_tree.update_idletasks() 
+        
+        except Exception as e:
+            self.log(f"Error crítico al actualizar alertas: {str(e)}", "ERROR")
+
+    def mostrar_alertas_paginadas(self, datos):
+        self.stock_tree.delete(*self.stock_tree.get_children())
+        for codigo, descripcion, stock, nivel in datos:
+            tag = nivel.lower().replace('ítica', 'itica')
+            self.stock_tree.insert("", tk.END, values=(
+                codigo, descripcion, stock, nivel), tags=(tag,))
+
+    def actualizar_contador_paginacion(self, total_pages):
+        self.pagination_label.config(text=f"Página {self.current_page}/{total_pages}")
+        self.btn_prev['state'] = 'normal' if self.current_page > 1 else 'disabled'
+        self.btn_next['state'] = 'normal' if self.current_page < total_pages else 'disabled'
+
+    def monitorear_favoritos(self):
+        while True:
+            try:
+                favoritos = self.db_manager.obtener_favoritos()
+                current_alerts = self.db_manager.fetch_data("""
+                    SELECT a.codigo, a.stock, a.nivel 
+                    FROM alertas_view a
+                    INNER JOIN favoritos_productos f 
+                    ON a.codigo = f.codigo 
+                    WHERE f.favorito = 1
+                """)
+             
+                for codigo, stock, nivel in current_alerts:
+                    if (codigo, nivel) not in self.ultimas_notificaciones:
+                        self.mostrar_notificacion(codigo, stock, nivel)
+                        self.ultimas_notificaciones.add((codigo, nivel))
+                    
+            except Exception as e:
+                self.log(f"Error monitoreo favoritos: {str(e)}", "ERROR")
+            time.sleep(300)  # Revisar cada 5 minutos
+
+    def mostrar_notificacion(self, codigo, stock, nivel):
+        mensaje = f"Código: {codigo}\nStock: {stock}\nNivel: {nivel}"
+        self.toaster.show_toast(
+            "Alerta Stock Favorito",
+            mensaje,
+            duration=10,
+            threaded=True
+        )
+
+    def exportar_csv(self):
+        try:
+                # Aplicar filtro actual a los datos
+            filtered = [
+                r for r in self.cached_alertas 
+                if (self.current_filter == 'TODAS' or 
+                    r[3].upper() == self.current_filter.upper())
+            ]
+        
+            filename = f"reporte_stock_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
+    
+            with open(filename, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f, delimiter=';')
+                writer.writerow(["Código", "Descripción", "Stock", "Nivel Alerta"])
+        
+                for registro in filtered:  # Usar filtered en lugar de self.cached_alertas
+                    writer.writerow([
+                        registro[0],
+                        registro[1].replace(';', ','),
+                        registro[2],
+                        registro[3]
+                    ])
+                
+            self.log(f"Reporte completo exportado: {filename}", "INFO")
+            messagebox.showinfo("Éxito", 
+                f"Reporte generado con {len(filtered)} registros\n"
+                f"Ubicación: {os.path.abspath(filename)}")
+            
+        except Exception as e:
+            self.log(f"Error exportando CSV: {str(e)}", "ERROR")
+    
     def buscar_por_fecha(self):
+        # Obtener fechas como objetos datetime.datetime (incluyendo hora)
+        fecha_inicio = datetime.combine(self.fecha_inicio.get_date(), datetime.min.time())
+        fecha_fin = datetime.combine(self.fecha_fin.get_date(), datetime.max.time())
+
         query = "SELECT * FROM envios_programados WHERE fecha_programada BETWEEN ? AND ?"
-        params = (self.fecha_inicio.get_date(), self.fecha_fin.get_date())
+        params = (fecha_inicio, fecha_fin)  # Ahora son datetime.datetime
+
         records = self.db_manager.fetch_data(query, params)
         self.tree.delete(*self.tree.get_children())
         for row in records:
             self.tree.insert("", tk.END, values=row)
-        
+
+    def programar_actualizaciones_stock(self):
+        def actualizar():
+            while True:
+                if hasattr(self, 'last_refresh'):  # <-- Verificar atributo
+                    self.actualizar_alertas_stock()
+                time.sleep(3600)  # <-- Actualizar cada hora
+        threading.Thread(target=actualizar, daemon=True).start()
+                        
     def create_gradient_header(self):
         """Genera un degradado suave de azul corporativo"""
         width = 1200  # Ancho de la ventana
@@ -569,6 +769,179 @@ class DatabaseApp:
         style.map("TButton",
               background=[('active', '#e89f00')],
               foreground=[('active', '#003f7e')])
+        
+    def setup_stock_tab(self):
+        main_frame = ttk.Frame(self.stock_tab)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+    
+        # Controles superiores en 2 filas
+        top_controls = ttk.Frame(main_frame)
+        top_controls.pack(fill=tk.X, pady=5)
+    
+        # Fila 1: Filtros
+        filter_frame = ttk.Frame(top_controls)
+        filter_frame.pack(fill=tk.X, pady=5)
+    
+        ttk.Label(filter_frame, text="Filtrar:").pack(side=tk.LEFT)
+        self.filter_var = tk.StringVar(value='TODAS')
+    
+        filters = [
+            ('Todas', 'TODAS'),
+            ('Críticas (<8)', 'CRÍTICA'),
+            ('Medias (8-14)', 'MEDIA'),
+            ('Leves (15-20)', 'LEVE')
+        ]
+    
+        for text, val in filters:
+            ttk.Radiobutton(filter_frame, 
+                        text=text, 
+                        variable=self.filter_var,
+                        value=val,
+                        command=self.aplicar_filtro).pack(side=tk.LEFT, padx=5)
+    
+        # Fila 2: Controles de acción
+        action_frame = ttk.Frame(top_controls)
+        action_frame.pack(fill=tk.X, pady=5)
+    
+        # Botón Exportar (NUEVA POSICIÓN)
+        ttk.Button(action_frame, 
+                text="📥 Exportar CSV", 
+                command=self.exportar_csv
+                ).pack(side=tk.LEFT, padx=5)
+    
+        # Paginación a la derecha
+        pagination_frame = ttk.Frame(action_frame)
+        pagination_frame.pack(side=tk.RIGHT)
+    
+        self.btn_prev = ttk.Button(pagination_frame, 
+                                text="◄ Anterior",
+                                command=lambda: self.cambiar_pagina(-1),
+                                width=10)
+        self.btn_prev.pack(side=tk.LEFT)
+    
+        self.pagination_label = ttk.Label(pagination_frame, 
+                                    text="Página 1/1",
+                                    width=15)
+        self.pagination_label.pack(side=tk.LEFT, padx=5)
+    
+        self.btn_next = ttk.Button(pagination_frame, 
+                             text="Siguiente ►",
+                             command=lambda: self.cambiar_pagina(1),
+                             width=10)
+        self.btn_next.pack(side=tk.LEFT)
+    
+        # Árbol de datos
+        tree_frame = ttk.Frame(main_frame)
+        tree_frame.pack(fill=tk.BOTH, expand=True)
+    
+        # Configurar Treeview y scrollbars
+        self.stock_tree = ttk.Treeview(tree_frame, 
+                                    columns=("Código", "Descripción", "Stock", "Nivel"),
+                                    show="headings",
+                                    height=15)
+    
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.stock_tree.yview)
+        hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.stock_tree.xview)
+        self.stock_tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+    
+        # Grid layout para mejor control
+        self.stock_tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+    
+        tree_frame.grid_rowconfigure(0, weight=1)
+        tree_frame.grid_columnconfigure(0, weight=1)
+    
+        # Configurar columnas
+        columns_config = {
+            "Favorito": {"width": 50, "anchor": "center", "stretch": False},
+            "Código": {"width": 100, "anchor": "center"},
+            "Descripción": {"width": 350, "anchor": "w"},
+            "Stock": {"width": 80, "anchor": "center"},
+            "Nivel": {"width": 100, "anchor": "center"}
+            }
+        
+        self.stock_tree['columns'] = ("Favorito", "Código", "Descripción", "Stock", "Nivel")
+
+        # Configurar checkbox
+        self.stock_tree.tag_configure('favorito')
+        self.stock_tree.heading("Favorito", text="✓")
+        self.stock_tree.column("Favorito", width=40, anchor=tk.CENTER)
+
+        for col, config in columns_config.items():
+            self.stock_tree.heading(col, text=col)
+            self.stock_tree.column(col, **config)
+    
+        # Estilos de filas
+        self.stock_tree.tag_configure('leve', background='#abebc6')
+        self.stock_tree.tag_configure('media', background='#DAF7A6')
+        self.stock_tree.tag_configure('critica', background='#ff856b')
+        self.stock_tree.tag_configure('hover', background='#f0f0f0')
+        self.stock_tree.tag_configure('selected', background='#d0d0d0')
+    
+        # Carga inicial
+        self.actualizar_alertas_stock()
+        # Manejar clics en la columna de favoritos
+        self.stock_tree.bind('<Button-1>', self.on_favorito_click)
+
+
+        # Diferenciacion con raton (feedback visual)
+
+        self.stock_tree.tag_configure('selected', background='#e0e0e0')
+        self.stock_tree.bind('<Enter>', self.hover_row)
+        self.stock_tree.bind('<Leave>', self.leave_row)
+        self.stock_tree.bind('<<TreeviewSelect>>', self.select_row)
+
+    def hover_row(self, event):
+        item = self.stock_tree.identify_row(event.y)
+        self.stock_tree.tk.call(self.stock_tree, 'tag', 'add', 'hover', item)
+
+    def leave_row(self, event):
+        item = self.stock_tree.identify_row(event.y)
+        self.stock_tree.tk.call(self.stock_tree, 'tag', 'remove', 'hover', item)
+
+    def select_row(self, event):
+        item = self.stock_tree.selection()[0]
+        self.stock_tree.tk.call(self.stock_tree, 'tag', 'add', 'selected', item)
+
+    
+
+    def on_favorito_click(self, event):
+        """Manejar clic en la columna de favoritos"""
+        region = self.stock_tree.identify_region(event.x, event.y)
+        if region == "cell":
+            col = self.stock_tree.identify_column(event.x)
+            item = self.stock_tree.identify_row(event.y)
+        
+            if col == "#1":  # Columna de favoritos (ajustar según la posición real)
+                codigo = self.stock_tree.item(item, 'values')[1]  # Obtener código
+                if self.db_manager.toggle_favorito(codigo):
+                    self.actualizar_alertas_stock(force_refresh=True)
+        
+
+    def mostrar_alertas_paginadas(self, datos):
+        """Mostrar datos con estado de favoritos"""
+        self.stock_tree.delete(*self.stock_tree.get_children())
+        favoritos = {f[0] for f in self.db_manager.obtener_favoritos()}
+        
+        for codigo, desc, stock, nivel in datos:
+            es_favorito = codigo in favoritos
+            estado = "✓" if es_favorito else "☐"
+            tags = ('favorito' if es_favorito else '', nivel.lower().replace('ítica', 'itica'))
+            
+            self.stock_tree.insert("", tk.END, 
+                                 values=(estado, codigo, desc, stock, nivel),
+                                 tags=tags)
+        
+    def aplicar_filtro(self):
+        self.current_filter = self.filter_var.get()
+        self.current_page = 1
+        self.actualizar_alertas_stock()
+
+    def cambiar_pagina(self, delta):
+        self.current_page += delta
+        self.actualizar_alertas_stock()
+        
 
     def create_header(self):
         # Crear canvas para efectos avanzados
@@ -623,6 +996,7 @@ class DatabaseApp:
             btn.pack(fill=tk.X, pady=2)
 
     def create_main_workspace(self):
+
         self.main_notebook = ttk.Notebook(self.root)
         self.main_notebook.pack(expand=True, fill=tk.BOTH, padx=10, pady=10)
         
@@ -640,6 +1014,16 @@ class DatabaseApp:
         self.stats_tab = ttk.Frame(self.main_notebook)
         self.main_notebook.add(self.stats_tab, text="📊 Estadísticas")
         self.setup_stats_tab()  # Nuevo método para configurar la pestaña
+
+        # Pestaña de Calendario
+        self.calendar_tab = ttk.Frame(self.main_notebook)
+        self.main_notebook.add(self.calendar_tab, text="📅 Calendario")
+        self.setup_calendar_tab()
+
+        # Alerta de stock Supervisores
+        self.stock_tab = ttk.Frame(self.main_notebook)
+        self.main_notebook.add(self.stock_tab, text="🚨 Alertas Stock")
+        self.setup_stock_tab()
     
     def setup_stats_tab(self):
         self.stats_frame = ttk.Frame(self.stats_tab)
@@ -674,6 +1058,63 @@ class DatabaseApp:
             canvas = FigureCanvasTkAgg(fig, self.graph_container)
             canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
             canvas.draw()
+
+    def setup_calendar_tab(self):
+        frame = ttk.Frame(self.calendar_tab)
+        frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+    # Calendario
+        self.cal = Calendar(
+            frame,
+            selectmode='day',
+            year=datetime.now().year,
+            month=datetime.now().month,
+            day=datetime.now().day,
+            date_pattern='y-mm-dd'
+        )
+        self.cal.pack(fill=tk.BOTH, expand=True, pady=10)
+
+        # Botón para actualizar eventos
+        ttk.Button(frame, text="Actualizar Eventos", command=self.cargar_eventos_calendario).pack(pady=5)
+
+        # Área de detalles
+        self.eventos_text = tk.Text(frame, height=10, wrap=tk.WORD)
+        self.eventos_text.pack(fill=tk.BOTH, expand=True)
+
+        # Cargar eventos iniciales
+        self.cargar_eventos_calendario()
+        self.cal.bind("<<CalendarSelected>>", self.mostrar_eventos_fecha)
+    
+    def mostrar_eventos_fecha(self, event=None):
+        fecha_seleccionada = self.cal.get_date()
+        self.eventos_text.delete(1.0, tk.END)
+    
+        try:
+            # Convertir fecha seleccionada a datetime (inicio y fin del día)
+            fecha_inicio = datetime.strptime(fecha_seleccionada, "%Y-%m-%d")
+            fecha_fin = fecha_inicio + timedelta(days=1)
+        
+            eventos = self.db_manager.fetch_data(
+                "SELECT numero_cliente, fecha_programada, estado, tipo_envio "
+                "FROM envios_programados "
+                "WHERE fecha_programada >= ? AND fecha_programada < ?",  # <-- Nueva consulta
+                (fecha_inicio, fecha_fin)  # <-- Parámetros como objetos datetime
+            )
+        
+            if not eventos:
+                self.eventos_text.insert(tk.END, "No hay eventos para esta fecha")
+                return
+            
+            for num_cliente, fecha, estado, tipo in eventos:
+                self.eventos_text.insert(tk.END, 
+                    f"• Cliente: {num_cliente}\n"
+                    f"  Tipo: {tipo}\n"
+                    f"  Estado: {estado}\n"
+                    f"  Hora: {fecha.strftime('%H:%M')}\n"
+                "------------------------\n")
+                
+        except Exception as e:
+            self.eventos_text.insert(tk.END, f"Error obteniendo eventos: {str(e)}")
 
     def show_records_view(self):
         self.main_notebook.select(self.records_tab)
@@ -887,6 +1328,31 @@ class DatabaseApp:
                 ErrorCode.DB_CONNECTION_FAILED
             )
             self.show_settings()
+
+    def cargar_eventos_calendario(self):
+        try:
+            if not self.db_manager.conn:
+                return
+            eventos = self.db_manager.fetch_data(
+                "SELECT fecha_programada, estado, tipo_envio FROM envios_programados"
+            )
+        
+            self.cal.calevent_remove('all')
+        
+            for fecha_obj, estado, tipo in eventos:  # Recibir directamente el datetime
+                fecha = fecha_obj.date()  # Convertir datetime a date
+                tags = 'pendiente' if estado == 'PENDIENTE' else 'completado'
+                self.cal.calevent_create(
+                    fecha,
+                    f"{tipo} - {estado}",
+                    tags=tags
+                )
+        
+            self.cal.tag_config('pendiente', background='#FFD700', foreground='black')
+            self.cal.tag_config('completado', background='#90EE90', foreground='black')
+        
+        except Exception as e:
+            self.log(f"Error cargando eventos: {str(e)}", "ERROR")
 
     def setup_records_tab(self):
         # Panel principal

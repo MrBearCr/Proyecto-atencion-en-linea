@@ -15,3 +15,55 @@
 
 
                     token = "EAARBMa8Ew54BO8J7yM2kqfW2rSoNz6ALRCrMgaEOZCPox9XWP1VumVZAWQ9hJvz0VDHvZCWMTtOAmKRaETvnLm67BZBUjtO6CXlXcnYZCjLmlKZCRF3hSGv09jgIrXpOtmxmuin8kGdPMnGERqBrvvtRIPZAACBWPt7zUwe7raJpc3DmQHiN6ZCUG1Wc5oddlReHWgZDZD"
+
+
+def actualizar_alertas_stock(self, force_refresh=False):
+        """Actualiza las alertas con paginación y caché"""
+        try:
+                # Verificación de estado crítico
+            if not hasattr(self, 'last_refresh') or not hasattr(self, 'db_manager'):
+                return
+            
+            # Verificar conexión activa
+            if not self.db_manager.conn:
+                self.log("Intento de actualización sin conexión", "WARNING")
+                return
+
+
+                def actualizar_alertas_stock(self, force_refresh=False):
+        """Actualiza las alertas con paginación y caché"""
+        try:
+            if not hasattr(self, 'last_refresh'):  # <-- Prevenir acceso prematuro
+                self.last_refresh = None
+
+
+                def exportar_csv(self):
+        try:
+                # Aplicar filtro actual a los datos
+            filtered = [
+                r for r in self.cached_alertas 
+                if (self.current_filter == 'TODAS' or 
+                    r[3].upper() == self.current_filter.upper())
+            ]
+        
+            filename = f"reporte_stock_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
+    
+            with open(filename, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f, delimiter=';')
+                writer.writerow(["Código", "Descripción", "Stock", "Nivel Alerta"])
+        
+                for registro in filtered:  # Usar filtered en lugar de self.cached_alertas
+                    writer.writerow([
+                        registro[0],
+                        registro[1].replace(';', ','),
+                        registro[2],
+                        registro[3]
+                    ])
+                
+            self.log(f"Reporte completo exportado: {filename}", "INFO")
+            messagebox.showinfo("Éxito", 
+                f"Reporte generado con {len(filtered)} registros\n"
+                f"Ubicación: {os.path.abspath(filename)}")
+            
+        except Exception as e:
+            self.log(f"Error exportando CSV: {str(e)}", "ERROR")

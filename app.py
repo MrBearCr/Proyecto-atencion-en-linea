@@ -668,15 +668,7 @@ class DatabaseApp:
         self.tree.delete(*self.tree.get_children())
         for row in records:
             self.tree.insert("", tk.END, values=row)
-
-    def programar_actualizaciones_stock(self):
-        def actualizar():
-            while True:
-                if hasattr(self, 'last_refresh'):  # <-- Verificar atributo
-                    self.actualizar_alertas_stock()
-                time.sleep(3600)  # <-- Actualizar cada hora
-        threading.Thread(target=actualizar, daemon=True).start()
-                        
+            
     def create_gradient_header(self):
         """Genera un degradado suave de azul corporativo"""
         width = 1200  # Ancho de la ventana
@@ -1019,11 +1011,6 @@ class DatabaseApp:
         self.calendar_tab = ttk.Frame(self.main_notebook)
         self.main_notebook.add(self.calendar_tab, text="📅 Calendario")
         self.setup_calendar_tab()
-
-        # Alerta de stock Supervisores
-        self.stock_tab = ttk.Frame(self.main_notebook)
-        self.main_notebook.add(self.stock_tab, text="🚨 Alertas Stock")
-        self.setup_stock_tab()
     
     def setup_stats_tab(self):
         self.stats_frame = ttk.Frame(self.stats_tab)
@@ -1331,8 +1318,6 @@ class DatabaseApp:
 
     def cargar_eventos_calendario(self):
         try:
-            if not self.db_manager.conn:
-                return
             eventos = self.db_manager.fetch_data(
                 "SELECT fecha_programada, estado, tipo_envio FROM envios_programados"
             )

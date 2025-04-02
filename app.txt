@@ -1,5 +1,6 @@
 import pyodbc
 import tkinter as tk
+import csv
 from tkinter import ttk, messagebox
 from tkinter import font 
 from cryptography.fernet import Fernet
@@ -16,10 +17,15 @@ import socket
 import http.server
 import socketserver
 import threading
-from tkcalendar import Calendar
-from datetime import datetime
+from tkcalendar import Calendar, DateEntry
+from datetime import datetime, timedelta
 import requests
 from enum import Enum
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from win10toast import ToastNotifier
+
+
 
 
 CONFIG_FILE = 'db_config.ini'
@@ -76,24 +82,29 @@ class ProgramadorEnvios:
                     "WHERE fecha_programada <= ? AND estado = 'PENDIENTE'",
                     (ahora,)
                 )
+                self.app.log(f"Envíos pendientes encontrados: {len(pendientes)}", "DEBUG")
 
                 for envio in pendientes:
                     id_envio, numero_cliente = envio
                     self.app.procesar_envio_programado(id_envio, numero_cliente)
 
+                    self.verificar_recordatorios()
+
             except Exception as e:
                 self.app.log(f"Error en programador: {str(e)}", "ERROR")
             time.sleep(60)
 
-    def procesar_envio(self, id_envio, numero_cliente):
-        try:
-            if self.app.enviar_mensaje_whatsapp(numero_cliente):
-                self.db_manager.execute_query(
-                    "UPDATE envios_programados SET estado = 'ENVIADO' WHERE id = ?",
-                    (id_envio,)
-                )
-        except Exception as e:
-            self.app.log(f"Error enviando programado ID {id_envio}: {str(e)}", "ERROR")
+  
+    def verificar_recordatorios(self):
+        ahora = datetime.now()
+        recordatorios = self.db_manager.fetch_data(
+        "SELECT id, numero_cliente, tipo_envio FROM envios_programados "
+        "WHERE fecha_programada BETWEEN ? AND ? AND estado = 'PENDIENTE'",
+        (ahora, ahora + timedelta(hours=24)))
+    
+        for id_envio, numero_cliente, tipo_envio in recordatorios:
+            self.log(f"Enviando recordatorio ({tipo_envio}) a {numero_cliente}", "INFO")
+            self.enviar_mensaje_whatsapp(numero_cliente, tipo_envio=tipo_envio)
 
 class ErrorCode(Enum):
     # Errores de base de datos (1000-1999)
@@ -102,6 +113,7 @@ class ErrorCode(Enum):
     DB_TABLE_CREATION = (1003, "Error creando tabla en la base de datos")
     DB_RECORD_NOT_FOUND = (1004, "Registro no encontrado")
     DB_DESCRIPTION_NOT_FOUND = (1005, "Descripción no encontrada")
+    AL_CRITIC_ERROR = (1006, "")
     
     # Errores de validación (2000-2999)
     INVALID_CLIENT_NUMBER = (2001, "Número de cliente inválido")
@@ -141,6 +153,7 @@ class SessionManager:
         self.enviando = False
         self.progress = None
         self.lbl_progreso = None
+        self.after_id: Optional[str] = None
 
 
         #Monitorear actividad
@@ -311,31 +324,120 @@ class DatabaseManager:
 
     def create_table(self):
         try:
+            # Crear tabla clientes con índices
             self.cursor.execute("""
                 IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='clientes' AND xtype='U')
                 CREATE TABLE clientes (
                     id INT IDENTITY(1,1) PRIMARY KEY,
                     numero_cliente NVARCHAR(50) NOT NULL,
                     C_CODIGO NVARCHAR(15) NOT NULL
+                );
+
+                IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name='idx_clientes_numero')
+                CREATE INDEX idx_clientes_numero ON clientes (numero_cliente);
+                
+                IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name='idx_clientes_codigo')
+                CREATE INDEX idx_clientes_codigo ON clientes (C_CODIGO);
+            """)
+            self.conn.commit()
+
+            # Crear tabla de favoritos si no existe
+            self.cursor.execute("""
+                IF NOT EXISTS (
+                    SELECT * FROM sysobjects 
+                    WHERE name='favoritos_productos' AND xtype='U'
+                )
+                CREATE TABLE favoritos_productos (
+                    codigo NVARCHAR(15) PRIMARY KEY,
+                    favorito BIT DEFAULT 0,
+                    fecha_creacion DATETIME DEFAULT GETDATE()
                 )
             """)
             self.conn.commit()
 
+            # Crear tabla envios_programados con índices
             self.cursor.execute("""
-                IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='envios_programados' AND xtype='U')
+            IF NOT EXISTS (
+            SELECT * FROM sys.tables 
+            WHERE name = 'envios_programados' AND type = 'U'
+            )
                 CREATE TABLE envios_programados (
                     id INT IDENTITY(1,1) PRIMARY KEY,
                     numero_cliente NVARCHAR(50) NOT NULL,
                     fecha_programada DATETIME NOT NULL,
                     fecha_creacion DATETIME DEFAULT GETDATE(),
-                    estado NVARCHAR(20) DEFAULT 'PENDIENTE'
-                )
+                    estado NVARCHAR(20) DEFAULT 'PENDIENTE',
+                    tipo_envio NVARCHAR(20) NOT NULL 
+                    CHECK (tipo_envio IN ('ENTREGA', 'DISPONIBILIDAD'))
+                );
             """)
+
+            self.cursor.execute("""
+                IF NOT EXISTS (
+                    SELECT * FROM sys.indexes 
+                    WHERE name = 'idx_envios_fecha_estado'
+                )
+                CREATE INDEX idx_envios_fecha_estado 
+                ON envios_programados (fecha_programada, estado);
+                """)
+
+            self.cursor.execute("""
+            IF NOT EXISTS (
+                SELECT * FROM sys.indexes 
+                WHERE name = 'idx_envios_numero'
+            )
+            CREATE INDEX idx_envios_numero 
+            ON envios_programados (numero_cliente);
+        """)
             self.conn.commit()
 
         except pyodbc.Error as e:
             error_msg = f"{ErrorCode.DB_TABLE_CREATION}: {str(e)}"
             raise Exception(error_msg) from e
+        
+    def obtener_alertas_stock(self):
+        try:
+            query = """
+                SELECT 
+                    c_codarticulo AS codigo,
+                    MAX(p.C_DESCRI) AS descripcion,
+                    CAST(SUM(n_cantidad) AS INT) AS stock,  
+                CASE
+                    WHEN SUM(n_cantidad) BETWEEN 15 AND 20 THEN 'Leve'  
+                    WHEN SUM(n_cantidad) BETWEEN 8 AND 14 THEN 'Media'
+                    ELSE 'Crítica'
+                END AS nivel
+                FROM MA_DEPOPROD d
+                    INNER JOIN MA_PRODUCTOS p ON d.c_codarticulo = p.C_CODIGO
+                    WHERE c_coddeposito = '0301'
+                    GROUP BY c_codarticulo
+                    HAVING SUM(n_cantidad) < 21  
+                    ORDER BY stock ASC
+                """
+            return self.fetch_data(query)
+        except Exception as e:
+            print(f"Error obteniendo alertas de stock: {str(e)}")
+            return []
+        
+    def toggle_favorito(self, codigo_producto):
+        try:
+            self.execute_query(
+                """MERGE INTO favoritos_productos AS target
+                USING (VALUES (?)) AS source(codigo)
+                ON target.codigo = source.codigo
+                WHEN MATCHED THEN
+                   UPDATE SET favorito = ~favorito
+                WHEN NOT MATCHED THEN
+                   INSERT (codigo, favorito) VALUES (source.codigo, 1);""",
+                (codigo_producto,)
+            )
+            return True
+        except Exception as e:
+            print(f"Error actualizando favorito: {str(e)}")
+            return False
+
+    def obtener_favoritos(self):
+        return self.fetch_data("SELECT codigo FROM favoritos_productos WHERE favorito = 1")
 
     def execute_query(self, query, params=None):
         try:
@@ -367,6 +469,7 @@ class DatabaseManager:
 
 class DatabaseApp:
     def __init__(self, root):
+
         self.cred_manager = SecureCredentialsManager()
         self.enviando = False
         self.session = SessionManager(root)
@@ -376,22 +479,34 @@ class DatabaseApp:
         self.db_manager = DatabaseManager()
         self.settings_window = None
         self.show_pwd_var = None
-        self.httpd = None
+        self.httpd = None        
         
-        # Configuración inicial
+        # Configuración de UI y bindings
         self.buttons = {}	
         self.setup_styles()
         self.setup_modern_ui()
         self.setup_bindings()
-        self.attempt_auto_connect()
         self.cache = CacheDescripciones()
         self.programador = ProgramadorEnvios(self.db_manager, self)
         self.envios_programados = EnvioProgramado(self.db_manager)
+
+         #Sistema de Paginacion
+        self.last_refresh = None
+        self.current_page = 1
+        self.page_size = 250
+        self.current_filter = 'TODAS'
+        self.cached_alertas = []  
         
+        self.attempt_auto_connect()
+        self.programar_actualizaciones_stock()
+
         # Sistema de notificaciones y ayuda
-        self.notification_manager = self.NotificationManager(self.root)  # Corregido
-        self.help_tooltips = self.HelpTooltips(self.root)  # Corregido
+        self.notification_manager = self.NotificationManager(self.root)  
+        self.help_tooltips = self.HelpTooltips(self.root)  
         self.setup_tooltips()
+        #Notificaciones de Win10
+        self.toaster = ToastNotifier()
+        self.ultimas_notificaciones = set()
 
     def obtener_descripcion_producto(self, codigo: str) -> Optional[str]:
         """Obtiene la descripción de un producto desde la base de datos."""
@@ -429,7 +544,148 @@ class DatabaseApp:
         except Exception as e:
             self.log(f"Error obteniendo código de producto: {str(e)}", "ERROR")
             return None
+    
+    def actualizar_alertas_stock(self, force_refresh=False):
+        """Actualiza las alertas con paginación y caché"""
+        try:
+            if not hasattr(self, 'last_refresh'):  # <-- Prevenir acceso prematuro
+                self.last_refresh = None
+            # Forzar refresco si han pasado más de 30 minutos
+            refresh_needed = (
+                force_refresh or 
+                not self.last_refresh or 
+                (datetime.now() - self.last_refresh).seconds > 1800
+            )
         
+            if refresh_needed:
+                self.cached_alertas = self.db_manager.obtener_alertas_stock()
+                self.last_refresh = datetime.now()
+                self.log("Datos de alertas actualizados desde BD", "INFO")
+        
+            # Aplicar filtro
+            filtered = [
+                r for r in self.cached_alertas 
+                if (self.current_filter == 'TODAS' or 
+                    r[3].upper() == self.current_filter.upper())
+            ]
+        
+            # Calcular paginación
+            total_items = len(filtered)
+            total_pages = max(1, (total_items + self.page_size - 1) // self.page_size)
+            start_index = (self.current_page - 1) * self.page_size
+            end_index = start_index + self.page_size
+        
+            # Mostrar datos paginados
+            self.mostrar_alertas_paginadas(filtered[start_index:end_index])
+            self.actualizar_contador_paginacion(total_pages)
+            self.stock_tree.update_idletasks() 
+        
+        except Exception as e:
+            self.log(f"Error crítico al actualizar alertas: {str(e)}", "ERROR")
+
+    def mostrar_alertas_paginadas(self, datos):
+        """Mostrar datos con estado de favoritos"""
+        self.stock_tree.delete(*self.stock_tree.get_children())
+        favoritos = {f[0] for f in self.db_manager.obtener_favoritos()}
+    
+        for codigo, desc, stock, nivel in datos:
+            es_favorito = codigo in favoritos
+            estado = "✓" if es_favorito else "☐"
+            tags = ('favorito' if es_favorito else '', nivel.lower().replace('ítica', 'itica'))
+        
+            self.stock_tree.insert("", tk.END, 
+                                values=(estado, codigo, desc, stock, nivel),
+                                tags=tags)
+        # Limpiar selección después de actualizar
+        self.stock_tree.selection_remove(self.stock_tree.selection())
+
+    def actualizar_contador_paginacion(self, total_pages):
+        self.pagination_label.config(text=f"Página {self.current_page}/{total_pages}")
+        self.btn_prev['state'] = 'normal' if self.current_page > 1 else 'disabled'
+        self.btn_next['state'] = 'normal' if self.current_page < total_pages else 'disabled'
+
+    def monitorear_favoritos(self):
+        while True:
+            try:
+                favoritos = self.db_manager.obtener_favoritos()
+                current_alerts = self.db_manager.fetch_data("""
+                    SELECT a.codigo, a.stock, a.nivel 
+                    FROM MA_DEPOPROD a
+                    INNER JOIN favoritos_productos f 
+                    ON a.codigo = f.codigo 
+                    WHERE f.favorito = 1
+                """)
+             
+                for codigo, stock, nivel in current_alerts:
+                    if (codigo, nivel) not in self.ultimas_notificaciones:
+                        self.mostrar_notificacion(codigo, stock, nivel)
+                        self.ultimas_notificaciones.add((codigo, nivel))
+                    
+            except Exception as e:
+                self.log(f"Error monitoreo favoritos: {str(e)}", "ERROR")
+            time.sleep(300)  # Revisar cada 5 minutos
+
+    def mostrar_notificacion(self, codigo, stock, nivel):
+        mensaje = f"Código: {codigo}\nStock: {stock}\nNivel: {nivel}"
+        self.toaster.show_toast(
+            "Alerta Stock Favorito",
+            mensaje,
+            duration=10,
+            threaded=True
+        )
+
+    def exportar_csv(self):
+        try:
+                # Aplicar filtro actual a los datos
+            filtered = [
+                r for r in self.cached_alertas 
+                if (self.current_filter == 'TODAS' or 
+                    r[3].upper() == self.current_filter.upper())
+            ]
+        
+            filename = f"reporte_stock_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
+    
+            with open(filename, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f, delimiter=';')
+                writer.writerow(["Código", "Descripción", "Stock", "Nivel Alerta"])
+        
+                for registro in filtered:  # Usar filtered en lugar de self.cached_alertas
+                    writer.writerow([
+                        registro[0],
+                        registro[1].replace(';', ','),
+                        registro[2],
+                        registro[3]
+                    ])
+                
+            self.log(f"Reporte completo exportado: {filename}", "INFO")
+            messagebox.showinfo("Éxito", 
+                f"Reporte generado con {len(filtered)} registros\n"
+                f"Ubicación: {os.path.abspath(filename)}")
+            
+        except Exception as e:
+            self.log(f"Error exportando CSV: {str(e)}", "ERROR")
+    
+    def buscar_por_fecha(self):
+        # Obtener fechas como objetos datetime.datetime (incluyendo hora)
+        fecha_inicio = datetime.combine(self.fecha_inicio.get_date(), datetime.min.time())
+        fecha_fin = datetime.combine(self.fecha_fin.get_date(), datetime.max.time())
+
+        query = "SELECT * FROM envios_programados WHERE fecha_programada BETWEEN ? AND ?"
+        params = (fecha_inicio, fecha_fin)  # Ahora son datetime.datetime
+
+        records = self.db_manager.fetch_data(query, params)
+        self.tree.delete(*self.tree.get_children())
+        for row in records:
+            self.tree.insert("", tk.END, values=row)
+
+    def programar_actualizaciones_stock(self):
+        def actualizar():
+            while True:
+                if hasattr(self, 'last_refresh'):  # <-- Verificar atributo
+                    self.actualizar_alertas_stock()
+                time.sleep(3600)  # <-- Actualizar cada hora
+        threading.Thread(target=actualizar, daemon=True).start()
+                        
     def create_gradient_header(self):
         """Genera un degradado suave de azul corporativo"""
         width = 1200  # Ancho de la ventana
@@ -522,6 +778,187 @@ class DatabaseApp:
         style.map("TButton",
               background=[('active', '#e89f00')],
               foreground=[('active', '#003f7e')])
+        
+    def setup_stock_tab(self):
+        main_frame = ttk.Frame(self.stock_tab)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+    
+        # Controles superiores en 2 filas
+        top_controls = ttk.Frame(main_frame)
+        top_controls.pack(fill=tk.X, pady=5)
+    
+        # Fila 1: Filtros
+        filter_frame = ttk.Frame(top_controls)
+        filter_frame.pack(fill=tk.X, pady=5)
+    
+        ttk.Label(filter_frame, text="Filtrar:").pack(side=tk.LEFT)
+        self.filter_var = tk.StringVar(value='TODAS')
+    
+        filters = [
+            ('Todas', 'TODAS'),
+            ('Críticas (<8)', 'CRÍTICA'),
+            ('Medias (8-14)', 'MEDIA'),
+            ('Leves (15-20)', 'LEVE')
+        ]
+    
+        for text, val in filters:
+            ttk.Radiobutton(filter_frame, 
+                        text=text, 
+                        variable=self.filter_var,
+                        value=val,
+                        command=self.aplicar_filtro).pack(side=tk.LEFT, padx=5)
+    
+        # Fila 2: Controles de acción
+        action_frame = ttk.Frame(top_controls)
+        action_frame.pack(fill=tk.X, pady=5)
+    
+        # Botón Exportar (NUEVA POSICIÓN)
+        ttk.Button(action_frame, 
+                text="📥 Exportar CSV", 
+                command=self.exportar_csv
+                ).pack(side=tk.LEFT, padx=5)
+    
+        # Paginación a la derecha
+        pagination_frame = ttk.Frame(action_frame)
+        pagination_frame.pack(side=tk.RIGHT)
+    
+        self.btn_prev = ttk.Button(pagination_frame, 
+                                text="◄ Anterior",
+                                command=lambda: self.cambiar_pagina(-1),
+                                width=10)
+        self.btn_prev.pack(side=tk.LEFT)
+    
+        self.pagination_label = ttk.Label(pagination_frame, 
+                                    text="Página 1/1",
+                                    width=15)
+        self.pagination_label.pack(side=tk.LEFT, padx=5)
+    
+        self.btn_next = ttk.Button(pagination_frame, 
+                             text="Siguiente ►",
+                             command=lambda: self.cambiar_pagina(1),
+                             width=10)
+        self.btn_next.pack(side=tk.LEFT)
+    
+        # Árbol de datos
+        tree_frame = ttk.Frame(main_frame)
+        tree_frame.pack(fill=tk.BOTH, expand=True)
+    
+        # Configurar Treeview y scrollbars
+        self.stock_tree = ttk.Treeview(tree_frame, 
+                                    columns=("Código", "Descripción", "Stock", "Nivel"),
+                                    show="headings",
+                                    height=15)
+    
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.stock_tree.yview)
+        hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.stock_tree.xview)
+        self.stock_tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+    
+        # Grid layout para mejor control
+        self.stock_tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+    
+        tree_frame.grid_rowconfigure(0, weight=1)
+        tree_frame.grid_columnconfigure(0, weight=1)
+    
+        # Configurar columnas
+        columns_config = {
+            "Favorito": {"width": 50, "anchor": "center", "stretch": False},
+            "Código": {"width": 100, "anchor": "center"},
+            "Descripción": {"width": 350, "anchor": "w"},
+            "Stock": {"width": 80, "anchor": "center"},
+            "Nivel": {"width": 100, "anchor": "center"}
+            }
+        
+        self.stock_tree['columns'] = ("Favorito", "Código", "Descripción", "Stock", "Nivel")
+
+        # Configurar checkbox
+        self.stock_tree.tag_configure('favorito')
+        self.stock_tree.heading("Favorito", text="✓")
+        self.stock_tree.column("Favorito", width=40, anchor=tk.CENTER)
+
+        for col, config in columns_config.items():
+            self.stock_tree.heading(col, text=col)
+            self.stock_tree.column(col, **config)
+    
+        # Estilos de filas
+        self.stock_tree.tag_configure('leve', background='#abebc6')
+        self.stock_tree.tag_configure('media', background='#DAF7A6')
+        self.stock_tree.tag_configure('critica', background='#ff856b')
+        self.stock_tree.tag_configure('hover', background='#f0f0f0')
+        self.stock_tree.tag_configure('selected', background='#d0d0d0')
+    
+        # Carga inicial
+        self.actualizar_alertas_stock()
+        # Manejar clics en la columna de favoritos
+        self.stock_tree.bind('<Button-1>', self.on_favorito_click)
+
+
+        # Diferenciacion con raton (feedback visual)
+
+        self.stock_tree.tag_configure('selected', background='#e0e0e0')
+        self.stock_tree.bind('<Enter>', self.hover_row)
+        self.stock_tree.bind('<Leave>', self.leave_row)
+        self.stock_tree.bind('<<TreeviewSelect>>', self.select_row)
+
+    def hover_row(self, event):
+        item = self.stock_tree.identify_row(event.y)
+        self.stock_tree.tk.call(self.stock_tree, 'tag', 'add', 'hover', item)
+
+    def leave_row(self, event):
+        item = self.stock_tree.identify_row(event.y)
+        self.stock_tree.tk.call(self.stock_tree, 'tag', 'remove', 'hover', item)
+
+    def select_row(self, event):
+        selected_items = self.stock_tree.selection()
+        if not selected_items:  # Verificar si hay selección
+            return
+        item = selected_items[0]
+        # Limpiar tags previos
+        self.stock_tree.tk.call(self.stock_tree, 'tag', 'remove', 'selected', '')
+        # Aplicar tag a nuevo item seleccionado
+        self.stock_tree.tk.call(self.stock_tree, 'tag', 'add', 'selected', item)
+
+    
+
+    def on_favorito_click(self, event):
+        """Manejar clic en la columna de favoritos"""
+        region = self.stock_tree.identify_region(event.x, event.y)
+        if region == "cell":
+            col = self.stock_tree.identify_column(event.x)
+            item = self.stock_tree.identify_row(event.y)
+        
+            if col == "#1":  # Columna de favoritos (ajustar según la posición real)
+                codigo = self.stock_tree.item(item, 'values')[1]  # Obtener código
+                if self.db_manager.toggle_favorito(codigo):
+                    self.actualizar_alertas_stock(force_refresh=True)
+        
+
+    def mostrar_alertas_paginadas(self, datos):
+        """Mostrar datos con estado de favoritos"""
+        self.stock_tree.delete(*self.stock_tree.get_children())
+        favoritos = {f[0] for f in self.db_manager.obtener_favoritos()}
+        
+        for codigo, desc, stock, nivel in datos:
+            es_favorito = codigo in favoritos
+            estado = "✓" if es_favorito else "☐"
+            tags = ('favorito' if es_favorito else '', nivel.lower().replace('ítica', 'itica'))
+            
+            self.stock_tree.insert("", tk.END, 
+                                 values=(estado, codigo, desc, stock, nivel),
+                                 tags=tags)
+        
+    def aplicar_filtro(self):
+        self.current_filter = self.filter_var.get()
+        self.current_page = 1
+        # Limpiar selección antes de actualizar
+        self.stock_tree.selection_remove(self.stock_tree.selection())
+        self.actualizar_alertas_stock()
+
+    def cambiar_pagina(self, delta):
+        self.current_page += delta
+        self.actualizar_alertas_stock()
+        
 
     def create_header(self):
         # Crear canvas para efectos avanzados
@@ -576,6 +1013,7 @@ class DatabaseApp:
             btn.pack(fill=tk.X, pady=2)
 
     def create_main_workspace(self):
+
         self.main_notebook = ttk.Notebook(self.root)
         self.main_notebook.pack(expand=True, fill=tk.BOTH, padx=10, pady=10)
         
@@ -588,7 +1026,113 @@ class DatabaseApp:
         self.messaging_tab = ttk.Frame(self.main_notebook)
         self.main_notebook.add(self.messaging_tab, text="Mensajería")
         self.setup_messaging_tab()
+
+        # Pestaña de Estadísticas
+        self.stats_tab = ttk.Frame(self.main_notebook)
+        self.main_notebook.add(self.stats_tab, text="📊 Estadísticas")
+        self.setup_stats_tab()  # Nuevo método para configurar la pestaña
+
+        # Pestaña de Calendario
+        self.calendar_tab = ttk.Frame(self.main_notebook)
+        self.main_notebook.add(self.calendar_tab, text="📅 Calendario")
+        self.setup_calendar_tab()
+
+        # Alerta de stock Supervisores
+        self.stock_tab = ttk.Frame(self.main_notebook)
+        self.main_notebook.add(self.stock_tab, text="🚨 Alertas Stock")
+        self.setup_stock_tab()
     
+    def setup_stats_tab(self):
+        self.stats_frame = ttk.Frame(self.stats_tab)
+        self.stats_frame.pack(fill=tk.BOTH, expand=True)
+    
+        # Botón para actualizar gráficos
+        ttk.Button(
+            self.stats_frame, 
+            text="Actualizar Gráficos", 
+            command=self.mostrar_estadisticas
+        ).pack(pady=10)
+    
+        # Contenedor para gráficos
+        self.graph_container = ttk.Frame(self.stats_frame)
+        self.graph_container.pack(fill=tk.BOTH, expand=True)
+
+    def mostrar_estadisticas(self):
+        # Limpiar gráficos anteriores
+        for widget in self.graph_container.winfo_children():
+            widget.destroy()
+    
+        # Gráfico 1: Envíos por estado
+        data = self.db_manager.fetch_data(
+            "SELECT tipo_envio, COUNT(*) FROM envios_programados GROUP BY tipo_envio"
+        )
+        if data:
+            tipos, cantidades = zip(*data)
+            fig, ax = plt.subplots(figsize=(6, 3))
+            ax.pie(cantidades, labels=tipos, autopct='%1.1f%%', colors=['#4CAF50', '#2196F3'])
+            ax.set_title("Distribución de Tipos de Envío")
+        
+            canvas = FigureCanvasTkAgg(fig, self.graph_container)
+            canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+            canvas.draw()
+
+    def setup_calendar_tab(self):
+        frame = ttk.Frame(self.calendar_tab)
+        frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+    # Calendario
+        self.cal = Calendar(
+            frame,
+            selectmode='day',
+            year=datetime.now().year,
+            month=datetime.now().month,
+            day=datetime.now().day,
+            date_pattern='y-mm-dd'
+        )
+        self.cal.pack(fill=tk.BOTH, expand=True, pady=10)
+
+        # Botón para actualizar eventos
+        ttk.Button(frame, text="Actualizar Eventos", command=self.cargar_eventos_calendario).pack(pady=5)
+
+        # Área de detalles
+        self.eventos_text = tk.Text(frame, height=10, wrap=tk.WORD)
+        self.eventos_text.pack(fill=tk.BOTH, expand=True)
+
+        # Cargar eventos iniciales
+        self.cargar_eventos_calendario()
+        self.cal.bind("<<CalendarSelected>>", self.mostrar_eventos_fecha)
+    
+    def mostrar_eventos_fecha(self, event=None):
+        fecha_seleccionada = self.cal.get_date()
+        self.eventos_text.delete(1.0, tk.END)
+    
+        try:
+            # Convertir fecha seleccionada a datetime (inicio y fin del día)
+            fecha_inicio = datetime.strptime(fecha_seleccionada, "%Y-%m-%d")
+            fecha_fin = fecha_inicio + timedelta(days=1)
+        
+            eventos = self.db_manager.fetch_data(
+                "SELECT numero_cliente, fecha_programada, estado, tipo_envio "
+                "FROM envios_programados "
+                "WHERE fecha_programada >= ? AND fecha_programada < ?",  # <-- Nueva consulta
+                (fecha_inicio, fecha_fin)  # <-- Parámetros como objetos datetime
+            )
+        
+            if not eventos:
+                self.eventos_text.insert(tk.END, "No hay eventos para esta fecha")
+                return
+            
+            for num_cliente, fecha, estado, tipo in eventos:
+                self.eventos_text.insert(tk.END, 
+                    f"• Cliente: {num_cliente}\n"
+                    f"  Tipo: {tipo}\n"
+                    f"  Estado: {estado}\n"
+                    f"  Hora: {fecha.strftime('%H:%M')}\n"
+                "------------------------\n")
+                
+        except Exception as e:
+            self.eventos_text.insert(tk.END, f"Error obteniendo eventos: {str(e)}")
+
     def show_records_view(self):
         self.main_notebook.select(self.records_tab)
 
@@ -646,34 +1190,54 @@ class DatabaseApp:
 
     def mostrar_ventana_programacion(self):
         ventana = tk.Toplevel(self.root)
-        ventana.title("Programar Envío Masivo")
-    
+        ventana.title("Programar Envío")
+        ventana.geometry("400x310")  # Tamaño fijo para garantizar espacio
+
+        # Configurar grid para mejor organización
+        ventana.grid_columnconfigure(0, weight=1)
+        ventana.grid_columnconfigure(1, weight=1)
+
         # Selector de fecha/hora
-        ttk.Label(ventana, text="Fecha/Hora Programada:").grid(row=0, column=0, padx=5, pady=5)
-        calendario = Calendar(ventana, selectmode='day')
-        calendario.grid(row=0, column=1, padx=5, pady=5)
+        ttk.Label(ventana, text="Fecha/Hora:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        calendario = Calendar(ventana, selectmode='day', date_pattern='mm/dd/y')
+        calendario.grid(row=0, column=1, padx=5, pady=5, columnspan=2)
 
         # Selector de hora
-        ttk.Label(ventana, text="Hora:").grid(row=1, column=0, padx=5, pady=5)
+        ttk.Label(ventana, text="Hora:").grid(row=1, column=0, padx=5, pady=5, sticky="w")
         spin_hora = ttk.Spinbox(ventana, from_=0, to=23, width=5)
-        spin_hora.grid(row=1, column=1, padx=5, pady=5)
+        spin_hora.grid(row=1, column=1, padx=5, pady=5, sticky="w")
         spin_minuto = ttk.Spinbox(ventana, from_=0, to=59, width=5)
-        spin_minuto.grid(row=1, column=2, padx=5, pady=5)
+        spin_minuto.grid(row=1, column=2, padx=5, pady=5, sticky="w")
+
+        # Selector de tipo de envío (nueva fila)
+        ttk.Label(ventana, text="Tipo:").grid(row=2, column=0, padx=5, pady=5, sticky="w")
+        tipo_frame = ttk.Frame(ventana)
+        tipo_frame.grid(row=2, column=1, columnspan=2, sticky="ew")
     
-    
-        ttk.Button(ventana, text="Programar", 
-             command=lambda: self.guardar_envio_programado(
-                 calendario.get_date(),
-                 spin_hora.get(),
-                 spin_minuto.get()
-             )).grid(row=2, columnspan=3, pady=10)
+        self.tipo_envio_var = tk.StringVar(value="ENTREGA")
+        ttk.Radiobutton(tipo_frame, text="Entrega", variable=self.tipo_envio_var, value="ENTREGA").pack(side=tk.LEFT, padx=10)
+        ttk.Radiobutton(tipo_frame, text="Disponibilidad", variable=self.tipo_envio_var, value="DISPONIBILIDAD").pack(side=tk.LEFT)
+
+        # Botón en fila separada
+        btn_frame = ttk.Frame(ventana)
+        btn_frame.grid(row=3, column=0, columnspan=3, pady=10)
+        ttk.Button(
+            btn_frame, 
+            text="Programar", 
+            command=lambda: self.guardar_envio_programado(
+                calendario.get_date(),
+                spin_hora.get(),
+                spin_minuto.get(),
+                self.tipo_envio_var.get()
+            )
+        ).pack(padx=10, ipadx=20)
         
-    def guardar_envio_programado(self, fecha, hora, minuto,):
+    def guardar_envio_programado(self, fecha, hora, minuto, tipo_envio):
         try:
             # Construir datetime
             fecha_completa = datetime.strptime(
-            f"{fecha} {hora.zfill(2)}:{minuto.zfill(2)}:00.000",
-            "%m/%d/%y %H:%M:%S.%f"  # Formato con milisegundos
+            f"{fecha} {hora.zfill(2)}:{minuto.zfill(2)}:00",
+            "%m/%d/%Y %H:%M:%S"  
             )
 
             result = self.db_manager.fetch_data("SELECT TOP 1 numero_cliente FROM clientes")  # Ajusta según el criterio
@@ -681,22 +1245,17 @@ class DatabaseApp:
                 messagebox.showerror("Error", "No hay clientes registrados para programar el envío.")
                 return
 
-            numero_cliente = result[0][0]  # Obtener el primer número de cliente disponible
+            numero_cliente = result[0][0]  # Asume que hay al menos un cliente
 
-
-            if not self.db_manager.table_exists("envios_programados"):
-                self.db_manager.create_table()
-        
-            # Registrar en la base de datos
+        # Insertar con TODOS los parámetros requeridos
             self.db_manager.execute_query(
-                "INSERT INTO envios_programados (numero_cliente, fecha_programada, estado) VALUES (?, ?, 'PENDIENTE')",
-                (numero_cliente, fecha_completa)
-            )
-            self.show_temp_notification("Envío programado guardado✅")
+                "INSERT INTO envios_programados (numero_cliente, fecha_programada, tipo_envio, estado) VALUES (?, ?, ?, 'PENDIENTE')",  # 3 "?"
+                (numero_cliente, fecha_completa, tipo_envio)  # 3 valores
+            )   
+            self.show_temp_notification("✅ Envío programado guardado")
         
         except Exception as e:
             messagebox.showerror("Error", f"Error de programación: {str(e)}")
-
     def limpiar_logs(self):
         self.logs_text.delete('1.0', tk.END)
         self.log_counter = 0
@@ -787,6 +1346,31 @@ class DatabaseApp:
             )
             self.show_settings()
 
+    def cargar_eventos_calendario(self):
+        try:
+            if not self.db_manager.conn:
+                return
+            eventos = self.db_manager.fetch_data(
+                "SELECT fecha_programada, estado, tipo_envio FROM envios_programados"
+            )
+        
+            self.cal.calevent_remove('all')
+        
+            for fecha_obj, estado, tipo in eventos:  # Recibir directamente el datetime
+                fecha = fecha_obj.date()  # Convertir datetime a date
+                tags = 'pendiente' if estado == 'PENDIENTE' else 'completado'
+                self.cal.calevent_create(
+                    fecha,
+                    f"{tipo} - {estado}",
+                    tags=tags
+                )
+        
+            self.cal.tag_config('pendiente', background='#FFD700', foreground='black')
+            self.cal.tag_config('completado', background='#90EE90', foreground='black')
+        
+        except Exception as e:
+            self.log(f"Error cargando eventos: {str(e)}", "ERROR")
+
     def setup_records_tab(self):
         # Panel principal
         main_frame = ttk.Frame(self.records_tab)
@@ -842,6 +1426,24 @@ class DatabaseApp:
             btn = ttk.Button(btn_frame, text=text, command=cmd)
             btn.pack(side=tk.LEFT, padx=2, fill=tk.X, expand=True)
             self.buttons[key] = btn
+
+        # Filtro por fecha
+        fecha_frame = ttk.Frame(parent)
+        fecha_frame.pack(fill=tk.X, pady=5)
+    
+        ttk.Label(fecha_frame, text="Desde:").pack(side=tk.LEFT)
+        self.fecha_inicio = DateEntry(fecha_frame)
+        self.fecha_inicio.pack(side=tk.LEFT, padx=5)
+        
+        ttk.Label(fecha_frame, text="Hasta:").pack(side=tk.LEFT)
+        self.fecha_fin = DateEntry(fecha_frame)
+        self.fecha_fin.pack(side=tk.LEFT, padx=5)
+    
+        ttk.Button(
+            fecha_frame, 
+            text="Filtrar por Fecha", 
+            command=self.buscar_por_fecha
+        ).pack(side=tk.RIGHT)
 
     def create_records_list(self, parent):
         # Treeview
@@ -925,6 +1527,14 @@ class DatabaseApp:
             user = self.user_entry.get()
             password = self.pwd_entry.get()
             token = self.token_entry.get()
+
+            ahora = datetime.now()
+            pendientes = self.db_manager.fetch_data(
+                    "SELECT id, numero_cliente FROM envios_programados "
+                    "WHERE fecha_programada <= ? AND estado = 'PENDIENTE'",
+                    (ahora,)
+                )
+            
 
             if not server:
                 messagebox.showwarning("Error", "El campo Servidor es obligatorio")
@@ -1540,43 +2150,50 @@ class DatabaseApp:
     def procesar_envio_programado(self, id_envio, numero_cliente):
         """Envía un mensaje programado y actualiza el estado en la base de datos"""
         try:
-            # 1. Obtener código de producto asociado al cliente
-            codigo = self.obtener_codigo_producto_cliente(numero_cliente)
-            if not codigo:
-                self.log(f"Cliente {numero_cliente} sin producto asociado", "ERROR")
-                return False
-
-            # 2. Validar stock en depósito 0301
-            stock_result = self.db_manager.fetch_data(
-                "SELECT n_cantidad FROM MA_DEPOPROD WHERE c_codarticulo = ? AND c_coddeposito = '0301'",
-                (codigo,)
+            envio_data = self.db_manager.fetch_data(
+                "SELECT tipo_envio FROM envios_programados WHERE id = ?", 
+                (id_envio,)
             )
-            if not stock_result or stock_result[0][0] <= 0:
-                self.log(f"Sin stock para cliente {numero_cliente}", "WARNING")
+            tipo_envio = envio_data[0][0] if envio_data else None
+
+            # Enviar mensaje según el tipo de envío
+            if tipo_envio in ("ENTREGA", "DISPONIBILIDAD"):
+                if self.enviar_mensaje_whatsapp(numero_cliente, tipo_envio=tipo_envio):
+                    # Actualizar estado después de enviar
+                    self.db_manager.execute_query(
+                        "UPDATE envios_programados SET estado = 'ENVIADO' WHERE id = ?",
+                        (id_envio,)
+                    )
+                    return True
                 return False
+            else:
+                # Lógica para envíos no tipificados (stock)
+                codigo = self.obtener_codigo_producto_cliente(numero_cliente)
+                if not codigo:
+                    self.log(f"Cliente {numero_cliente} sin producto asociado", "ERROR")
+                    return False
 
-            # 3. Obtener descripción del producto
-            descripcion = self.obtener_descripcion_producto(codigo)
-            if not descripcion:
-                self.log(f"Descripción no encontrada para código {codigo}", "ERROR")
+                stock_result = self.db_manager.fetch_data(
+                    "SELECT n_cantidad FROM MA_DEPOPROD WHERE c_codarticulo = ? AND c_coddeposito = '0301'",
+                    (codigo,)
+                )
+                if not stock_result or stock_result[0][0] <= 0:
+                    self.log(f"Sin stock para cliente {numero_cliente}", "WARNING")
+                    return False
+
+                descripcion = self.obtener_descripcion_producto(codigo)
+                if not descripcion:
+                    self.log(f"Descripción no encontrada para código {codigo}", "ERROR")
+                    return False
+
+                if self.enviar_mensaje_whatsapp(numero_cliente, [descripcion]):
+                    # Actualizar estado después de enviar
+                    self.db_manager.execute_query(
+                        "UPDATE envios_programados SET estado = 'ENVIADO' WHERE id = ?",
+                        (id_envio,)
+                    )
+                    return True
                 return False
-
-            # 4. Enviar mensaje por WhatsApp
-            if self.enviar_mensaje_whatsapp(numero_cliente, [descripcion]):
-                # 5. Actualizar estado del envío programado
-                self.db_manager.execute_query(
-                    "UPDATE envios_programados SET estado = 'ENVIADO' WHERE id = ?",
-                    (id_envio,)
-                )
-                self.audit_log.log_event(
-                    "ENVIO_PROGRAMADO_EXITOSO",
-                    os.getlogin(),
-                    f"ID {id_envio} - Cliente {numero_cliente}"
-                )
-                return True
-
-            return False
-
         except Exception as e:
             self.log(f"Error en envío programado ID {id_envio}: {str(e)}", "ERROR")
             self.audit_log.log_event(
@@ -1655,20 +2272,47 @@ class DatabaseApp:
         self.lbl_progreso.config(text=mensaje_estado)
         self.root.after(7000, self.procesar_envio_masivo)
 
-    def enviar_mensaje_whatsapp(self, numero_cliente: str, productos: list = None) -> bool:
+    def enviar_mensaje_whatsapp(self, numero_cliente: str, productos: list = None, tipo_envio: str = None) -> bool:
         """Envía mensaje por WhatsApp usando plantilla con lista de productos"""
         try:
-            # 1. Obtener productos si no se proporcionan
-            if productos is None:
-                codigo = self.obtener_codigo_producto_cliente(numero_cliente)
-                if not codigo:
-                    self.log(f"Cliente {numero_cliente} sin producto asociado", "ERROR")
-                    return False
+            # Determinar plantilla según el tipo de envío
+            if tipo_envio == "ENTREGA":
+                template_name = "recordatorio_entrega"
+                texto_plantilla = "📦 Tu entrega está programada para mañana. ¡Estaremos listos!"
+            elif tipo_envio == "DISPONIBILIDAD":
+                template_name = "sede"
+                texto_plantilla = "🏪 ¡Tu producto ya está disponible en nuestra sede! Visítanos."
+            else:
+                # Lógica para notificaciones de stock
+                template_name = "alerta_stock"
                 
-                descripcion = self.obtener_descripcion_producto(codigo)
-                productos = [descripcion] if descripcion else []
-
-            # 2. Validar token
+                # Validar productos para stock
+                if productos is None:
+                    codigo = self.obtener_codigo_producto_cliente(numero_cliente)
+                    if not codigo:
+                        self.log(f"Cliente {numero_cliente} sin producto asociado", "ERROR")
+                        return False
+                    
+                    descripcion = self.obtener_descripcion_producto(codigo)
+                    productos = [descripcion] if descripcion else []
+    
+                # Procesar lista de productos solo para stock
+                MAX_ITEMS = 10
+                MAX_LENGTH = 45
+                SEPARADOR = " • "
+                
+                items_procesados = []
+                for idx, producto in enumerate(productos[:MAX_ITEMS], 1):
+                    producto_limpio = re.sub(r'[\n\t]', ' ', str(producto))
+                    if len(producto_limpio) > MAX_LENGTH:
+                        producto_limpio = producto_limpio[:MAX_LENGTH-3] + "..."
+                    items_procesados.append(f"{idx}. {producto_limpio}")
+                
+                texto_plantilla = SEPARADOR.join(items_procesados)
+                if len(productos) > MAX_ITEMS:
+                    texto_plantilla += f"{SEPARADOR}... (+{len(productos) - MAX_ITEMS} productos más)"
+    
+            # Validar token
             whatsapp_token = self.cred_manager.get_whatsapp_token()
             if not whatsapp_token:
                 self.update_status('api_error', message="Token no configurado")
@@ -1681,82 +2325,54 @@ class DatabaseApp:
                 messagebox.showerror("Error", str(ErrorCode.INVALID_API_TOKEN))
                 self.show_settings()
                 return False
-
-            # 3. Formatear número telefónico
+    
+            # Formatear número telefónico
             numero_limpio = re.sub(r'\D', '', numero_cliente)
             if numero_limpio.startswith('0'):
                 numero_limpio = numero_limpio[1:]
             numero_formateado = '58' + numero_limpio
-
-            # 4. Construir lista de productos para plantilla
-            MAX_ITEMS = 10
-            MAX_LENGTH = 45
-            SEPARADOR = " • "
-            
-            items_procesados = []
-            for idx, producto in enumerate(productos[:MAX_ITEMS], 1):
-                # Limpiar y truncar descripción
-                producto_limpio = re.sub(r'[\n\t]', ' ', str(producto))
-                if len(producto_limpio) > MAX_LENGTH:
-                    producto_limpio = producto_limpio[:MAX_LENGTH-3] + "..."
-                
-                items_procesados.append(f"{idx}. {producto_limpio}")
-
-            # 5. Construir texto final
-            texto_plantilla = SEPARADOR.join(items_procesados)
-            if len(productos) > MAX_ITEMS:
-                texto_plantilla += f"{SEPARADOR}... (+{len(productos) - MAX_ITEMS} productos más)"
-
-            # 6. Configurar payload para plantilla
+    
+            # Configurar payload
             payload = {
                 "messaging_product": "whatsapp",
                 "to": numero_formateado,
                 "type": "template",
                 "template": {
-                    "name": "alerta_stock",
+                    "name": template_name,
                     "language": {"code": "es"},
                     "components": [{
                         "type": "body",
-                        "parameters": [{
-                            "type": "text",
-                            "text": texto_plantilla
-                        }]
+                        "parameters": [{"type": "text", "text": texto_plantilla}]
                     }]
                 }
             }
-
-            # 7. Enviar solicitud a la API
-            headers = {
-                "Authorization": f"Bearer {whatsapp_token}",
-                "Content-Type": "application/json"
-            }
-            
+    
+            # Enviar solicitud
             response = requests.post(
                 "https://graph.facebook.com/v21.0/490677417472051/messages",
-                headers=headers,
+                headers={"Authorization": f"Bearer {whatsapp_token}", "Content-Type": "application/json"},
                 json=payload
             )
-
-            # 8. Manejar respuesta
+    
+            # Manejar respuesta
             if response.status_code == 200:
                 self.log(f"Mensaje enviado a {numero_formateado}", "SUCCESS")
                 self.audit_log.log_event(
                     "ENVIO_EXITOSO",
                     os.getlogin(),
-                    f"Cliente: {numero_formateado} | Productos: {len(productos)}"
+                    f"Cliente: {numero_formateado} | Tipo: {tipo_envio or 'Stock'}"
                 )
                 return True
-                f
+            
+            # Manejar errores de API
             error_data = response.json().get('error', {})
             error_msg = error_data.get('message', 'Error desconocido')
-            error_code = error_data.get('code', 'DESCONOCIDO')
-            
-            self.log(f"Error API ({error_code}): {error_msg}", "ERROR")
-            messagebox.showerror("Error API", f"{error_code}: {error_msg}")
+            self.log(f"Error API: {error_msg}", "ERROR")
+            messagebox.showerror("Error API", f"{error_msg}")
             return False
-
+    
         except Exception as e:
-            self.log(f"Error crítico al enviar mensaje: {str(e)}", "ERROR")
+            self.log(f"Error crítico: {str(e)}", "ERROR")
             self.audit_log.log_event(
                 "ERROR_ENVIO",
                 os.getlogin(),

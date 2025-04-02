@@ -584,11 +584,20 @@ class DatabaseApp:
             self.log(f"Error crítico al actualizar alertas: {str(e)}", "ERROR")
 
     def mostrar_alertas_paginadas(self, datos):
+        """Mostrar datos con estado de favoritos"""
         self.stock_tree.delete(*self.stock_tree.get_children())
-        for codigo, descripcion, stock, nivel in datos:
-            tag = nivel.lower().replace('ítica', 'itica')
-            self.stock_tree.insert("", tk.END, values=(
-                codigo, descripcion, stock, nivel), tags=(tag,))
+        favoritos = {f[0] for f in self.db_manager.obtener_favoritos()}
+    
+        for codigo, desc, stock, nivel in datos:
+            es_favorito = codigo in favoritos
+            estado = "✓" if es_favorito else "☐"
+            tags = ('favorito' if es_favorito else '', nivel.lower().replace('ítica', 'itica'))
+        
+            self.stock_tree.insert("", tk.END, 
+                                values=(estado, codigo, desc, stock, nivel),
+                                tags=tags)
+        # Limpiar selección después de actualizar
+        self.stock_tree.selection_remove(self.stock_tree.selection())
 
     def actualizar_contador_paginacion(self, total_pages):
         self.pagination_label.config(text=f"Página {self.current_page}/{total_pages}")
@@ -601,7 +610,7 @@ class DatabaseApp:
                 favoritos = self.db_manager.obtener_favoritos()
                 current_alerts = self.db_manager.fetch_data("""
                     SELECT a.codigo, a.stock, a.nivel 
-                    FROM alertas_view a
+                    FROM MA_DEPOPROD a
                     INNER JOIN favoritos_productos f 
                     ON a.codigo = f.codigo 
                     WHERE f.favorito = 1
@@ -901,7 +910,13 @@ class DatabaseApp:
         self.stock_tree.tk.call(self.stock_tree, 'tag', 'remove', 'hover', item)
 
     def select_row(self, event):
-        item = self.stock_tree.selection()[0]
+        selected_items = self.stock_tree.selection()
+        if not selected_items:  # Verificar si hay selección
+            return
+        item = selected_items[0]
+        # Limpiar tags previos
+        self.stock_tree.tk.call(self.stock_tree, 'tag', 'remove', 'selected', '')
+        # Aplicar tag a nuevo item seleccionado
         self.stock_tree.tk.call(self.stock_tree, 'tag', 'add', 'selected', item)
 
     
@@ -936,6 +951,8 @@ class DatabaseApp:
     def aplicar_filtro(self):
         self.current_filter = self.filter_var.get()
         self.current_page = 1
+        # Limpiar selección antes de actualizar
+        self.stock_tree.selection_remove(self.stock_tree.selection())
         self.actualizar_alertas_stock()
 
     def cambiar_pagina(self, delta):

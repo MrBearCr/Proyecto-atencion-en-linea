@@ -280,39 +280,42 @@ class DatabaseManager:
             return False
 
     def connect(self, server, database, user, password):
-        conn_str = (
-        f"DRIVER={{SQL Server}};"
-        f"SERVER={server};"
-        "Encrypt=no;"          # Conexión SSL obligatoria
-        "TrustServerCertificate=no;"  # No confiar en el certificado
-          "Connection Timeout=15;"
-    )
+        # Cadena inicial sin database para crear la BD si no existe
+        initial_conn_str = (
+            f"DRIVER={{SQL Server}};"
+            f"SERVER={server};"
+            "Encrypt=no;"          
+            "TrustServerCertificate=no;"  
+            "Connection Timeout=15;"
+        )
+    
         if user:
-            conn_str += f"UID={user};PWD={password or ''};"
+            initial_conn_str += f"UID={user};PWD={password or ''};"
         else:
-            conn_str += "Trusted_Connection=yes;Encrypt=no;TrustServerCertificate=no;"
+            initial_conn_str += "Trusted_Connection=yes;"
 
-        if database:
-            try:
-                temp_conn = pyodbc.connect(conn_str)
-                temp_cursor = temp_conn.cursor()
-                temp_cursor.execute(f"""
-                    IF NOT EXISTS (
-                        SELECT name FROM sys.databases 
-                        WHERE name = '{database}'
-                    )
-                    CREATE DATABASE {database}
-                """)
-                temp_conn.commit()
-                temp_conn.close()
-            except pyodbc.Error as e:
-                error_msg = f"{ErrorCode.DB_CONNECTION_FAILED}: {str(e)}"
-                raise Exception(error_msg) from e
-            finally:
-                conn_str += f"DATABASE={database}"
+        # Intentar crear la base de datos si no existe
+        try:
+            temp_conn = pyodbc.connect(initial_conn_str)  # Sin database
+            temp_cursor = temp_conn.cursor()
+            temp_cursor.execute(f"""
+                IF NOT EXISTS (
+                    SELECT name FROM sys.databases 
+                    WHERE name = '{database}'
+                )
+                CREATE DATABASE {database}
+            """)
+            temp_conn.commit()
+            temp_conn.close()
+        except pyodbc.Error as e:
+            error_msg = f"{ErrorCode.DB_CONNECTION_FAILED}: {str(e)}"
+            raise Exception(error_msg) from e
+
+        # Cadena de conexión final CON database
+        final_conn_str = initial_conn_str + f"DATABASE={database};"
 
         try:
-            self.conn = pyodbc.connect(conn_str)
+            self.conn = pyodbc.connect(final_conn_str)
             self.cursor = self.conn.cursor()
             self.connected_server = server
             self.create_table()
@@ -469,6 +472,9 @@ class DatabaseManager:
 
 class DatabaseApp:
     def __init__(self, root):
+        self.ultimas_notificaciones = set()
+        
+
 
         self.cred_manager = SecureCredentialsManager()
         self.enviando = False
@@ -482,6 +488,7 @@ class DatabaseApp:
         self.httpd = None        
         
         # Configuración de UI y bindings
+
         self.buttons = {}	
         self.setup_styles()
         self.setup_modern_ui()
@@ -489,6 +496,9 @@ class DatabaseApp:
         self.cache = CacheDescripciones()
         self.programador = ProgramadorEnvios(self.db_manager, self)
         self.envios_programados = EnvioProgramado(self.db_manager)
+        self.monitor_thread = threading.Thread(target=self.monitorear_favoritos, daemon=True)
+        self.monitor_thread.start()
+        
 
          #Sistema de Paginacion
         self.last_refresh = None
@@ -506,7 +516,13 @@ class DatabaseApp:
         self.setup_tooltips()
         #Notificaciones de Win10
         self.toaster = ToastNotifier()
-        self.ultimas_notificaciones = set()
+         
+
+        # forma de verificar hilos activos en segundo plano
+        #self.monitor_thread = threading.Thread(target=self.monitorear_favoritos, name="MonitoreoFavoritos", daemon=True)
+        #self.monitor_thread.start()
+        #self.listar_hilos_activos()
+
 
     def obtener_descripcion_producto(self, codigo: str) -> Optional[str]:
         """Obtiene la descripción de un producto desde la base de datos."""
@@ -560,6 +576,7 @@ class DatabaseApp:
             if refresh_needed:
                 self.cached_alertas = self.db_manager.obtener_alertas_stock()
                 self.last_refresh = datetime.now()
+                self.ultimas_notificaciones.clear()  # <-- Limpiar notificaciones
                 self.log("Datos de alertas actualizados desde BD", "INFO")
         
             # Aplicar filtro
@@ -599,6 +616,11 @@ class DatabaseApp:
         # Limpiar selección después de actualizar
         self.stock_tree.selection_remove(self.stock_tree.selection())
 
+    def listar_hilos_activos(self):
+            hilos_activos = threading.enumerate()
+            self.log(f"Hilos activos: {[h.name for h in hilos_activos]}", "DEBUG")
+        
+
     def actualizar_contador_paginacion(self, total_pages):
         self.pagination_label.config(text=f"Página {self.current_page}/{total_pages}")
         self.btn_prev['state'] = 'normal' if self.current_page > 1 else 'disabled'
@@ -608,30 +630,40 @@ class DatabaseApp:
         while True:
             try:
                 favoritos = self.db_manager.obtener_favoritos()
+                # Usar la misma lógica que obtener_alertas_stock
                 current_alerts = self.db_manager.fetch_data("""
-                    SELECT a.codigo, a.stock, a.nivel 
-                    FROM MA_DEPOPROD a
-                    INNER JOIN favoritos_productos f 
-                    ON a.codigo = f.codigo 
-                    WHERE f.favorito = 1
+                    SELECT 
+                        d.c_codarticulo AS codigo,
+                        SUM(d.n_cantidad) AS stock,
+                        CASE
+                            WHEN SUM(d.n_cantidad) BETWEEN 15 AND 20 THEN 'Leve'  
+                            WHEN SUM(d.n_cantidad) BETWEEN 8 AND 14 THEN 'Media'
+                            ELSE 'Crítica'
+                        END AS nivel
+                    FROM MA_DEPOPROD d
+                    INNER JOIN favoritos_productos f ON d.c_codarticulo = f.codigo
+                    WHERE d.c_coddeposito = '0301' AND f.favorito = 1
+                    GROUP BY d.c_codarticulo
+                    HAVING SUM(d.n_cantidad) < 21
                 """)
-             
+            
                 for codigo, stock, nivel in current_alerts:
+                    clave = (codigo, stock, nivel)  # Incluir stock en la clave
                     if (codigo, nivel) not in self.ultimas_notificaciones:
                         self.mostrar_notificacion(codigo, stock, nivel)
-                        self.ultimas_notificaciones.add((codigo, nivel))
+                        self.ultimas_notificaciones.add(clave)
                     
             except Exception as e:
                 self.log(f"Error monitoreo favoritos: {str(e)}", "ERROR")
-            time.sleep(300)  # Revisar cada 5 minutos
+            time.sleep(100) # 5 minutos
 
     def mostrar_notificacion(self, codigo, stock, nivel):
         mensaje = f"Código: {codigo}\nStock: {stock}\nNivel: {nivel}"
         self.toaster.show_toast(
-            "Alerta Stock Favorito",
+            "CASAPRO STOCK",
             mensaje,
             duration=10,
-            threaded=True
+            threaded=False
         )
 
     def exportar_csv(self):
@@ -1522,19 +1554,11 @@ class DatabaseApp:
     def connect_db(self):
         try:
             
-            server = self.server_entry.get()
-            database = self.db_entry.get()
-            user = self.user_entry.get()
-            password = self.pwd_entry.get()
-            token = self.token_entry.get()
-
-            ahora = datetime.now()
-            pendientes = self.db_manager.fetch_data(
-                    "SELECT id, numero_cliente FROM envios_programados "
-                    "WHERE fecha_programada <= ? AND estado = 'PENDIENTE'",
-                    (ahora,)
-                )
-            
+            server = self.server_entry.get().strip()
+            database = self.db_entry.get().strip()
+            user = self.user_entry.get().strip()
+            password = self.pwd_entry.get().strip()
+            token = self.token_entry.get().strip()
 
             if not server:
                 messagebox.showwarning("Error", "El campo Servidor es obligatorio")
@@ -1551,7 +1575,6 @@ class DatabaseApp:
                 self.update_status('connected', server=server, api_token=token)
                 self.settings_window.destroy()
                 self.log("Conexión a BD exitosa", "SUCCESS")
-                self.log(f"Envíos pendientes encontrados: {len(pendientes)}", "DEBUG")
                 self.show_temp_notification("Conexión exitosa")
                 self.search_records()
             

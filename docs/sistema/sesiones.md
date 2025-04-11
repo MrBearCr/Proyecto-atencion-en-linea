@@ -1,5 +1,11 @@
 # Gestión de Sesiones
 
+## Proceso de Autenticación y Gestión de Sesiones
+
+El siguiente diagrama muestra el flujo completo de autenticación, incluyendo inicio de sesión, renovación de tokens y cierre de sesión:
+
+![Diagrama de Autenticación](../../recursos/autenticacion_diagrama.png)
+
 ## Configuración
 
 El sistema implementa el siguiente enfoque para gestión de sesiones:

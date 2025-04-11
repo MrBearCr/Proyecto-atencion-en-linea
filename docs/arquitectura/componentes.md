@@ -1,5 +1,7 @@
 # Componentes del Sistema
 
+![Diagrama de Componentes](../../recursos/componentes_diagrama.png)
+
 ## Capa de Presentación
 
 La capa de presentación gestiona la interfaz de usuario y la interacción con el usuario final:
@@ -97,30 +99,4 @@ Usuario → Formulario de Login → Controlador de Autenticación → Servicio d
 ```
 
 Para más detalles sobre la configuración de estos componentes, consulte las secciones de [Configuración](../configuracion/base_datos.md) y [Seguridad](../configuracion/seguridad.md).
-
-# Componentes Principales
-
-## Capa de Presentación
-
-- Interfaz de usuario basada en [tecnología usada]
-- Validación de datos de entrada
-- Manejo de eventos de usuario
-
-## Capa de Negocio
-
-- Lógica de procesamiento de datos de clientes
-- Módulo de envío de notificaciones por WhatsApp
-- Servicios de autenticación y autorización
-- Motor de reglas de negocio
-
-## Capa de Datos
-
-- Acceso a base de datos SQL Server
-- Repositorio de credenciales cifradas
-- Sistema de logs para auditoría
-
-## Servicios Externos
-
-- API de WhatsApp Business
-- Servicios de notificación
 

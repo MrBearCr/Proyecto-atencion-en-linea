@@ -1,5 +1,11 @@
 # Integración con WhatsApp
 
+## Flujo de Envío de Mensajes
+
+El siguiente diagrama muestra el proceso de envío de mensajes tanto individuales como masivos a través de WhatsApp:
+
+![Diagrama de Flujo de Mensajes](../../recursos/mensajes_flujo_diagrama.png)
+
 ## Configuración de API
 
 La integración con WhatsApp Business API (Interfaz de Programación de Aplicaciones para WhatsApp Empresarial) requiere los siguientes pasos de configuración:

@@ -48,51 +48,20 @@ Esta documentación está dirigida a desarrolladores, administradores de sistema
 | [Sistema de Auditoría](sistema/auditoria.md) | Funcionamiento del sistema de registro y auditoría |
 | [Gestión de Sesiones](sistema/sesiones.md) | Implementación y configuración del manejo de sesiones |
 
-## Diagramas
+### Recursos Adicionales
 
-La documentación incluye varios diagramas explicativos:
-
-- Diagrama de Arquitectura
-- Flujo de Datos
-- Diagrama de Componentes
-- Flujo de Envío de Mensajes
-- Proceso de Autenticación
+| Documento | Descripción |
+|-----------|-------------|
+| [Diagramas Técnicos](diagramas.md) | Colección de diagramas del sistema y guía de actualización |
+| [Preguntas Frecuentes](#preguntas-frecuentes) | Respuestas a consultas comunes sobre el sistema |
 
 ## Soporte Técnico
 
 Para consultas técnicas adicionales o soporte, contacte con el equipo de desarrollo:
 
-- Correo electrónico: it.casapro.cabudare@gmai.com
+- Correo electrónico: it.casapro.cabudare@gmail.com
 - Sistema de tickets: [https://soporte.ejemplo.com](https://soporte.ejemplo.com)
 
 ---
 
 &copy; 2025 Departamento IT y Sistemas. Todos los derechos reservados.
-
-# Documentación Técnica - Sistema de Gestión de Clientes
-
-*Última actualización: 11 de abril de 2025*
-
-## Índice General
-
-### Arquitectura
-- [Arquitectura General](arquitectura/general.md)
-- [Componentes del Sistema](arquitectura/componentes.md)
-
-### Configuración
-- [Configuración de Base de Datos](configuracion/base_datos.md)
-- [Integración con WhatsApp](configuracion/whatsapp.md)
-- [Seguridad y Cifrado](configuracion/seguridad.md)
-
-### Instalación
-- [Requisitos del Sistema](instalacion/requisitos.md)
-- [Guía de Instalación](instalacion/pasos_instalacion.md)
-
-### Sistema
-- [Sistema de Auditoría](sistema/auditoria.md)
-- [Gestión de Sesiones](sistema/sesiones.md)
-
-## Introducción
-
-Este documento contiene la documentación técnica detallada del Sistema de Gestión de Clientes, una aplicación desarrollada para administrar información de clientes con integración a SQL Server y capacidades de comunicación a través de WhatsApp. Esta documentación está dirigida a desarrolladores, administradores de sistemas y personal técnico responsable de la implementación, mantenimiento y mejora del sistema.
-

@@ -1,6 +1,6 @@
 # Tabla de Contenidos
 
-* [Introducción](./)
+* [Introducción](../)
 * [Instalación](installation/)
   * [Requisitos](installation/requirements.md)
 * [Configuración](configuration/)
@@ -13,5 +13,4 @@
 * [Desarrollo](development/)
   * [Arquitectura](development/architecture.md)
   * [Manejo de Errores](development/error-codes.md)
-* [Contribución](CONTRIBUTING.md)
-
+* [Contribución](../contributing.md)

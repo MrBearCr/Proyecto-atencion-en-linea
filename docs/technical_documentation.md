@@ -1,3 +1,7 @@
+---
+hidden: true
+---
+
 # Client Management System - Technical Documentation
 
 ## 1. Introduction & Scope
@@ -11,66 +15,75 @@ The system serves as a centralized platform for tracking client information, mon
 ### 1.2 System Requirements
 
 #### Software Dependencies
-- Python 3.8 or higher
-- Microsoft SQL Server (2016 or later recommended)
-- Windows 10 or higher (primary supported OS)
+
+* Python 3.8 or higher
+* Microsoft SQL Server (2016 or later recommended)
+* Windows 10 or higher (primary supported OS)
 
 #### Required Python Libraries
-- `pyodbc`: For SQL Server database connectivity
-- `tkinter` and `ttk`: For the graphical user interface
-- `cryptography.fernet`: For secure encryption of credentials
-- `keyring`: For secure credential storage in the system keychain
-- `matplotlib`: For data visualization and statistics
-- `tkcalendar`: For date selection UI components
-- `requests`: For API communication with WhatsApp services
-- `win10toast`: For Windows 10 notifications
+
+* `pyodbc`: For SQL Server database connectivity
+* `tkinter` and `ttk`: For the graphical user interface
+* `cryptography.fernet`: For secure encryption of credentials
+* `keyring`: For secure credential storage in the system keychain
+* `matplotlib`: For data visualization and statistics
+* `tkcalendar`: For date selection UI components
+* `requests`: For API communication with WhatsApp services
+* `win10toast`: For Windows 10 notifications
 
 #### Hardware Recommendations
-- 4GB RAM minimum (8GB recommended)
-- 1GB available disk space
-- 1366x768 screen resolution or higher
-- Internet connection for WhatsApp API functionality
+
+* 4GB RAM minimum (8GB recommended)
+* 1GB available disk space
+* 1366x768 screen resolution or higher
+* Internet connection for WhatsApp API functionality
 
 ### 1.3 Key Features & Capabilities
 
 #### Client Management
-- Client record creation, retrieval, updating, and deletion
-- Association of clients with product codes
-- Client filtering and search functionality
+
+* Client record creation, retrieval, updating, and deletion
+* Association of clients with product codes
+* Client filtering and search functionality
 
 #### Inventory Tracking
-- Real-time monitoring of product stock levels
-- Critical inventory alerts with configurable thresholds
-- Favorite products tracking for prioritized monitoring
-- CSV export of inventory reports
+
+* Real-time monitoring of product stock levels
+* Critical inventory alerts with configurable thresholds
+* Favorite products tracking for prioritized monitoring
+* CSV export of inventory reports
 
 #### Automated Messaging
-- WhatsApp integration for client notifications
-- Template-based messaging for consistency
-- Bulk messaging to multiple clients
-- Scheduled message delivery
-- Delivery status tracking
+
+* WhatsApp integration for client notifications
+* Template-based messaging for consistency
+* Bulk messaging to multiple clients
+* Scheduled message delivery
+* Delivery status tracking
 
 #### Security Features
-- Encrypted credential storage
-- Session timeout management
-- SQL injection prevention
-- Comprehensive audit logging
-- Input validation and sanitization
+
+* Encrypted credential storage
+* Session timeout management
+* SQL injection prevention
+* Comprehensive audit logging
+* Input validation and sanitization
 
 #### User Interface
-- Modern tabbed interface with five main areas:
-  - Records: Client data management
-  - Messaging: Communication tools
-  - Statistics: Visual data analysis
-  - Calendar: Scheduled events view
-  - Stock Alerts: Inventory monitoring
+
+* Modern tabbed interface with five main areas:
+  * Records: Client data management
+  * Messaging: Communication tools
+  * Statistics: Visual data analysis
+  * Calendar: Scheduled events view
+  * Stock Alerts: Inventory monitoring
 
 #### Background Processing
-- Multithreaded architecture for responsive UI
-- Scheduled tasks for periodic inventory checks
-- Automatic reconnection to database when needed
-- Notification management for critical stock levels
+
+* Multithreaded architecture for responsive UI
+* Scheduled tasks for periodic inventory checks
+* Automatic reconnection to database when needed
+* Notification management for critical stock levels
 
 The application is designed with extensibility in mind, allowing for future enhancements and integration with additional systems or APIs as business needs evolve.
 
@@ -84,10 +97,11 @@ Before installing the Client Management System, ensure your environment meets th
 
 1. Install Python 3.8 or higher from [python.org](https://www.python.org/downloads/)
 2. During installation, ensure you select "Add Python to PATH" to access Python from the command line
-3. Verify your installation by running:
-   ```
-   python --version
-   ```
+3.  Verify your installation by running:
+
+    ```
+    python --version
+    ```
 
 #### 2.1.2 Required Libraries Installation
 
@@ -110,17 +124,19 @@ The application uses a SQL Server database and securely stores connection creden
 #### 2.2.1 SQL Server Setup
 
 1. Ensure SQL Server is properly installed and running
-2. Create a dedicated database for the application:
-   ```sql
-   CREATE DATABASE ClientManagementDB;
-   ```
-3. Create a dedicated user with appropriate permissions:
-   ```sql
-   USE ClientManagementDB;
-   CREATE LOGIN ClientAppUser WITH PASSWORD = 'StrongPassword123';
-   CREATE USER ClientAppUser FOR LOGIN ClientAppUser;
-   GRANT SELECT, INSERT, UPDATE, DELETE, EXECUTE TO ClientAppUser;
-   ```
+2.  Create a dedicated database for the application:
+
+    ```sql
+    CREATE DATABASE ClientManagementDB;
+    ```
+3.  Create a dedicated user with appropriate permissions:
+
+    ```sql
+    USE ClientManagementDB;
+    CREATE LOGIN ClientAppUser WITH PASSWORD = 'StrongPassword123';
+    CREATE USER ClientAppUser FOR LOGIN ClientAppUser;
+    GRANT SELECT, INSERT, UPDATE, DELETE, EXECUTE TO ClientAppUser;
+    ```
 
 #### 2.2.2 Configuring Database Credentials
 
@@ -130,17 +146,18 @@ When launching the application for the first time:
 
 1. Open the application and navigate to the "Settings" menu
 2. In the "Connection" tab, enter:
-   - Server: Your SQL Server hostname or IP address
-   - Database: Database name (e.g., ClientManagementDB)
-   - User: Database username (e.g., ClientAppUser)
-   - Password: Database user password
+   * Server: Your SQL Server hostname or IP address
+   * Database: Database name (e.g., ClientManagementDB)
+   * User: Database username (e.g., ClientAppUser)
+   * Password: Database user password
 3. Click "Save" to encrypt and store these credentials
 
 The application will:
-- Generate an encryption key (if not already present)
-- Store the key securely in the system keychain using the keyring library
-- Encrypt the credentials and save them in `db_config.ini`
-- Test the connection to ensure validity
+
+* Generate an encryption key (if not already present)
+* Store the key securely in the system keychain using the keyring library
+* Encrypt the credentials and save them in `db_config.ini`
+* Test the connection to ensure validity
 
 For security reasons, passwords are never stored in plain text. The password is temporarily stored in an encrypted format using the system keychain and is retrieved only when needed for database connections.
 
@@ -177,29 +194,29 @@ Ensure these templates are created and approved in your WhatsApp Business Manage
 
 #### 2.4.1 Initial Configuration
 
-1. Launch the application by running:
-   ```
-   python app.py
-   ```
+1.  Launch the application by running:
 
+    ```
+    python app.py
+    ```
 2. You'll be prompted to configure the database connection on first launch
 3. After database connection is established, the application will automatically:
-   - Create necessary database tables if they don't exist
-   - Initialize logging and auditing systems
-   - Start background monitoring threads
+   * Create necessary database tables if they don't exist
+   * Initialize logging and auditing systems
+   * Start background monitoring threads
 
 #### 2.4.2 Security Considerations
 
-- The application creates a session timeout of 15 minutes by default (900 seconds)
-- To modify the timeout duration, edit the `self.timeout` value in the `SessionManager` class
-- Audit logs are stored in `audit.log` in the application directory
-- Credentials are never exposed in the logs or user interface
+* The application creates a session timeout of 15 minutes by default (900 seconds)
+* To modify the timeout duration, edit the `self.timeout` value in the `SessionManager` class
+* Audit logs are stored in `audit.log` in the application directory
+* Credentials are never exposed in the logs or user interface
 
 #### 2.4.3 Configuration File Management
 
 The following configuration files are used by the application:
 
-- `db_config.ini`: Contains encrypted database connection information
+* `db_config.ini`: Contains encrypted database connection information
 
 **Important:** Never directly edit these files, as they contain encrypted data. Always use the application's settings interface to make changes.
 
@@ -215,42 +232,37 @@ The Client Management System follows a multi-layered architecture that separates
 
 ![Architecture Diagram](architecture_diagram.png)
 
-*Note: Insert actual architecture diagram here showing the relationships between components.*
+_Note: Insert actual architecture diagram here showing the relationships between components._
 
 The system consists of the following major components:
 
 1. **User Interface Layer**
-   - Implemented using Tkinter and ttk for a modern Windows desktop experience
-   - Organized with tabs for different functional areas (Records, Messaging, etc.)
-   - Includes form inputs, data display components, and user notification systems
-
+   * Implemented using Tkinter and ttk for a modern Windows desktop experience
+   * Organized with tabs for different functional areas (Records, Messaging, etc.)
+   * Includes form inputs, data display components, and user notification systems
 2. **Business Logic Layer**
-   - Core application logic implemented in the `DatabaseApp` class
-   - Specialized managers for specific functions:
-     - `SessionManager`: Handles user session state and timeout
-     - `SecureCredentialsManager`: Manages secure storage and retrieval of credentials
-     - `NotificationManager`: Controls system notifications
-     - `ProgramadorEnvios`: Manages scheduled message delivery
-     - `EnvioProgramado`: Handles message scheduling
-
+   * Core application logic implemented in the `DatabaseApp` class
+   * Specialized managers for specific functions:
+     * `SessionManager`: Handles user session state and timeout
+     * `SecureCredentialsManager`: Manages secure storage and retrieval of credentials
+     * `NotificationManager`: Controls system notifications
+     * `ProgramadorEnvios`: Manages scheduled message delivery
+     * `EnvioProgramado`: Handles message scheduling
 3. **Data Access Layer**
-   - `DatabaseManager` class provides a clean abstraction for database operations
-   - Handles connection management, query execution, and error handling
-   - Implements table creation and maintenance
-
+   * `DatabaseManager` class provides a clean abstraction for database operations
+   * Handles connection management, query execution, and error handling
+   * Implements table creation and maintenance
 4. **Security Layer**
-   - `SecureCredentialsManager` for credential encryption/decryption
-   - `AuditLogger` for activity logging
-   - Input validation and sanitization throughout the application
-
+   * `SecureCredentialsManager` for credential encryption/decryption
+   * `AuditLogger` for activity logging
+   * Input validation and sanitization throughout the application
 5. **Background Processing**
-   - Multiple threads for non-blocking operations
-   - Scheduled tasks for periodic database queries and updates
-   - Event-based notification system
-
+   * Multiple threads for non-blocking operations
+   * Scheduled tasks for periodic database queries and updates
+   * Event-based notification system
 6. **External Integration**
-   - WhatsApp API integration for messaging
-   - Windows notification system integration
+   * WhatsApp API integration for messaging
+   * Windows notification system integration
 
 ### 3.2 Component Interaction Flow
 
@@ -305,32 +317,32 @@ The system consists of the following major components:
 
 While not a strict Model-View-Controller implementation, the application separates:
 
-- **View**: Tkinter UI components in the setup_* methods
-- **Model**: Database schema and data access through DatabaseManager
-- **Controller Logic**: Methods in DatabaseApp that handle user actions
+* **View**: Tkinter UI components in the setup\_\* methods
+* **Model**: Database schema and data access through DatabaseManager
+* **Controller Logic**: Methods in DatabaseApp that handle user actions
 
 #### 3.3.2 Manager Pattern
 
 The application uses specialized manager classes for distinct responsibilities:
 
-- **DatabaseManager**: Handles all database interactions
-- **SecureCredentialsManager**: Manages credential encryption and secure storage
-- **SessionManager**: Controls user session state and timeout
-- **NotificationManager**: Centralizes user notification presentation
+* **DatabaseManager**: Handles all database interactions
+* **SecureCredentialsManager**: Manages credential encryption and secure storage
+* **SessionManager**: Controls user session state and timeout
+* **NotificationManager**: Centralizes user notification presentation
 
 #### 3.3.3 Service Layer Pattern
 
 The application implements service-like classes for specific business functions:
 
-- **EnvioProgramado**: Handles message scheduling logic
-- **ProgramadorEnvios**: Manages the execution of scheduled messages
-- **AuditLogger**: Provides centralized logging services
+* **EnvioProgramado**: Handles message scheduling logic
+* **ProgramadorEnvios**: Manages the execution of scheduled messages
+* **AuditLogger**: Provides centralized logging services
 
 #### 3.3.4 Cache Pattern
 
 The application implements caching to reduce database load:
 
-- **CacheDescripciones**: Caches product descriptions with time-to-live functionality
+* **CacheDescripciones**: Caches product descriptions with time-to-live functionality
 
 ### 3.4 Thread Management
 
@@ -363,9 +375,10 @@ The application implements a structured error handling approach:
 5. **Graceful Degradation**: Critical components have fallback mechanisms
 
 This multi-layered error handling ensures that:
-- Technical details are logged for administrators
-- Users receive appropriate feedback
-- The application can continue functioning when non-critical components fail
+
+* Technical details are logged for administrators
+* Users receive appropriate feedback
+* The application can continue functioning when non-critical components fail
 
 ## 4. Class and Method Descriptions
 
@@ -377,18 +390,18 @@ This section provides detailed documentation for the major classes in the applic
 
 #### 4.1.1 Key Attributes
 
-| Attribute | Type | Description |
-|-----------|------|-------------|
-| `root` | `tk.Tk` | Main Tkinter window object |
-| `db_manager` | `DatabaseManager` | Database connection and query manager |
-| `cred_manager` | `SecureCredentialsManager` | Credentials encryption/decryption manager |
-| `session` | `SessionManager` | User session management |
-| `audit_log` | `AuditLogger` | System for audit logging |
-| `cache` | `CacheDescripciones` | Cache for product descriptions |
-| `notification_manager` | `NotificationManager` | UI notification system |
-| `programador` | `ProgramadorEnvios` | Scheduled message delivery manager |
-| `enviando` | `bool` | Flag indicating if messages are being sent |
-| `buttons` | `dict` | Collection of UI button references |
+| Attribute              | Type                       | Description                                |
+| ---------------------- | -------------------------- | ------------------------------------------ |
+| `root`                 | `tk.Tk`                    | Main Tkinter window object                 |
+| `db_manager`           | `DatabaseManager`          | Database connection and query manager      |
+| `cred_manager`         | `SecureCredentialsManager` | Credentials encryption/decryption manager  |
+| `session`              | `SessionManager`           | User session management                    |
+| `audit_log`            | `AuditLogger`              | System for audit logging                   |
+| `cache`                | `CacheDescripciones`       | Cache for product descriptions             |
+| `notification_manager` | `NotificationManager`      | UI notification system                     |
+| `programador`          | `ProgramadorEnvios`        | Scheduled message delivery manager         |
+| `enviando`             | `bool`                     | Flag indicating if messages are being sent |
+| `buttons`              | `dict`                     | Collection of UI button references         |
 
 #### 4.1.2 Core Methods
 
@@ -397,7 +410,8 @@ This section provides detailed documentation for the major classes in the applic
 Initializes the application and all its components.
 
 Parameters:
-- `root` (tk.Tk): The main Tkinter window
+
+* `root` (tk.Tk): The main Tkinter window
 
 ```python
 root = tk.Tk()
@@ -410,7 +424,8 @@ root.mainloop()
 Attempts to connect to the database using stored credentials.
 
 Returns:
-- None
+
+* None
 
 ```python
 # This is called automatically during initialization
@@ -423,8 +438,9 @@ app.attempt_auto_connect()
 Logs a message to the application's log panel.
 
 Parameters:
-- `message` (str): The message to log
-- `level` (str): Log level ('DEBUG', 'INFO', 'WARNING', 'ERROR', 'SUCCESS')
+
+* `message` (str): The message to log
+* `level` (str): Log level ('DEBUG', 'INFO', 'WARNING', 'ERROR', 'SUCCESS')
 
 ```python
 app.log("Operation completed successfully", "SUCCESS")
@@ -436,19 +452,22 @@ app.log("Error connecting to database", "ERROR")
 Configures the application's user interface components.
 
 Returns:
-- None
+
+* None
 
 **`enviar_mensaje_whatsapp(self, numero_cliente: str, productos: list = None, tipo_envio: str = None) -> bool`**
 
 Sends a WhatsApp message to a client.
 
 Parameters:
-- `numero_cliente` (str): Client's phone number
-- `productos` (list, optional): List of product descriptions
-- `tipo_envio` (str, optional): Message type ('ENTREGA', 'DISPONIBILIDAD', or None for stock alerts)
+
+* `numero_cliente` (str): Client's phone number
+* `productos` (list, optional): List of product descriptions
+* `tipo_envio` (str, optional): Message type ('ENTREGA', 'DISPONIBILIDAD', or None for stock alerts)
 
 Returns:
-- `bool`: True if successful, False otherwise
+
+* `bool`: True if successful, False otherwise
 
 ```python
 # Send a stock alert
@@ -463,10 +482,12 @@ success = app.enviar_mensaje_whatsapp("04141234567", tipo_envio="ENTREGA")
 Updates the stock alerts display with current data.
 
 Parameters:
-- `force_refresh` (bool): Force a database refresh instead of using cached data
+
+* `force_refresh` (bool): Force a database refresh instead of using cached data
 
 Returns:
-- None
+
+* None
 
 ```python
 # Normal refresh using cache if available
@@ -494,10 +515,10 @@ These methods handle the basic CRUD operations for client records.
 
 #### 4.1.5 Implementation Notes
 
-- The DatabaseApp class follows a modular design where UI components are created by dedicated methods
-- Event handlers are bound to UI elements during initialization
-- Background threads are started during initialization and run for the application lifetime
-- The class serves as the main integration point between all subsystems
+* The DatabaseApp class follows a modular design where UI components are created by dedicated methods
+* Event handlers are bound to UI elements during initialization
+* Background threads are started during initialization and run for the application lifetime
+* The class serves as the main integration point between all subsystems
 
 ### 4.2 DatabaseManager
 
@@ -505,12 +526,12 @@ These methods handle the basic CRUD operations for client records.
 
 #### 4.2.1 Key Attributes
 
-| Attribute | Type | Description |
-|-----------|------|-------------|
-| `conn` | `pyodbc.Connection` | Active database connection |
-| `cursor` | `pyodbc.Cursor` | Database cursor for query execution |
-| `connected_server` | `str` | Name of the connected server |
-| `config` | `configparser.ConfigParser` | Configuration parser |
+| Attribute          | Type                        | Description                         |
+| ------------------ | --------------------------- | ----------------------------------- |
+| `conn`             | `pyodbc.Connection`         | Active database connection          |
+| `cursor`           | `pyodbc.Cursor`             | Database cursor for query execution |
+| `connected_server` | `str`                       | Name of the connected server        |
+| `config`           | `configparser.ConfigParser` | Configuration parser                |
 
 #### 4.2.2 Core Methods
 
@@ -519,16 +540,19 @@ These methods handle the basic CRUD operations for client records.
 Establishes a connection to the SQL Server database.
 
 Parameters:
-- `server` (str): SQL Server hostname or IP address
-- `database` (str): Database name
-- `user` (str): Username (empty for Windows authentication)
-- `password` (str): Password (empty for Windows authentication)
+
+* `server` (str): SQL Server hostname or IP address
+* `database` (str): Database name
+* `user` (str): Username (empty for Windows authentication)
+* `password` (str): Password (empty for Windows authentication)
 
 Returns:
-- `bool`: True if connected successfully
+
+* `bool`: True if connected successfully
 
 Raises:
-- `Exception`: If connection fails
+
+* `Exception`: If connection fails
 
 ```python
 try:
@@ -546,14 +570,17 @@ except Exception as e:
 Executes a SELECT query and returns the results.
 
 Parameters:
-- `query` (str): SQL query string
-- `params` (tuple, optional): Query parameters
+
+* `query` (str): SQL query string
+* `params` (tuple, optional): Query parameters
 
 Returns:
-- `list`: List of result tuples
+
+* `list`: List of result tuples
 
 Raises:
-- `Exception`: If query execution fails or no connection exists
+
+* `Exception`: If query execution fails or no connection exists
 
 ```python
 try:
@@ -572,14 +599,17 @@ except Exception as e:
 Executes an action query (INSERT, UPDATE, DELETE, etc.).
 
 Parameters:
-- `query` (str): SQL query string
-- `params` (tuple, optional): Query parameters
+
+* `query` (str): SQL query string
+* `params` (tuple, optional): Query parameters
 
 Returns:
-- `bool`: True if successful
+
+* `bool`: True if successful
 
 Raises:
-- `Exception`: If query execution fails
+
+* `Exception`: If query execution fails
 
 ```python
 try:
@@ -597,20 +627,24 @@ except Exception as e:
 Creates the necessary database tables if they don't exist.
 
 Returns:
-- None
+
+* None
 
 Raises:
-- `Exception`: If table creation fails
+
+* `Exception`: If table creation fails
 
 **`table_exists(self, table_name: str) -> bool`**
 
 Checks if a table exists in the database.
 
 Parameters:
-- `table_name` (str): Name of the table to check
+
+* `table_name` (str): Name of the table to check
 
 Returns:
-- `bool`: True if the table exists
+
+* `bool`: True if the table exists
 
 ```python
 if db_manager.table_exists("clientes"):
@@ -621,11 +655,11 @@ else:
 
 #### 4.2.3 Implementation Notes
 
-- The class uses parameterized queries to prevent SQL injection
-- Automatic database creation if it doesn't exist
-- Automatic table creation with appropriate schema
-- Transaction management with commit/rollback
-- Connection state validation before operations
+* The class uses parameterized queries to prevent SQL injection
+* Automatic database creation if it doesn't exist
+* Automatic table creation with appropriate schema
+* Transaction management with commit/rollback
+* Connection state validation before operations
 
 ### 4.3 SecureCredentialsManager
 
@@ -633,10 +667,10 @@ else:
 
 #### 4.3.1 Key Attributes
 
-| Attribute | Type | Description |
-|-----------|------|-------------|
-| `service_name` | `str` | Keyring service name identifier |
-| `key` | `bytes` | Encryption key for Fernet |
+| Attribute      | Type    | Description                     |
+| -------------- | ------- | ------------------------------- |
+| `service_name` | `str`   | Keyring service name identifier |
+| `key`          | `bytes` | Encryption key for Fernet       |
 
 #### 4.3.2 Core Methods
 
@@ -649,20 +683,24 @@ Initializes the credential manager and retrieves or creates the encryption key.
 Retrieves the existing encryption key or generates a new one.
 
 Returns:
-- `bytes`: The encryption key
+
+* `bytes`: The encryption key
 
 **`encrypt(self, data)`**
 
 Encrypts the provided data.
 
 Parameters:
-- `data` (str): Data to encrypt
+
+* `data` (str): Data to encrypt
 
 Returns:
-- `str`: Encrypted data as a string
+
+* `str`: Encrypted data as a string
 
 Raises:
-- `Exception`: If encryption fails
+
+* `Exception`: If encryption fails
 
 ```python
 cred_manager = SecureCredentialsManager()
@@ -678,13 +716,16 @@ except Exception as e:
 Decrypts the provided data.
 
 Parameters:
-- `encrypted_data` (str): Encrypted data to decrypt
+
+* `encrypted_data` (str): Encrypted data to decrypt
 
 Returns:
-- `str`: Decrypted data
+
+* `str`: Decrypted data
 
 Raises:
-- `Exception`: If decryption fails
+
+* `Exception`: If decryption fails
 
 ```python
 try:
@@ -699,17 +740,20 @@ except Exception as e:
 Stores a temporary password in the system keychain.
 
 Parameters:
-- `password` (str): Password to store
+
+* `password` (str): Password to store
 
 Returns:
-- None
+
+* None
 
 **`get_temp_password(self)`**
 
 Retrieves the temporary password from the system keychain.
 
 Returns:
-- `str` or `None`: Decrypted password or None if not found
+
+* `str` or `None`: Decrypted password or None if not found
 
 ```python
 # Store password
@@ -725,10 +769,10 @@ Methods to store and retrieve the WhatsApp API token securely.
 
 #### 4.3.3 Implementation Notes
 
-- Uses the system keychain via the keyring library for master key storage
-- Uses Fernet symmetric encryption for data protection
-- Keys are generated automatically on first use
-- Temporary passwords are cleared when the session expires
+* Uses the system keychain via the keyring library for master key storage
+* Uses Fernet symmetric encryption for data protection
+* Keys are generated automatically on first use
+* Temporary passwords are cleared when the session expires
 
 ### 4.4 SessionManager
 
@@ -736,13 +780,13 @@ Methods to store and retrieve the WhatsApp API token securely.
 
 #### 4.4.1 Key Attributes
 
-| Attribute | Type | Description |
-|-----------|------|-------------|
-| `root` | `tk.Tk` | Main application window |
-| `last_activity` | `float` | Timestamp of last user activity |
-| `timeout` | `int` | Session timeout in seconds (default: 900) |
-| `session_active` | `bool` | Flag indicating if session is active |
-| `after_id` | `str` | ID of scheduled timeout check |
+| Attribute        | Type    | Description                               |
+| ---------------- | ------- | ----------------------------------------- |
+| `root`           | `tk.Tk` | Main application window                   |
+| `last_activity`  | `float` | Timestamp of last user activity           |
+| `timeout`        | `int`   | Session timeout in seconds (default: 900) |
+| `session_active` | `bool`  | Flag indicating if session is active      |
+| `after_id`       | `str`   | ID of scheduled timeout check             |
 
 #### 4.4.2 Core Methods
 
@@ -751,38 +795,44 @@ Methods to store and retrieve the WhatsApp API token securely.
 Initializes the session manager.
 
 Parameters:
-- `root` (tk.Tk): Main application window
+
+* `root` (tk.Tk): Main application window
 
 **`update_activity(self, event=None)`**
 
 Updates the last activity timestamp when user interaction occurs.
 
 Parameters:
-- `event` (Event, optional): Tkinter event object
+
+* `event` (Event, optional): Tkinter event object
 
 Returns:
-- None
+
+* None
 
 **`start_session(self)`**
 
 Starts a new user session and initiates activity monitoring.
 
 Returns:
-- None
+
+* None
 
 **`check_activity(self)`**
 
 Periodically checks for user activity and handles session timeout.
 
 Returns:
-- None
+
+* None
 
 **`expire_session(self)`**
 
 Terminates the user session when timeout occurs, cleans up resources, and closes the application.
 
 Returns:
-- None
+
+* None
 
 ```python
 # Create session manager (typically done by DatabaseApp)
@@ -797,11 +847,11 @@ session_manager.update_activity()
 
 #### 4.4.3 Implementation Notes
 
-- User activity is monitored through Tkinter event bindings (key press, mouse movements, clicks)
-- The session timeout is set to 15 minutes (900 seconds) by default
-- Scheduled check runs every second to evaluate session expiration
-- When a session expires, secure credentials are removed from memory
-- Uses Tkinter's `after()` method for scheduling timeout checks
+* User activity is monitored through Tkinter event bindings (key press, mouse movements, clicks)
+* The session timeout is set to 15 minutes (900 seconds) by default
+* Scheduled check runs every second to evaluate session expiration
+* When a session expires, secure credentials are removed from memory
+* Uses Tkinter's `after()` method for scheduling timeout checks
 
 ### 4.5 EnvioProgramado
 
@@ -809,8 +859,8 @@ session_manager.update_activity()
 
 #### 4.5.1 Key Attributes
 
-| Attribute | Type | Description |
-|-----------|------|-------------|
+| Attribute    | Type              | Description                                        |
+| ------------ | ----------------- | -------------------------------------------------- |
 | `db_manager` | `DatabaseManager` | Database connection for storing scheduled messages |
 
 #### 4.5.2 Core Methods
@@ -820,18 +870,21 @@ session_manager.update_activity()
 Initializes the scheduled message manager.
 
 Parameters:
-- `db_manager` (DatabaseManager): Database manager instance
+
+* `db_manager` (DatabaseManager): Database manager instance
 
 **`programar_envio(self, numero_cliente, fecha)`**
 
 Schedules a message for future delivery.
 
 Parameters:
-- `numero_cliente` (str): Client's phone number
-- `fecha` (datetime): Scheduled date and time for message delivery
+
+* `numero_cliente` (str): Client's phone number
+* `fecha` (datetime): Scheduled date and time for message delivery
 
 Returns:
-- `bool`: True if scheduling was successful
+
+* `bool`: True if scheduling was successful
 
 ```python
 # Create instance
@@ -850,10 +903,10 @@ else:
 
 #### 4.5.3 Implementation Notes
 
-- Messages are stored in the `envios_programados` database table
-- Default status for new scheduled messages is 'PENDIENTE' (pending)
-- The implementation delegates database operations to the DatabaseManager
-- Error handling includes logging failures but continuing execution
+* Messages are stored in the `envios_programados` database table
+* Default status for new scheduled messages is 'PENDIENTE' (pending)
+* The implementation delegates database operations to the DatabaseManager
+* Error handling includes logging failures but continuing execution
 
 ### 4.6 ProgramadorEnvios
 
@@ -861,11 +914,11 @@ else:
 
 #### 4.6.1 Key Attributes
 
-| Attribute | Type | Description |
-|-----------|------|-------------|
-| `db_manager` | `DatabaseManager` | Database manager for querying scheduled messages |
-| `app` | `DatabaseApp` | Reference to main application for sending messages |
-| `hilo` | `threading.Thread` | Background thread for monitoring |
+| Attribute    | Type               | Description                                        |
+| ------------ | ------------------ | -------------------------------------------------- |
+| `db_manager` | `DatabaseManager`  | Database manager for querying scheduled messages   |
+| `app`        | `DatabaseApp`      | Reference to main application for sending messages |
+| `hilo`       | `threading.Thread` | Background thread for monitoring                   |
 
 #### 4.6.2 Core Methods
 
@@ -874,22 +927,25 @@ else:
 Initializes the message scheduler and starts the monitoring thread.
 
 Parameters:
-- `db_manager` (DatabaseManager): Database manager instance
-- `app` (DatabaseApp): Main application instance
+
+* `db_manager` (DatabaseManager): Database manager instance
+* `app` (DatabaseApp): Main application instance
 
 **`verificar_envios(self)`**
 
 Continuously checks for pending scheduled messages that need to be sent.
 
 Returns:
-- None
+
+* None
 
 **`verificar_recordatorios(self)`**
 
 Checks for upcoming scheduled deliveries and sends reminder messages.
 
 Returns:
-- None
+
+* None
 
 ```python
 # This is automatically created during DatabaseApp initialization
@@ -901,11 +957,11 @@ programador = ProgramadorEnvios(db_manager, app)
 
 #### 4.6.3 Implementation Notes
 
-- Runs in a daemon thread that automatically terminates when the application closes
-- Periodic checks run every 60 seconds for pending messages
-- Handles database disconnections gracefully by continuing to retry
-- Sends reminders 24 hours before scheduled delivery
-- All operations are logged for auditing and troubleshooting
+* Runs in a daemon thread that automatically terminates when the application closes
+* Periodic checks run every 60 seconds for pending messages
+* Handles database disconnections gracefully by continuing to retry
+* Sends reminders 24 hours before scheduled delivery
+* All operations are logged for auditing and troubleshooting
 
 ### 4.7 AuditLogger
 
@@ -913,9 +969,9 @@ programador = ProgramadorEnvios(db_manager, app)
 
 #### 4.7.1 Key Attributes
 
-| Attribute | Type | Description |
-|-----------|------|-------------|
-| `logger` | `logging.Logger` | Python logger instance |
+| Attribute | Type             | Description            |
+| --------- | ---------------- | ---------------------- |
+| `logger`  | `logging.Logger` | Python logger instance |
 
 #### 4.7.2 Core Methods
 
@@ -928,13 +984,15 @@ Initializes the audit logging system.
 Logs an audit event with user context and optional error information.
 
 Parameters:
-- `action` (str): The action being performed
-- `user` (str): The username performing the action
-- `status` (str): Outcome status (SUCCESS, FAILED, etc.)
-- `error_code` (ErrorCode, optional): Error code enum if applicable
+
+* `action` (str): The action being performed
+* `user` (str): The username performing the action
+* `status` (str): Outcome status (SUCCESS, FAILED, etc.)
+* `error_code` (ErrorCode, optional): Error code enum if applicable
 
 Returns:
-- None
+
+* None
 
 ```python
 # Create logger
@@ -959,11 +1017,11 @@ audit_log.log_event(
 
 #### 4.7.3 Implementation Notes
 
-- Uses Python's built-in logging module with rotating file handler
-- Log files are limited to 5MB with 3 backup files
-- UTF-8 encoding ensures proper handling of international characters
-- Standardized log format includes timestamp, log level, and message
-- Error codes provide consistent error reporting and categorization
+* Uses Python's built-in logging module with rotating file handler
+* Log files are limited to 5MB with 3 backup files
+* UTF-8 encoding ensures proper handling of international characters
+* Standardized log format includes timestamp, log level, and message
+* Error codes provide consistent error reporting and categorization
 
 ### 4.8 UI Helper Classes
 
@@ -971,52 +1029,59 @@ audit_log.log_event(
 
 **Purpose:** Manages the display of notifications and alerts to the user in a consistent format.
 
-##### Key Attributes
+**Key Attributes**
 
-| Attribute | Type | Description |
-|-----------|------|-------------|
-| `root` | `tk.Tk` | Reference to the main application window |
+| Attribute | Type    | Description                              |
+| --------- | ------- | ---------------------------------------- |
+| `root`    | `tk.Tk` | Reference to the main application window |
 
-##### Core Methods
+**Core Methods**
 
 **`__init__(self, root)`**
 
 Initializes the notification manager.
 
 Parameters:
-- `root` (tk.Tk): The main application window
+
+* `root` (tk.Tk): The main application window
 
 **`show_success(self, message)`**
 
 Displays a success notification to the user.
 
 Parameters:
-- `message` (str): Message to display
+
+* `message` (str): Message to display
 
 Returns:
-- None
+
+* None
 
 **`show_error(self, message)`**
 
 Displays an error notification to the user.
 
 Parameters:
-- `message` (str): Error message to display
+
+* `message` (str): Error message to display
 
 Returns:
-- None
+
+* None
 
 **`_show_notification(self, title, message, color)`**
 
 Internal method to display a notification with specified styling.
 
 Parameters:
-- `title` (str): Notification title
-- `message` (str): Notification message
-- `color` (str): Background color for notification
+
+* `title` (str): Notification title
+* `message` (str): Notification message
+* `color` (str): Background color for notification
 
 Returns:
-- None
+
+* None
 
 ```python
 # Get reference from DatabaseApp
@@ -1029,61 +1094,67 @@ notification_manager.show_success("Operation completed successfully")
 notification_manager.show_error("Failed to connect to the database")
 ```
 
-##### Implementation Notes
+**Implementation Notes**
 
-- Notifications appear as small popup windows near the top-right corner
-- Notifications auto-dismiss after 3 seconds
-- Uses Tkinter Toplevel windows with custom styling
-- Different visual styling for different notification types
+* Notifications appear as small popup windows near the top-right corner
+* Notifications auto-dismiss after 3 seconds
+* Uses Tkinter Toplevel windows with custom styling
+* Different visual styling for different notification types
 
 #### 4.8.2 HelpTooltips
 
 **Purpose:** Provides contextual help tooltips for UI elements to enhance user experience.
 
-##### Key Attributes
+**Key Attributes**
 
-| Attribute | Type | Description |
-|-----------|------|-------------|
-| `root` | `tk.Tk` | Reference to the main application window |
-| `tooltip_window` | `tk.Toplevel` | Current tooltip window if active |
+| Attribute        | Type          | Description                              |
+| ---------------- | ------------- | ---------------------------------------- |
+| `root`           | `tk.Tk`       | Reference to the main application window |
+| `tooltip_window` | `tk.Toplevel` | Current tooltip window if active         |
 
-##### Core Methods
+**Core Methods**
 
 **`__init__(self, root)`**
 
 Initializes the tooltip manager.
 
 Parameters:
-- `root` (tk.Tk): The main application window
+
+* `root` (tk.Tk): The main application window
 
 **`add_tooltip(self, widget, text)`**
 
 Adds a tooltip to a specific widget.
 
 Parameters:
-- `widget` (tk.Widget): The widget to add tooltip to
-- `text` (str): Tooltip text
+
+* `widget` (tk.Widget): The widget to add tooltip to
+* `text` (str): Tooltip text
 
 Returns:
-- None
+
+* None
 
 **`show_tooltip(self, widget, text)`**
 
 Displays a tooltip near the specified widget.
 
 Parameters:
-- `widget` (tk.Widget): The widget to show tooltip for
-- `text` (str): Tooltip text
+
+* `widget` (tk.Widget): The widget to show tooltip for
+* `text` (str): Tooltip text
 
 Returns:
-- None
+
+* None
 
 **`hide_tooltip(self)`**
 
 Hides the currently displayed tooltip.
 
 Returns:
-- None
+
+* None
 
 ```python
 # Get reference from DatabaseApp
@@ -1096,12 +1167,12 @@ help_tooltips.add_tooltip(
 )
 ```
 
-##### Implementation Notes
+**Implementation Notes**
 
-- Tooltips are triggered by mouse hover events
-- Tooltips are positioned near the widget they describe
-- Uses Tkinter event bindings for mouse enter/leave events
-- Tooltip windows have a light yellow background with a simple border
+* Tooltips are triggered by mouse hover events
+* Tooltips are positioned near the widget they describe
+* Uses Tkinter event bindings for mouse enter/leave events
+* Tooltip windows have a light yellow background with a simple border
 
 ### 4.9 CacheDescripciones
 
@@ -1109,10 +1180,10 @@ help_tooltips.add_tooltip(
 
 #### 4.9.1 Key Attributes
 
-| Attribute | Type | Description |
-|-----------|------|-------------|
-| `cache` | `dict` | Dictionary storing cached descriptions |
-| `ttl` | `int` | Time-to-live in seconds for cache items |
+| Attribute | Type   | Description                             |
+| --------- | ------ | --------------------------------------- |
+| `cache`   | `dict` | Dictionary storing cached descriptions  |
+| `ttl`     | `int`  | Time-to-live in seconds for cache items |
 
 #### 4.9.2 Core Methods
 
@@ -1121,28 +1192,33 @@ help_tooltips.add_tooltip(
 Initializes the cache with specified time-to-live.
 
 Parameters:
-- `ttl` (int): Cache time-to-live in seconds (default: 1 hour)
+
+* `ttl` (int): Cache time-to-live in seconds (default: 1 hour)
 
 **`obtener(self, codigo)`**
 
 Retrieves a description from the cache if available and not expired.
 
 Parameters:
-- `codigo` (str): Product code
+
+* `codigo` (str): Product code
 
 Returns:
-- `str` or `None`: Cached description or None if not found/expired
+
+* `str` or `None`: Cached description or None if not found/expired
 
 **`guardar(self, codigo, descripcion)`**
 
 Stores a description in the cache with the current timestamp.
 
 Parameters:
-- `codigo` (str): Product code
-- `descripcion` (str): Product description
+
+* `codigo` (str): Product code
+* `descripcion` (str): Product description
 
 Returns:
-- None
+
+* None
 
 ```python
 # Create cache with 30 minute TTL
@@ -1166,11 +1242,11 @@ print(f"Product: {descripcion}")
 
 #### 4.9.3 Implementation Notes
 
-- Simple in-memory cache with time-based expiration
-- Cache items include the value and a timestamp for TTL calculation
-- Default TTL is 1 hour (3600 seconds)
-- No maximum size limit (relies on Python's memory management)
-- Thread-safe for basic operations (read/write)
+* Simple in-memory cache with time-based expiration
+* Cache items include the value and a timestamp for TTL calculation
+* Default TTL is 1 hour (3600 seconds)
+* No maximum size limit (relies on Python's memory management)
+* Thread-safe for basic operations (read/write)
 
 ## 5. Database Schema & Management
 
@@ -1242,7 +1318,7 @@ CREATE INDEX idx_clientes_numero ON clientes (numero_cliente);
 CREATE INDEX idx_clientes_codigo ON clientes (C_CODIGO);
 ```
 
-**favoritos_productos**
+**favoritos\_productos**
 
 Tracks which products are marked as favorites for monitoring.
 
@@ -1254,7 +1330,7 @@ CREATE TABLE favoritos_productos (
 );
 ```
 
-**envios_programados**
+**envios\_programados**
 
 Manages scheduled message deliveries to clients.
 
@@ -1273,7 +1349,7 @@ CREATE INDEX idx_envios_fecha_estado ON envios_programados (fecha_programada, es
 CREATE INDEX idx_envios_numero ON envios_programados (numero_cliente);
 ```
 
-**TEMP_ENVIO**
+**TEMP\_ENVIO**
 
 Temporary table used during bulk message sending operations.
 
@@ -1290,8 +1366,8 @@ CREATE TABLE TEMP_ENVIO (
 
 The application also interacts with existing external tables in the database:
 
-- `MA_PRODUCTOS`: Product master table containing product codes and descriptions
-- `MA_DEPOPROD`: Product inventory table with stock quantities by warehouse
+* `MA_PRODUCTOS`: Product master table containing product codes and descriptions
+* `MA_DEPOPROD`: Product inventory table with stock quantities by warehouse
 
 ### 5.3 Key Database Operations
 
@@ -1556,19 +1632,18 @@ The application implements a robust credential management system to secure sensi
 
 ![Encryption Architecture](encryption_architecture.png)
 
-*Note: Insert actual encryption flow diagram here.*
+_Note: Insert actual encryption flow diagram here._
 
 The encryption system uses a two-tier approach:
 
 1. **Master Key Storage**
-   - The master encryption key is stored in the system's secure keychain using the `keyring` library
-   - On Windows, this leverages the Windows Credential Manager
-   - The key is identified by the service name "DBClientApp" and username "encryption_key"
-
+   * The master encryption key is stored in the system's secure keychain using the `keyring` library
+   * On Windows, this leverages the Windows Credential Manager
+   * The key is identified by the service name "DBClientApp" and username "encryption\_key"
 2. **Data Encryption**
-   - User credentials and API tokens are encrypted using the Fernet symmetric encryption algorithm
-   - Fernet provides authenticated encryption ensuring data cannot be modified without detection
-   - The encrypted values are stored in configuration files or temporary session storage
+   * User credentials and API tokens are encrypted using the Fernet symmetric encryption algorithm
+   * Fernet provides authenticated encryption ensuring data cannot be modified without detection
+   * The encrypted values are stored in configuration files or temporary session storage
 
 #### 6.1.2 Key Management
 
@@ -1635,18 +1710,16 @@ The application implements a session management system to control user access an
 #### 6.2.1 Session Lifecycle
 
 1. **Session Initialization**
-   - A new session is started when the application launches
-   - Initial activity timestamp is recorded
-   - Event bindings for user activity are established
-
+   * A new session is started when the application launches
+   * Initial activity timestamp is recorded
+   * Event bindings for user activity are established
 2. **Activity Monitoring**
-   - User interactions (keyboard, mouse) reset the inactivity timer
-   - A background task checks for inactivity every second
-
+   * User interactions (keyboard, mouse) reset the inactivity timer
+   * A background task checks for inactivity every second
 3. **Session Termination**
-   - After 15 minutes (configurable) of inactivity, the session expires
-   - Temporary credentials are securely removed from memory
-   - The application exits with a notification to the user
+   * After 15 minutes (configurable) of inactivity, the session expires
+   * Temporary credentials are securely removed from memory
+   * The application exits with a notification to the user
 
 #### 6.2.2 Implementation Details
 
@@ -1676,15 +1749,15 @@ def check_activity(self):
 
 The default session timeout is 15 minutes (900 seconds). To modify this timeout:
 
-1. Edit the `SessionManager` class initialization:
-   ```python
-   self.timeout = 900  # Change to desired timeout in seconds
-   ```
+1.  Edit the `SessionManager` class initialization:
 
+    ```python
+    self.timeout = 900  # Change to desired timeout in seconds
+    ```
 2. Recommended timeout values:
-   - Minimum: 300 seconds (5 minutes) for high-security environments
-   - Standard: 900 seconds (15 minutes) for normal usage
-   - Extended: 1800 seconds (30 minutes) for development or low-risk environments
+   * Minimum: 300 seconds (5 minutes) for high-security environments
+   * Standard: 900 seconds (15 minutes) for normal usage
+   * Extended: 1800 seconds (30 minutes) for development or low-risk environments
 
 ### 6.3 Input Validation and Sanitization
 
@@ -1792,38 +1865,33 @@ All log entries follow a standardized format:
 The application logs the following event types:
 
 1. **Authentication Events**
-   - User session starts and expirations
-   - Database connection attempts
-
+   * User session starts and expirations
+   * Database connection attempts
 2. **Data Modification Events**
-   - Record creation, updates, and deletions
-   - Configuration changes
-
+   * Record creation, updates, and deletions
+   * Configuration changes
 3. **Security Events**
-   - Invalid input attempts
-   - Potential SQL injection attempts
-   - Session timeouts
-
+   * Invalid input attempts
+   * Potential SQL injection attempts
+   * Session timeouts
 4. **System Events**
-   - Application startup and shutdown
-   - Background thread status
-   - API communication status
+   * Application startup and shutdown
+   * Background thread status
+   * API communication status
 
 #### 6.4.3 Log Monitoring Recommendations
 
 For effective security monitoring:
 
 1. **Regular Review**
-   - Implement a process for regular log review, especially for FAILED actions
-   - Focus on patterns of multiple failed attempts
-
+   * Implement a process for regular log review, especially for FAILED actions
+   * Focus on patterns of multiple failed attempts
 2. **Log File Protection**
-   - Ensure audit.log files have appropriate access restrictions
-   - Consider moving logs to a secure, centralized location for larger deployments
-
+   * Ensure audit.log files have appropriate access restrictions
+   * Consider moving logs to a secure, centralized location for larger deployments
 3. **Log Retention**
-   - The default configuration retains approximately 20MB of logs (main + 3 backups)
-   - For compliance requirements, implement additional log archiving
+   * The default configuration retains approximately 20MB of logs (main + 3 backups)
+   * For compliance requirements, implement additional log archiving
 
 ### 6.5 Security Best Practices
 
@@ -1867,15 +1935,15 @@ While the application primarily uses the keychain and encrypted configuration fi
 
 #### 6.6.1 Supported Environment Variables
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `DB_SERVER` | Database server address | *Uses config file* |
-| `DB_NAME` | Database name | *Uses config file* |
-| `DB_USER` | Database username | *Uses config file* |
-| `DB_PASS` | Database password | *Uses config file* |
-| `WA_TOKEN` | WhatsApp API token | *Uses keychain* |
-| `SESSION_TIMEOUT` | Session timeout in seconds | 900 |
-| `LOG_LEVEL` | Logging level (DEBUG, INFO, etc.) | INFO |
+| Variable          | Description                       | Default            |
+| ----------------- | --------------------------------- | ------------------ |
+| `DB_SERVER`       | Database server address           | _Uses config file_ |
+| `DB_NAME`         | Database name                     | _Uses config file_ |
+| `DB_USER`         | Database username                 | _Uses config file_ |
+| `DB_PASS`         | Database password                 | _Uses config file_ |
+| `WA_TOKEN`        | WhatsApp API token                | _Uses keychain_    |
+| `SESSION_TIMEOUT` | Session timeout in seconds        | 900                |
+| `LOG_LEVEL`       | Logging level (DEBUG, INFO, etc.) | INFO               |
 
 #### 6.6.2 Environment Variable Loading
 
@@ -1918,7 +1986,7 @@ The application integrates with the Meta WhatsApp Business API to send automated
 
 ![WhatsApp Integration Architecture](whatsapp_architecture.png)
 
-*Note: Insert actual architecture diagram here.*
+_Note: Insert actual architecture diagram here._
 
 The WhatsApp integration follows these key principles:
 
@@ -1960,11 +2028,11 @@ WhatsApp Business API requires the use of pre-approved message templates. The ap
 
 #### 7.2.1 Supported Templates
 
-| Template Name | Purpose | Variables |
-|---------------|---------|-----------|
-| `alerta_stock` | Stock availability notifications | Product list |
-| `recordatorio_entrega` | Delivery reminders | None (fixed text) |
-| `sede` | Store pickup notifications | None (fixed text) |
+| Template Name          | Purpose                          | Variables         |
+| ---------------------- | -------------------------------- | ----------------- |
+| `alerta_stock`         | Stock availability notifications | Product list      |
+| `recordatorio_entrega` | Delivery reminders               | None (fixed text) |
+| `sede`                 | Store pickup notifications       | None (fixed text) |
 
 #### 7.2.2 Template Selection Logic
 
@@ -2150,9 +2218,9 @@ except Exception as e:
 
 #### 7.4.2 Common Error Types and Resolutions
 
-| Error Type | Description | Resolution |
-|-----------|-------------|------------|
-| Authentication Failure | Invalid or expired token | Update the WhatsApp API token in settings |
-| Template Not Found | Template name isn't recognized | Verify template names in Meta Business Manager |
-| Parameter Mismatch | Template parameters don't match | Review template format and parameter types |
-| Rate Limiting | Too many requests
+| Error Type             | Description                     | Resolution                                     |
+| ---------------------- | ------------------------------- | ---------------------------------------------- |
+| Authentication Failure | Invalid or expired token        | Update the WhatsApp API token in settings      |
+| Template Not Found     | Template name isn't recognized  | Verify template names in Meta Business Manager |
+| Parameter Mismatch     | Template parameters don't match | Review template format and parameter types     |
+| Rate Limiting          | Too many requests               |                                                |

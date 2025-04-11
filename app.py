@@ -166,6 +166,7 @@ class SessionManager:
         self.last_activity = time.time()
         if not self.session_active:
             self.start_session()
+        return 0  # Valor entero apropiado para WNDPROC en Windows
 
     def start_session(self):
         self.session_active = True   
@@ -264,6 +265,10 @@ class DatabaseManager:
         self.cursor = None
         self.connected_server = ""
         self.config = configparser.ConfigParser()
+        self.server = None
+        self.database = None
+        self.user = None
+        self.password = None
 
     def table_exists(self, table_name: str) -> bool:
         """Verifica si una tabla existe en la base de datos."""
@@ -279,14 +284,33 @@ class DatabaseManager:
             print(f"Error verificando existencia de tabla: {str(e)}")
             return False
 
-    def connect(self, server, database, user, password):
+    def connect(self, server, database, user, password, retry_attempts=2):
+        """
+        Connect to the database with retry logic and better error handling
+        
+        Parameters:
+            server (str): Database server address
+            database (str): Database name
+            user (str): Username for SQL authentication (empty for Windows auth)
+            password (str): Password for SQL authentication
+            retry_attempts (int): Number of connection retries before failing
+            
+        Returns:
+            bool: True if connected successfully
+            
+        Raises:
+            Exception: If connection fails after all retries
+        """
+        # Log connection attempt with sanitized info
+        #print(f"Attempting to connect to server: {server}, database: {database}, user: {user if user else 'Windows Auth'}")
+        
         # Cadena inicial sin database para crear la BD si no existe
         initial_conn_str = (
             f"DRIVER={{SQL Server}};"
             f"SERVER={server};"
             "Encrypt=no;"          
-            "TrustServerCertificate=no;"  
-            "Connection Timeout=15;"
+            "TrustServerCertificate=yes;"  # Changed to yes for better compatibility
+            "Connection Timeout=30;"       # Increased timeout
         )
     
         if user:
@@ -294,22 +318,43 @@ class DatabaseManager:
         else:
             initial_conn_str += "Trusted_Connection=yes;"
 
-        # Intentar crear la base de datos si no existe
-        try:
-            temp_conn = pyodbc.connect(initial_conn_str)  # Sin database
-            temp_cursor = temp_conn.cursor()
-            temp_cursor.execute(f"""
-                IF NOT EXISTS (
-                    SELECT name FROM sys.databases 
-                    WHERE name = '{database}'
-                )
-                CREATE DATABASE {database}
-            """)
-            temp_conn.commit()
-            temp_conn.close()
-        except pyodbc.Error as e:
-            error_msg = f"{ErrorCode.DB_CONNECTION_FAILED}: {str(e)}"
-            raise Exception(error_msg) from e
+        # Track retries
+        attempt = 0
+        last_error = None
+        
+        while attempt <= retry_attempts:
+            if attempt > 0:
+                print(f"Retry attempt {attempt} of {retry_attempts}...")
+                time.sleep(2)  # Add delay between retries
+                
+            # Intentar crear la base de datos si no existe
+            try:
+                #print(f"Connecting to server without specifying database...")
+                temp_conn = pyodbc.connect(initial_conn_str)  # Sin database
+                temp_cursor = temp_conn.cursor()
+                #print(f"Creating database {database} if it doesn't exist...")
+                temp_cursor.execute(f"""
+                    IF NOT EXISTS (
+                        SELECT name FROM sys.databases 
+                        WHERE name = '{database}'
+                    )
+                    CREATE DATABASE {database}
+                """)
+                temp_conn.commit()
+                temp_conn.close()
+                # print(f"Database {database} is ready")
+                # If we get here, break out of retry loop
+                break
+            except pyodbc.Error as e:
+                last_error = e
+                error_details = str(e).replace('\n', ' ')
+                print(f"Connection attempt {attempt+1} failed: {error_details}")
+                attempt += 1
+                
+                # Only raise exception if we've exhausted all retries
+                if attempt > retry_attempts:
+                    error_msg = f"{ErrorCode.DB_CONNECTION_FAILED}: {str(e)}"
+                    raise Exception(error_msg) from e
 
         # Cadena de conexión final CON database
         final_conn_str = initial_conn_str + f"DATABASE={database};"
@@ -318,6 +363,11 @@ class DatabaseManager:
             self.conn = pyodbc.connect(final_conn_str)
             self.cursor = self.conn.cursor()
             self.connected_server = server
+            # Store connection parameters for potential reconnection
+            self.server = server
+            self.database = database
+            self.user = user
+            self.password = password
             self.create_table()
             return True
         except pyodbc.Error as e:
@@ -457,8 +507,21 @@ class DatabaseManager:
 
     def fetch_data(self, query, params=None):
         if not self.conn:  # <-- Validación crítica
-            error_msg = f"{ErrorCode.DB_CONNECTION_FAILED}: No hay conexión activa"
-            raise Exception(error_msg)
+            # Attempt to reconnect if we have connection parameters
+            if self.server and self.database:
+                try:
+                    print("Intentando reconexión a la base de datos...")
+                    if self.connect(self.server, self.database, self.user, self.password):
+                        print("Reconexión exitosa")
+                    else:
+                        error_msg = f"{ErrorCode.DB_CONNECTION_FAILED}: No se pudo reconectar"
+                        raise Exception(error_msg)
+                except Exception as e:
+                    error_msg = f"{ErrorCode.DB_CONNECTION_FAILED}: No hay conexión activa - {str(e)}"
+                    raise Exception(error_msg)
+            else:
+                error_msg = f"{ErrorCode.DB_CONNECTION_FAILED}: No hay conexión activa"
+                raise Exception(error_msg)
         try:
             if params:
                 self.cursor.execute(query, params)
@@ -474,8 +537,7 @@ class DatabaseApp:
     def __init__(self, root):
         self.ultimas_notificaciones = set()
         
-
-
+        # Inicialización de componentes críticos
         self.cred_manager = SecureCredentialsManager()
         self.enviando = False
         self.session = SessionManager(root)
@@ -485,7 +547,14 @@ class DatabaseApp:
         self.db_manager = DatabaseManager()
         self.settings_window = None
         self.show_pwd_var = None
-        self.httpd = None        
+        self.httpd = None
+        
+        # Inicialización temprana de atributos de paginación
+        self.page_size = 250
+        self.current_page = 1
+        self.current_filter = 'TODAS'
+        self.cached_alertas = []
+        self.last_refresh = None
         
         # Configuración de UI y bindings
 
@@ -500,13 +569,8 @@ class DatabaseApp:
         self.monitor_thread.start()
         
 
-         #Sistema de Paginacion
-        self.last_refresh = None
-        self.current_page = 1
-        self.page_size = 250
-        self.current_filter = 'TODAS'
-        self.cached_alertas = []  
-        
+
+        # Sistema de Paginacion ya inicializado arriba
         self.attempt_auto_connect()
         self.programar_actualizaciones_stock()
 
@@ -564,8 +628,10 @@ class DatabaseApp:
     def actualizar_alertas_stock(self, force_refresh=False):
         """Actualiza las alertas con paginación y caché"""
         try:
-            if not hasattr(self, 'last_refresh'):  # <-- Prevenir acceso prematuro
-                self.last_refresh = None
+            # Check for active database connection
+            if not hasattr(self.db_manager, 'conn') or not self.db_manager.conn:
+                print("No hay conexión activa a la base de datos para actualizar alertas")
+                return
             # Forzar refresco si han pasado más de 30 minutos
             refresh_needed = (
                 force_refresh or 
@@ -598,6 +664,7 @@ class DatabaseApp:
             self.stock_tree.update_idletasks() 
         
         except Exception as e:
+            print(f"Error al actualizar alertas: {str(e)}")
             self.log(f"Error crítico al actualizar alertas: {str(e)}", "ERROR")
 
     def mostrar_alertas_paginadas(self, datos):
@@ -790,10 +857,10 @@ class DatabaseApp:
     def setup_bindings(self):
         """Configurar eventos del teclado y widgets"""
         # Doble click en la tabla
-        self.tree.bind("<Double-1>", self.on_tree_double_click)
+        self.tree.bind("<Double-1>", lambda e: self.on_tree_double_click(e) or 0)
         
         # Validación en tiempo real del código de producto
-        self.cod_producto.bind("<KeyRelease>", self.buscar_descripcion)
+        self.cod_producto.bind("<KeyRelease>", lambda e: self.buscar_descripcion(e) or 0)
 
     def setup_modern_ui(self):   
         self.root.title("Gestión de Clientes - Corporativo")
@@ -875,36 +942,35 @@ class DatabaseApp:
         tree_frame = ttk.Frame(main_frame)
         tree_frame.pack(fill=tk.BOTH, expand=True)
     
-        # Configurar Treeview y scrollbars
-        self.stock_tree = ttk.Treeview(tree_frame, 
-                                    columns=("Código", "Descripción", "Stock", "Nivel"),
-                                    show="headings",
-                                    height=15)
-    
-        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.stock_tree.yview)
-        hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.stock_tree.xview)
-        self.stock_tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
-    
-        # Grid layout para mejor control
-        self.stock_tree.grid(row=0, column=0, sticky="nsew")
-        vsb.grid(row=0, column=1, sticky="ns")
-        hsb.grid(row=1, column=0, sticky="ew")
-    
-        tree_frame.grid_rowconfigure(0, weight=1)
-        tree_frame.grid_columnconfigure(0, weight=1)
-    
-        # Configurar columnas
+        # Define columns configuration first
         columns_config = {
             "Favorito": {"width": 50, "anchor": "center", "stretch": False},
             "Código": {"width": 100, "anchor": "center"},
             "Descripción": {"width": 350, "anchor": "w"},
             "Stock": {"width": 80, "anchor": "center"},
             "Nivel": {"width": 100, "anchor": "center"}
-            }
+        }
         
-        self.stock_tree['columns'] = ("Favorito", "Código", "Descripción", "Stock", "Nivel")
+        # Configurar Treeview y scrollbars
+        self.stock_tree = ttk.Treeview(tree_frame, 
+                                    columns=("Favorito", "Código", "Descripción", "Stock", "Nivel"),
+                                    show="headings",
+                                    height=15)
+        
+        # Crear scrollbars antes de usarlas
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.stock_tree.yview)
+        hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.stock_tree.xview)
+        self.stock_tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
 
-        # Configurar checkbox
+        # Colocar componentes en el grid
+        self.stock_tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+    
+        tree_frame.grid_rowconfigure(0, weight=1)
+        tree_frame.grid_columnconfigure(0, weight=1)
+        
+        # Configurar cabeceras y columnas
         self.stock_tree.tag_configure('favorito')
         self.stock_tree.heading("Favorito", text="✓")
         self.stock_tree.column("Favorito", width=40, anchor=tk.CENTER)
@@ -920,50 +986,77 @@ class DatabaseApp:
         self.stock_tree.tag_configure('hover', background='#f0f0f0')
         self.stock_tree.tag_configure('selected', background='#d0d0d0')
     
-        # Carga inicial
-        self.actualizar_alertas_stock()
         # Manejar clics en la columna de favoritos
+        # Configurar primero todos los tags
+        self.stock_tree.tag_configure('favorito', background='#FFFFE0')
+        self.stock_tree.tag_configure('hover', background='#f0f0f0')
+        self.stock_tree.tag_configure('selected', background='#d0d0d0')
+        
+        # Luego enlazar los eventos con manejadores que retornan valores apropiados
         self.stock_tree.bind('<Button-1>', self.on_favorito_click)
-
-
-        # Diferenciacion con raton (feedback visual)
-
-        self.stock_tree.tag_configure('selected', background='#e0e0e0')
         self.stock_tree.bind('<Enter>', self.hover_row)
         self.stock_tree.bind('<Leave>', self.leave_row)
         self.stock_tree.bind('<<TreeviewSelect>>', self.select_row)
+        # Carga inicial sólo si hay conexión activa
+        if hasattr(self.db_manager, 'conn') and self.db_manager.conn:
+            self.actualizar_alertas_stock()
+        else:
+            print("No hay conexión activa a la base de datos para cargar alertas iniciales")
+
+
+        # Nota: Configuraciones de hover ya realizadas arriba
 
     def hover_row(self, event):
         item = self.stock_tree.identify_row(event.y)
-        self.stock_tree.tk.call(self.stock_tree, 'tag', 'add', 'hover', item)
+        if item:  # Solo añadir tag si se identificó un item
+            try:
+                self.stock_tree.tk.call(self.stock_tree, 'tag', 'add', 'hover', item)
+            except Exception as e:
+                print(f"Error en hover_row: {str(e)}")
+        return 0  # Valor entero apropiado para WNDPROC en Windows
 
     def leave_row(self, event):
         item = self.stock_tree.identify_row(event.y)
-        self.stock_tree.tk.call(self.stock_tree, 'tag', 'remove', 'hover', item)
+        if item:  # Solo remover tag si se identificó un item
+            try:
+                self.stock_tree.tk.call(self.stock_tree, 'tag', 'remove', 'hover', item)
+            except Exception as e:
+                print(f"Error en leave_row: {str(e)}")
+        return 0  # Valor entero apropiado para WNDPROC en Windows
 
     def select_row(self, event):
         selected_items = self.stock_tree.selection()
         if not selected_items:  # Verificar si hay selección
-            return
+            return 0  # Valor entero apropiado para WNDPROC en Windows
         item = selected_items[0]
-        # Limpiar tags previos
-        self.stock_tree.tk.call(self.stock_tree, 'tag', 'remove', 'selected', '')
-        # Aplicar tag a nuevo item seleccionado
-        self.stock_tree.tk.call(self.stock_tree, 'tag', 'add', 'selected', item)
+        try:
+            # Limpiar tags previos
+            self.stock_tree.tk.call(self.stock_tree, 'tag', 'remove', 'selected', '')
+            # Aplicar tag a nuevo item seleccionado
+            self.stock_tree.tk.call(self.stock_tree, 'tag', 'add', 'selected', item)
+        except Exception as e:
+            print(f"Error en select_row: {str(e)}")
+        return 0  # Valor entero apropiado para WNDPROC en Windows
 
     
 
     def on_favorito_click(self, event):
         """Manejar clic en la columna de favoritos"""
-        region = self.stock_tree.identify_region(event.x, event.y)
-        if region == "cell":
-            col = self.stock_tree.identify_column(event.x)
-            item = self.stock_tree.identify_row(event.y)
-        
-            if col == "#1":  # Columna de favoritos (ajustar según la posición real)
-                codigo = self.stock_tree.item(item, 'values')[1]  # Obtener código
-                if self.db_manager.toggle_favorito(codigo):
-                    self.actualizar_alertas_stock(force_refresh=True)
+        try:
+            region = self.stock_tree.identify_region(event.x, event.y)
+            if region == "cell":
+                col = self.stock_tree.identify_column(event.x)
+                item = self.stock_tree.identify_row(event.y)
+                
+                if item and col == "#1":  # Columna de favoritos (ajustar según la posición real)
+                    values = self.stock_tree.item(item, 'values')
+                    if values and len(values) > 1:
+                        codigo = values[1]  # Obtener código
+                        if self.db_manager.toggle_favorito(codigo):
+                            self.actualizar_alertas_stock(force_refresh=True)
+        except Exception as e:
+            print(f"Error en on_favorito_click: {str(e)}")
+        return 0  # Valor entero apropiado para WNDPROC en Windows
         
 
     def mostrar_alertas_paginadas(self, datos):
@@ -1132,10 +1225,10 @@ class DatabaseApp:
 
         # Cargar eventos iniciales
         self.cargar_eventos_calendario()
-        self.cal.bind("<<CalendarSelected>>", self.mostrar_eventos_fecha)
-    
+        self.cal.bind("<<CalendarSelected>>", lambda e: self.mostrar_eventos_fecha(e) or 0)
     def mostrar_eventos_fecha(self, event=None):
         fecha_seleccionada = self.cal.get_date()
+        # Ensure return value for WNDPROC
         self.eventos_text.delete(1.0, tk.END)
     
         try:
@@ -1152,7 +1245,7 @@ class DatabaseApp:
         
             if not eventos:
                 self.eventos_text.insert(tk.END, "No hay eventos para esta fecha")
-                return
+                return 0  # Return integer for WNDPROC if no events
             
             for num_cliente, fecha, estado, tipo in eventos:
                 self.eventos_text.insert(tk.END, 
@@ -1160,11 +1253,12 @@ class DatabaseApp:
                     f"  Tipo: {tipo}\n"
                     f"  Estado: {estado}\n"
                     f"  Hora: {fecha.strftime('%H:%M')}\n"
-                "------------------------\n")
+                    "------------------------\n")
                 
         except Exception as e:
             self.eventos_text.insert(tk.END, f"Error obteniendo eventos: {str(e)}")
-
+        
+        return 0  # Return integer for WNDPROC
     def show_records_view(self):
         self.main_notebook.select(self.records_tab)
 
@@ -1742,8 +1836,8 @@ class DatabaseApp:
             self.tooltip_window = None
         
         def add_tooltip(self, widget, text):
-            widget.bind("<Enter>", lambda e: self.show_tooltip(widget, text))
-            widget.bind("<Leave>", lambda e: self.hide_tooltip())
+            widget.bind("<Enter>", lambda e: self.show_tooltip(widget, text) or 0)  # Return 0 for WNDPROC
+            widget.bind("<Leave>", lambda e: self.hide_tooltip() or 0)  # Return 0 for WNDPROC
         
         def show_tooltip(self, widget, text):
             x = widget.winfo_rootx() + 20
@@ -1756,11 +1850,12 @@ class DatabaseApp:
             label = ttk.Label(self.tooltip_window, text=text, background="#ffffe0",
                         relief="solid", borderwidth=1, padding=5)
             label.pack()
+            return 0  # Return integer for WNDPROC
         
         def hide_tooltip(self):
             if self.tooltip_window:
                 self.tooltip_window.destroy()
-
+            return 0  # Return integer for WNDPROC
 
 
 
@@ -2061,6 +2156,7 @@ class DatabaseApp:
 
     def buscar_descripcion(self, event=None):
         """Obtiene la descripción y actualiza el campo correspondiente"""
+        # Ensure return value for WNDPROC
         codigo = self.cod_producto.get().strip()
         clean_codigo = re.sub(r'\D', '', codigo)  # Limpieza del código
     
@@ -2095,10 +2191,12 @@ class DatabaseApp:
         except Exception as e:
             self.actualizar_descripcion("Error en consulta")
             messagebox.showerror("Error", f"Error obteniendo datos: {str(e)}")
+        return 0  # Return integer for WNDPROC
     
                        
     def on_tree_double_click(self, event):
         """Manejo de doble click en la tabla con limpieza de datos"""
+        # Return 0 at end for WNDPROC
         selected = self.tree.selection()
         if selected:
             try:
@@ -2122,7 +2220,7 @@ class DatabaseApp:
                 messagebox.showerror("Error", "El registro seleccionado es inválido")
             except Exception as e:
                 messagebox.showerror("Error", f"Error al cargar datos: {str(e)}")
-
+        return 0  # Return integer for WNDPROC
     
 
     def notificar(self):

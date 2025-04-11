@@ -4,6 +4,7 @@
 * [Instalación](installation/)
   * [Requisitos](installation/requirements.md)
   * [Configuración Inicial](installation/setup.md)
+  * [Documento tecnico](configuration/technical_documentation.md)
 * [Configuración](configuration/)
   * [Base de Datos](configuration/database.md)
   * [API de WhatsApp](configuration/whatsapp-api.md)
@@ -16,4 +17,3 @@
   * [Manejo de Errores](development/error-codes.md)
 * [Contribución](CONTRIBUTING.md)
 
-asdasdasdasdsadasdsa

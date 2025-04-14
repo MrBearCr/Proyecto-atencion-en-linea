@@ -1,0 +1,48 @@
+```mermaid
+sequenceDiagram
+    participant Usuario
+    participant Sistema
+    participant BD as Base de Datos
+    participant SrvMensajes as Servicio Mensajes
+    participant WhatsApp
+    participant Auditoria
+    participant Cliente
+
+    rect rgb(255, 230, 230)
+    Note over Usuario,WhatsApp: Envio Individual de Mensaje
+    Usuario->>Sistema: Solicita envio de mensaje
+    Sistema->>BD: Verifica datos del cliente
+    BD-->>Sistema: Retorna informacion
+    Sistema->>SrvMensajes: Solicita envio de mensaje
+    SrvMensajes->>WhatsApp: Envia mensaje
+    WhatsApp-->>SrvMensajes: Confirma recepcion
+    SrvMensajes->>BD: Registra ID de mensaje
+    WhatsApp->>Cliente: Entrega mensaje
+    SrvMensajes-->>Sistema: Notifica resultado de envio
+    Sistema-->>Usuario: Muestra confirmacion
+    SrvMensajes->>Auditoria: Registra envio completado
+    end
+
+    rect rgb(230, 230, 250)
+    Note over Usuario,WhatsApp: Envio Masivo de Mensajes
+    Usuario->>Sistema: Solicita envio masivo
+    Sistema->>Sistema: Validacion de plantilla y permisos
+    Sistema->>BD: Consulta lista de clientes
+    BD-->>Sistema: Retorna lista de destinatarios
+    Sistema->>SrvMensajes: Programacion de envio masivo
+    SrvMensajes->>SrvMensajes: Procesa envios por lotes
+    loop Para cada cliente en el lote
+        SrvMensajes->>WhatsApp: Envia mensaje personalizado
+        WhatsApp-->>SrvMensajes: Confirma recepcion
+        SrvMensajes->>BD: Registra ID y estado inicial
+        WhatsApp->>Cliente: Entrega mensaje
+    end
+    SrvMensajes->>Sistema: Actualiza progreso de envio
+    Sistema-->>Usuario: Muestra estado de la operacion
+    WhatsApp-->>SrvMensajes: Notifica estados (asincrono)
+    SrvMensajes->>BD: Actualiza estados finales
+    SrvMensajes->>Auditoria: Registra resumen de operacion
+    Sistema-->>Usuario: Muestra reporte final
+    end
+```
+

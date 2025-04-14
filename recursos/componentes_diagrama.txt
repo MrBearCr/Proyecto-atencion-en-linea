@@ -1,0 +1,25 @@
+```mermaid
+graph TB
+    subgraph "Frontend"
+        A[WebUI] --> B[Componentes React]
+        B --> C[Gestion Estado]
+    end
+    
+    subgraph "Backend"
+        D[API Controllers] --> E[Servicios]
+        E --> F[Repositorios]
+        G[Middleware Autenticacion]
+    end
+    
+    subgraph "Servicios Externos"
+        H[WhatsApp API]
+        I[Servicio Email]
+    end
+    
+    C --> D
+    D --> G
+    F --> J[(SQL Server)]
+    E --> H
+    E --> I
+```
+

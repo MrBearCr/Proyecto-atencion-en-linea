@@ -1,0 +1,33 @@
+```mermaid
+graph TD
+    subgraph "Capa de Presentacion"
+        A[Interfaz Web] --> B[Formularios]
+        A --> C[Panel Admin]
+        B --> D[Validacion Cliente]
+        C --> E[Gestion Usuarios]
+    end
+    
+    subgraph "Capa de Negocio"
+        F[Servicios API] --> G[Logica Negocio]
+        G --> H[Gestión Mensajes]
+        G --> I[Autenticacion]
+    end
+    
+    subgraph "Capa de Datos"
+        J[Repositorios] --> K[(SQL Server)]
+        J --> L[Cache]
+        M[Auditoria] --> K
+    end
+    
+    subgraph "Servicios Externos"
+        N[API WhatsApp]
+    end
+    
+    D --> F
+    E --> F
+    H --> N
+    I --> J
+    G --> J
+    H --> M
+```
+

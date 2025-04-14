@@ -1,0 +1,76 @@
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Usuario as "Usuario"
+    participant UI as "Interfaz Web"
+    participant Auth as "Servicio de Autenticacion"
+    participant Token as "Gestor de Tokens"
+    participant BD as "Base de Datos"
+    participant Audit as "Sistema de Auditoria"
+    
+    rect rgb(255, 230, 230)
+    Note over Usuario,Audit: Proceso de Inicio de Sesion
+    Usuario->>UI: Ingresa credenciales (usuario/contraseña)
+    UI->>Auth: Envia solicitud de autenticacion
+    Auth->>BD: Consulta informacion de usuario
+    BD-->>Auth: Retorna datos del usuario (hash contraseña)
+    Auth->>Auth: Verifica contraseña con hash
+    alt Credenciales validas
+        Auth->>Token: Solicita generacion de token JWT
+        Token->>Token: Genera token con claims y tiempo de expiracion
+        Token-->>Auth: Retorna token JWT
+        Auth->>Auth: Configura informacion de sesion
+        Auth->>Audit: Registra inicio de sesion exitoso
+        Auth-->>UI: Retorna token y datos de sesion
+        UI-->>Usuario: Redirige a pantalla principal
+    else Credenciales invalidas
+        Auth->>Auth: Incrementa contador de intentos fallidos
+        Auth->>Audit: Registra intento fallido
+        Auth-->>UI: Retorna error de autenticacion
+        alt Demasiados intentos fallidos
+            Auth->>BD: Actualiza estado de bloqueo temporal
+            UI-->>Usuario: Muestra mensaje de cuenta bloqueada
+        else
+            UI-->>Usuario: Muestra mensaje de credenciales incorrectas
+        end
+    end
+    end
+    
+    rect rgb(230, 230, 250)
+    Note over Usuario,Audit: Renovacion Automatica de Sesion
+    Usuario->>UI: Realiza accion en la aplicacion
+    UI->>Auth: Envia token actual para validacion
+    Auth->>Token: Verifica validez del token JWT
+    alt Token valido con tiempo suficiente
+        Token-->>Auth: Confirma validez del token
+        Auth-->>UI: Permite continuar la operacion
+        UI-->>Usuario: Procesa accion solicitada
+    else Token valido pero proximo a expirar
+        Token-->>Auth: Indica proximidad de expiracion
+        Auth->>Token: Solicita renovacion de token
+        Token->>Token: Genera nuevo token con mismos claims
+        Token-->>Auth: Retorna nuevo token JWT
+        Auth-->>UI: Retorna nuevo token y permite operacion
+        UI->>UI: Actualiza token almacenado
+        UI-->>Usuario: Procesa accion sin interrupcion
+        Auth->>Audit: Registra renovacion de sesion
+    else Token expirado o invalido
+        Token-->>Auth: Notifica token invalido
+        Auth-->>UI: Deniega acceso y solicita reautenticacion
+        UI-->>Usuario: Redirige a pantalla de login
+        Auth->>Audit: Registra sesion expirada
+    end
+    end
+    
+    rect rgb(255, 240, 245)
+    Note over Usuario,Audit: Cierre de Sesion
+    Usuario->>UI: Solicita cerrar sesion
+    UI->>Auth: Envia peticion de cierre de sesion
+    Auth->>Auth: Invalida token actual
+    Auth->>Audit: Registra cierre de sesion
+    Auth-->>UI: Confirma cierre exitoso
+    UI->>UI: Elimina token y datos de sesion local
+    UI-->>Usuario: Redirige a pantalla de login
+    end
+```
+

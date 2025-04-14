@@ -721,6 +721,7 @@ class DatabaseApp:
                         self.ultimas_notificaciones.add(clave)
                     
             except Exception as e:
+                print(f"Error monitoreando favoritos: {str(e)}")
                 self.log(f"Error monitoreo favoritos: {str(e)}", "ERROR")
             time.sleep(100) # 5 minutos
 

@@ -30,6 +30,41 @@ from win10toast import ToastNotifier
 
 CONFIG_FILE = 'db_config.ini'
 
+def load_modules_config():
+        """Lee la sección [Modules] de db_config.ini o crea valores por defecto."""
+        config = configparser.ConfigParser()
+        # Si no existe, load_connection_settings ya habrá creado el ini
+        if os.path.exists(CONFIG_FILE):
+            config.read(CONFIG_FILE)
+        # Si no hay sección Modules, la inicializamos
+        if 'Modules' not in config:
+            config['Modules'] = {
+                'envio_mensajes': 'True',
+                'estadisticas':   'True',
+                'calendario':     'False',
+                'stock':          'True'
+            }
+            with open(CONFIG_FILE, 'w') as f:
+                config.write(f)
+        # Convertir a booleans
+        mods = {}
+        for key in config['Modules']:
+            mods[key] = config.getboolean('Modules', key, fallback=False)
+        return mods
+
+def save_modules_config(mods: dict):
+        """Guarda en [Modules] del ini el dict de estados."""
+        config = configparser.ConfigParser()
+        # Cargamos todo el ini existente (incluye 'Database'…)
+        if os.path.exists(CONFIG_FILE):
+            config.read(CONFIG_FILE)
+        if 'Modules' not in config:
+            config.add_section('Modules')
+        for key, val in mods.items():
+            config['Modules'][key] = 'True' if val else 'False'
+        with open(CONFIG_FILE, 'w') as f:
+            config.write(f)
+    
 class CacheDescripciones:
     def __init__(self, ttl=3600):
         self.cache = {}
@@ -543,6 +578,7 @@ class DatabaseApp:
         self.session = SessionManager(root)
         self.session.start_session()
         self.root = root
+        self.modules_enabled = load_modules_config()
         self.audit_log = AuditLogger()
         self.db_manager = DatabaseManager()
         self.settings_window = None
@@ -563,10 +599,14 @@ class DatabaseApp:
         self.setup_modern_ui()
         self.setup_bindings()
         self.cache = CacheDescripciones()
-        self.programador = ProgramadorEnvios(self.db_manager, self)
-        self.envios_programados = EnvioProgramado(self.db_manager)
-        self.monitor_thread = threading.Thread(target=self.monitorear_favoritos, daemon=True)
-        self.monitor_thread.start()
+
+        if self.modules_enabled.get("envio_mensajes", False):
+            self.programador = ProgramadorEnvios(self.db_manager, self)
+            self.envios_programados = EnvioProgramado(self.db_manager)
+
+        if self.modules_enabled.get("stock", False):
+            self.monitor_thread = threading.Thread(target=self.monitorear_favoritos, daemon=True)
+            self.monitor_thread.start()
         
 
 
@@ -882,6 +922,15 @@ class DatabaseApp:
     def setup_stock_tab(self):
         main_frame = ttk.Frame(self.stock_tab)
         main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # ----- Nuevo: Filtro de texto -----
+        search_frame = ttk.Frame(main_frame)
+        search_frame.pack(fill=tk.X, pady=5)
+        ttk.Label(search_frame, text="Buscar Descripción:").pack(side=tk.LEFT)
+        self.search_var = tk.StringVar()
+        entry_search = ttk.Entry(search_frame, textvariable=self.search_var)
+        entry_search.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        self.search_var.trace_add('write', lambda *args: self.aplicar_filtro_stock())
     
         # Controles superiores en 2 filas
         top_controls = ttk.Frame(main_frame)
@@ -1006,6 +1055,26 @@ class DatabaseApp:
 
 
         # Nota: Configuraciones de hover ya realizadas arriba
+
+    def aplicar_filtro_stock(self):
+        """Aplica filtro de nivel y texto y refresca paginación."""
+        # Filtrar por nivel
+        nivel = self.filter_var.get()
+        datos = [r for r in self.cached_alertas if nivel=='TODAS' or r[3].upper()==nivel]
+        # Filtrar por texto en descripción
+        texto = self.search_var.get().lower()
+        if texto:
+            datos = [r for r in datos if texto in (str(r[1]).lower() + str(r[2]).lower())]
+        # Paginación
+        total = len(datos)
+        total_pages = max(1, (total + self.page_size -1)//self.page_size)
+        start = (self.current_page-1)*self.page_size
+        end = start + self.page_size
+        self.mostrar_alertas_paginadas(datos[start:end])
+        self.pagination_label.config(text=f"Página {self.current_page}/{total_pages}")
+        self.btn_prev['state'] = 'normal' if self.current_page>1 else 'disabled'
+        self.btn_next['state'] = 'normal' if self.current_page<total_pages else 'disabled'
+
 
     def hover_row(self, event):
         item = self.stock_tree.identify_row(event.y)
@@ -1148,25 +1217,30 @@ class DatabaseApp:
         self.main_notebook.add(self.records_tab, text="Registros")
         self.setup_records_tab()
 
+
         # Pestaña de Mensajería
-        self.messaging_tab = ttk.Frame(self.main_notebook)
-        self.main_notebook.add(self.messaging_tab, text="Mensajería")
-        self.setup_messaging_tab()
+        if self.modules_enabled.get("envio_mensajes", False):
+            self.messaging_tab = ttk.Frame(self.main_notebook)
+            self.main_notebook.add(self.messaging_tab, text="Mensajería")
+            self.setup_messaging_tab()
 
         # Pestaña de Estadísticas
-        self.stats_tab = ttk.Frame(self.main_notebook)
-        self.main_notebook.add(self.stats_tab, text="📊 Estadísticas")
-        self.setup_stats_tab()  # Nuevo método para configurar la pestaña
+        if self.modules_enabled.get("estadisticas", False):
+            self.stats_tab = ttk.Frame(self.main_notebook)
+            self.main_notebook.add(self.stats_tab, text="📊 Estadísticas")
+            self.setup_stats_tab()  
 
         # Pestaña de Calendario
-        self.calendar_tab = ttk.Frame(self.main_notebook)
-        self.main_notebook.add(self.calendar_tab, text="📅 Calendario")
-        self.setup_calendar_tab()
+        if self.modules_enabled.get("calendario", False):
+            self.calendar_tab = ttk.Frame(self.main_notebook)
+            self.main_notebook.add(self.calendar_tab, text="📅 Calendario")
+            self.setup_calendar_tab()
 
         # Alerta de stock Supervisores
-        self.stock_tab = ttk.Frame(self.main_notebook)
-        self.main_notebook.add(self.stock_tab, text="🚨 Alertas Stock")
-        self.setup_stock_tab()
+        if self.modules_enabled.get("stock", False):
+            self.stock_tab = ttk.Frame(self.main_notebook)
+            self.main_notebook.add(self.stock_tab, text="🚨 Alertas Stock")
+            self.setup_stock_tab()
     
     def setup_stats_tab(self):
         self.stats_frame = ttk.Frame(self.stats_tab)
@@ -1316,73 +1390,104 @@ class DatabaseApp:
                     command=self.mostrar_ventana_programacion).pack(side=tk.LEFT)
 
     def mostrar_ventana_programacion(self):
+        # Ventana para programar envío o disponibilidad
         ventana = tk.Toplevel(self.root)
-        ventana.title("Programar Envío")
-        ventana.geometry("400x310")  # Tamaño fijo para garantizar espacio
+        ventana.title("Programar Envío/Disponibilidad")
+        ventana.geometry("400x470")
 
-        # Configurar grid para mejor organización
-        ventana.grid_columnconfigure(0, weight=1)
-        ventana.grid_columnconfigure(1, weight=1)
+        # Selector de tipo de acción
+        tipo_frame = ttk.LabelFrame(ventana, text="Tipo de Acción")
+        tipo_frame.grid(row=0, column=0, padx=10, pady=10, sticky="ew")
+        self.tipo_envio_var = tk.StringVar(value="")
+        ttk.Radiobutton(tipo_frame, text="Entrega", variable=self.tipo_envio_var,
+                        value="ENTREGA", command=self._mostrar_opciones_envio).pack(side=tk.LEFT, padx=10)
+        ttk.Radiobutton(tipo_frame, text="Disponibilidad", variable=self.tipo_envio_var,
+                        value="DISPONIBILIDAD", command=self._mostrar_opciones_envio).pack(side=tk.LEFT, padx=10)
 
-        # Selector de fecha/hora
-        ttk.Label(ventana, text="Fecha/Hora:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
-        calendario = Calendar(ventana, selectmode='day', date_pattern='mm/dd/y')
-        calendario.grid(row=0, column=1, padx=5, pady=5, columnspan=2)
+        # Contenedor de opciones oculto hasta seleccionar tipo
+        self.opciones_frame = ttk.Frame(ventana)
+        self.opciones_frame.grid(row=1, column=0, padx=10, pady=10, sticky="nsew")
+        self.opciones_frame.grid_remove()
 
-        # Selector de hora
-        ttk.Label(ventana, text="Hora:").grid(row=1, column=0, padx=5, pady=5, sticky="w")
-        spin_hora = ttk.Spinbox(ventana, from_=0, to=23, width=5)
-        spin_hora.grid(row=1, column=1, padx=5, pady=5, sticky="w")
-        spin_minuto = ttk.Spinbox(ventana, from_=0, to=59, width=5)
-        spin_minuto.grid(row=1, column=2, padx=5, pady=5, sticky="w")
+        # Campo para ingresar uno o más números de teléfono (solo para 'Entrega')
+        self.numeros_frame = ttk.LabelFrame(self.opciones_frame, text="Número(s) de Cliente")
+        self.numeros_frame.grid(row=0, column=0, sticky="ew", pady=5)
+        ttk.Label(self.numeros_frame, text="Teléfono(s) (separar con coma):").grid(row=0, column=0, sticky="w", pady=5)
+        self.entry_numeros = ttk.Entry(self.numeros_frame)
+        self.entry_numeros.grid(row=1, column=0, sticky="ew", pady=5)
 
-        # Selector de tipo de envío (nueva fila)
-        ttk.Label(ventana, text="Tipo:").grid(row=2, column=0, padx=5, pady=5, sticky="w")
-        tipo_frame = ttk.Frame(ventana)
-        tipo_frame.grid(row=2, column=1, columnspan=2, sticky="ew")
-    
-        self.tipo_envio_var = tk.StringVar(value="ENTREGA")
-        ttk.Radiobutton(tipo_frame, text="Entrega", variable=self.tipo_envio_var, value="ENTREGA").pack(side=tk.LEFT, padx=10)
-        ttk.Radiobutton(tipo_frame, text="Disponibilidad", variable=self.tipo_envio_var, value="DISPONIBILIDAD").pack(side=tk.LEFT)
+        # Frame para seleccionar fecha y hora (ambos tipos)
+        self.calendar_frame = ttk.LabelFrame(self.opciones_frame, text="Fecha y Hora")
+        self.calendar_frame.grid(row=1, column=0, sticky="ew", pady=5)
+        ttk.Label(self.calendar_frame, text="Fecha:").grid(row=0, column=0, sticky="w", pady=5)
+        self.calendario_sched = Calendar(self.calendar_frame, selectmode='day', date_pattern='mm/dd/y')
+        self.calendario_sched.grid(row=0, column=1, sticky="ew", pady=5)
+        ttk.Label(self.calendar_frame, text="Hora:").grid(row=1, column=0, sticky="w", pady=5)
+        self.spin_hora = ttk.Spinbox(self.calendar_frame, from_=0, to=23, width=5)
+        self.spin_hora.grid(row=1, column=1, sticky="w")
+        self.spin_minuto = ttk.Spinbox(self.calendar_frame, from_=0, to=59, width=5)
+        self.spin_minuto.grid(row=1, column=1, sticky="e")
 
-        # Botón en fila separada
-        btn_frame = ttk.Frame(ventana)
-        btn_frame.grid(row=3, column=0, columnspan=3, pady=10)
-        ttk.Button(
-            btn_frame, 
-            text="Programar", 
-            command=lambda: self.guardar_envio_programado(
-                calendario.get_date(),
-                spin_hora.get(),
-                spin_minuto.get(),
-                self.tipo_envio_var.get()
-            )
-        ).pack(padx=10, ipadx=20)
-        
-    def guardar_envio_programado(self, fecha, hora, minuto, tipo_envio):
+        # Botón para guardar programación
+        ttk.Button(ventana, text="Programar", command=self.guardar_envio_programado) \
+            .grid(row=2, column=0, pady=15)
+
+    def _mostrar_opciones_envio(self):
+        tipo = self.tipo_envio_var.get()
+        if tipo:
+            self.opciones_frame.grid()
+            # Mostrar calendario siempre
+            self.calendar_frame.grid()
+            # Mostrar campo de números solo para envío
+            if tipo == "ENTREGA":
+                self.numeros_frame.grid()
+            else:
+                self.numeros_frame.grid_remove()
+        else:
+            self.opciones_frame.grid_remove()
+
+    def guardar_envio_programado(self):
         try:
-            # Construir datetime
-            fecha_completa = datetime.strptime(
-            f"{fecha} {hora.zfill(2)}:{minuto.zfill(2)}:00",
-            "%m/%d/%Y %H:%M:%S"  
-            )
-
-            result = self.db_manager.fetch_data("SELECT TOP 1 numero_cliente FROM clientes")  # Ajusta según el criterio
-            if not result:
-                messagebox.showerror("Error", "No hay clientes registrados para programar el envío.")
+            tipo = self.tipo_envio_var.get()
+            if not tipo:
+                messagebox.showerror("Error", "Debe seleccionar un tipo de acción.")
                 return
 
-            numero_cliente = result[0][0]  # Asume que hay al menos un cliente
+            # Construir fecha y hora
+            fecha_str = self.calendario_sched.get_date()
+            fecha_completa = datetime.strptime(
+                f"{fecha_str} {self.spin_hora.get().zfill(2)}:{self.spin_minuto.get().zfill(2)}:00",
+                "%m/%d/%Y %H:%M:%S"
+            )
 
-        # Insertar con TODOS los parámetros requeridos
-            self.db_manager.execute_query(
-                "INSERT INTO envios_programados (numero_cliente, fecha_programada, tipo_envio, estado) VALUES (?, ?, ?, 'PENDIENTE')",  # 3 "?"
-                (numero_cliente, fecha_completa, tipo_envio)  # 3 valores
-            )   
-            self.show_temp_notification("✅ Envío programado guardado")
-        
+            if tipo == "ENTREGA":
+                # Obtener y validar lista de números
+                numeros_texto = self.entry_numeros.get().strip()
+                if not numeros_texto:
+                    messagebox.showerror("Error", "Ingrese al menos un número de teléfono.")
+                    return
+                numeros = [n.strip() for n in numeros_texto.split(',') if n.strip()]
+                if not all(re.match(r"^\d{7,15}$", n) for n in numeros):
+                    messagebox.showerror("Error", "Formato de número inválido. Use solo dígitos (7-15 caracteres).")
+                    return
+                # Insertar para cada número
+                for num in numeros:
+                    self.db_manager.execute_query(
+                        "INSERT INTO envios_programados (numero_cliente, fecha_programada, tipo_envio, estado) VALUES (?, ?, ?, 'PENDIENTE')",
+                        (num, fecha_completa, tipo)
+                    )
+                messagebox.showinfo("Éxito", f"Envíos programados para {len(numeros)} número(s) como 'ENTREGA'.")
+            else:
+                # Disponibilidad: sin números
+                self.db_manager.execute_query(
+                    "INSERT INTO envios_programados (numero_cliente, fecha_programada, tipo_envio, estado) VALUES (?, ?, ?, 'PENDIENTE')",
+                    ("", fecha_completa, tipo)
+                )
+                messagebox.showinfo("Éxito", f"Disponibilidad programada para {fecha_completa}.")
         except Exception as e:
-            messagebox.showerror("Error", f"Error de programación: {str(e)}")
+            messagebox.showerror("Error de programación", str(e))
+
+
     def limpiar_logs(self):
         self.logs_text.delete('1.0', tk.END)
         self.log_counter = 0
@@ -1438,7 +1543,6 @@ class DatabaseApp:
             # Mostrar error usando ErrorCode en la interfaz
             self.notification_manager.show_error("Error", f"No se pudo cargar la configuración: {str(e)}")
             return None
-    
     
     def attempt_auto_connect(self):
         """Intentar conexión automática con credenciales guardadas desencriptadas."""
@@ -1639,6 +1743,28 @@ class DatabaseApp:
         api_frame = ttk.Frame(notebook)
         notebook.add(api_frame, text="API WhatsApp")
         self.create_api_tab(api_frame)
+    
+        modules_frame = ttk.Frame(notebook)
+        notebook.add(modules_frame, text="Módulos")
+
+        self.mod_vars = {}
+        for idx, (key, label) in enumerate([
+            ("envio_mensajes", "Envío de Mensajes"),
+            ("estadisticas",   "Estadísticas"),
+            ("calendario",     "Calendario"),
+            ("stock",          "Alertas Stock")
+        ]):
+            var = tk.BooleanVar(value=self.modules_enabled.get(key, False))
+            cb  = ttk.Checkbutton(modules_frame, text=label, variable=var)
+            cb.grid(row=idx, column=0, sticky="w", padx=10, pady=5)
+            self.mod_vars[key] = var
+
+    # Botón para guardar módulos
+        ttk.Button(
+            modules_frame,
+            text="Guardar Módulos",
+            command=self._save_modules_config
+        ).grid(row=len(self.mod_vars), column=0, sticky="e", pady=10, padx=10)
 
     def on_settings_close(self):
         """Cierre seguro de la ventana"""
@@ -1914,7 +2040,7 @@ class DatabaseApp:
                 ErrorCode.INVALID_CONFIG
             )
             messagebox.showerror("Error", f"No se pudo guardar: {str(e)}")
-
+    
     def validate_input(self):
         num = self.num_cliente.get().strip()
         cod = self.cod_producto.get().strip()
@@ -2435,6 +2561,23 @@ class DatabaseApp:
                 if len(productos) > MAX_ITEMS:
                     texto_plantilla += f"{SEPARADOR}... (+{len(productos) - MAX_ITEMS} productos más)"
     
+            raw = numero_cliente or ""
+            digits = re.sub(r'\D', '', raw)  # solo dígitos
+
+            # Prefijos nacionales válidos
+            prefijos = ('0412', '0424', '0414', '0416', '0426')
+
+            if digits.startswith('0'):
+                # Caso local: debe ser 11 dígitos y prefijo en la lista
+                if not (len(digits) == 11 and digits.startswith(prefijos)):
+                    self.log(f"Número local inválido, omitiendo: {raw}", "ERROR")
+                    return False
+                # Convertir 0XXXXXXXXXX → 58XXXXXXXXXX
+                numero_formateado = '58' + digits[1:]
+            else:
+                # Caso internacional: dejar tal cual
+                numero_formateado = digits
+
             # Validar token
             whatsapp_token = self.cred_manager.get_whatsapp_token()
             if not whatsapp_token:
@@ -2449,11 +2592,6 @@ class DatabaseApp:
                 self.show_settings()
                 return False
     
-            # Formatear número telefónico
-            numero_limpio = re.sub(r'\D', '', numero_cliente)
-            if numero_limpio.startswith('0'):
-                numero_limpio = numero_limpio[1:]
-            numero_formateado = '58' + numero_limpio
     
             # Configurar payload
             payload = {
@@ -2503,7 +2641,16 @@ class DatabaseApp:
                 error_code=ErrorCode.WHATSAPP_API_FAILURE
             )
             return False
-           
+        
+    def _save_modules_config(self):
+        # Tomar valores de los BooleanVar y guardar en ini
+        new_cfg = {k: v.get() for k, v in self.mod_vars.items()}
+        save_modules_config(new_cfg)
+        messagebox.showinfo(
+            "Módulos Actualizados",
+            "Los cambios se guardaron correctamente.\nReinicie la aplicación para que tengan efecto."
+        )
+
     def actualizar_descripcion(self, texto: str):
         self.descripcion.config(state='normal')
         self.descripcion.delete(0, tk.END)

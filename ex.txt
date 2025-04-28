@@ -67,3 +67,79 @@ def actualizar_alertas_stock(self, force_refresh=False):
             
         except Exception as e:
             self.log(f"Error exportando CSV: {str(e)}", "ERROR")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+            SELECT        GG.AÑO, GG.MES, GG.SUCURSAL, GG.ALMACEN, GG.DEP, GG.GRP, GG.SUBGRP, GG.COD, GG.DESCRIPCION, GG.CANT, GG.COSTO_UND, GG.PRECIO_UND, GG.PRECIOR_UND, 
+                         SUM(MA_DEPOPROD.n_cantidad) AS INV
+FROM            MA_SUCURSALES AS MA_SUCURSALES_1 INNER JOIN
+                             (SELECT        AÑO, MES, SUCURSAL, ALMACEN, DEP, GRP, SUBGRP, COD, DESCRIPCION, SUM(CANT) AS CANT, MAX(COSTO_UND) AS COSTO_UND, MAX(PRECIO_UND) AS PRECIO_UND, MAX(PRECIOR_UND) 
+                                                         AS PRECIOR_UND
+                               FROM            (SELECT        CMP2.AÑO, CMP2.MES, CMP2.DIA, MA_SUCURSALES.c_descripcion AS SUCURSAL, MA_DEPOSITO_1.c_descripcion AS ALMACEN, MA_DEPARTAMENTOS.C_DESCRIPCIO AS DEP, 
+                                                                                   MA_GRUPOS.C_DESCRIPCIO AS GRP, MA_SUBGRUPOS.c_DESCRIPCIO AS SUBGRP, CMP2.COD, MA_PRODUCTOS.C_DESCRI + ' - ' + CMP2.COD AS DESCRIPCION, CMP2.CANT, 
+                                                                                   CMP2.COSTO AS COSTO_UND, CMP2.PRECIO AS PRECIO_UND, CMP2.PRECIOF AS PRECIOR_UND, CMP2.DEP AS Expr1
+                                                         FROM            (SELECT        CMP1.SUC, CMP1.DEP, CMP1.AÑO, CMP1.MES, CMP1.DIA, CMP1.COD, SUM(CMP1.CANT) AS CANT, MAX(CMP1.COSTO / FACTOR_DOLAR.factor) AS COSTO, 
+                                                                                                             MAX(CMP1.PRECIO / FACTOR_DOLAR.factor) AS PRECIO, MAX(CMP1.PRECIOF / FACTOR_DOLAR.factor) AS PRECIOF
+                                                                                   FROM            (SELECT        c_codlocalidad AS SUC, c_DEPOSITO AS DEP, YEAR(f_fecha) AS AÑO, MONTH(f_fecha) AS MES, DAY(f_fecha) AS DIA, c_CODARTICULO AS COD, 
+                                                                                                                                       CASE WHEN C_CONCEPTO = 'DEV' THEN n_CANTIDAD * - 1 ELSE n_CANTIDAD END AS CANT, n_COSTO AS COSTO, N_PRECIO AS PRECIO, 
+                                                                                                                                       N_PRECIO_ORIGINAL AS PRECIOF
+                                                                                                             FROM            TR_INVENTARIO
+                                                                                                             WHERE        (c_CONCEPTO = N'VEN' OR
+                                                                                                                                       c_CONCEPTO = N'DEV') AND (f_fecha > CONVERT(DATETIME, '2023-01-01 00:00:00', 102))) AS CMP1 LEFT OUTER JOIN
+                                                                                                             FACTOR_DOLAR ON CMP1.AÑO = FACTOR_DOLAR.año AND CMP1.MES = FACTOR_DOLAR.mes AND CMP1.DIA = FACTOR_DOLAR.dia
+                                                                                   GROUP BY CMP1.SUC, CMP1.DEP, CMP1.AÑO, CMP1.MES, CMP1.DIA, CMP1.COD, FACTOR_DOLAR.factor
+                                                                                   HAVING         (SUM(CMP1.CANT) <> 0)) AS CMP2 INNER JOIN
+                                                                                   MA_PRODUCTOS ON CMP2.COD = MA_PRODUCTOS.C_CODIGO INNER JOIN
+                                                                                   MA_DEPOSITO AS MA_DEPOSITO_1 ON CMP2.DEP = MA_DEPOSITO_1.c_coddeposito INNER JOIN
+                                                                                   MA_SUCURSALES ON CMP2.SUC = MA_SUCURSALES.C_codigo LEFT OUTER JOIN
+                                                                                   MA_SUBGRUPOS ON MA_PRODUCTOS.c_departamento = MA_SUBGRUPOS.c_in_departamento AND MA_PRODUCTOS.c_grupo = MA_SUBGRUPOS.c_in_grupo AND 
+                                                                                   MA_PRODUCTOS.c_subgrupo = MA_SUBGRUPOS.c_CODIGO LEFT OUTER JOIN
+                                                                                   MA_GRUPOS ON MA_PRODUCTOS.c_departamento = MA_GRUPOS.c_departamento AND MA_PRODUCTOS.c_grupo = MA_GRUPOS.c_CODIGO LEFT OUTER JOIN
+                                                                                   MA_DEPARTAMENTOS ON MA_PRODUCTOS.c_departamento = MA_DEPARTAMENTOS.C_CODIGO) AS TH
+                               GROUP BY AÑO, MES, SUCURSAL, ALMACEN, DEP, GRP, SUBGRP, COD, DESCRIPCION) AS GG ON MA_SUCURSALES_1.c_descripcion = GG.SUCURSAL INNER JOIN
+                         MA_DEPOPROD INNER JOIN
+                         MA_DEPOSITO ON MA_DEPOPROD.c_coddeposito = MA_DEPOSITO.c_coddeposito ON MA_SUCURSALES_1.C_codigo = MA_DEPOSITO.c_codlocalidad AND GG.COD = MA_DEPOPROD.c_codarticulo
+WHERE        (MA_DEPOSITO.c_responsable = N'REP')
+GROUP BY GG.AÑO, GG.MES, GG.SUCURSAL, GG.ALMACEN, GG.DEP, GG.GRP, GG.SUBGRP, GG.COD, GG.DESCRIPCION, GG.CANT, GG.COSTO_UND, GG.PRECIO_UND, GG.PRECIOR_UND
+
+
+SELECT        AÑO, MES, SUCURSAL, ALMACEN, DEP, GRP, SUBGRP, COD, DESCRIPCION, SUM(CANT) AS CANT, AVG(COSTO_UND) AS COSTO_UND, SUM(MONTO) AS MONTO
+FROM            (SELECT        CMP2.AÑO, CMP2.MES, CMP2.DIA, MA_SUCURSALES.c_descripcion AS SUCURSAL, MA_DEPOSITO.c_descripcion AS ALMACEN, MA_DEPARTAMENTOS.C_DESCRIPCIO AS DEP, 
+                                                    MA_GRUPOS.C_DESCRIPCIO AS GRP, MA_SUBGRUPOS.c_DESCRIPCIO AS SUBGRP, CMP2.COD, MA_PRODUCTOS.C_DESCRI + ' - ' + CMP2.COD AS DESCRIPCION, CMP2.CANT, 
+                                                    CMP2.COSTO AS COSTO_UND, CMP2.PRECIO AS PRECIO_UND, CMP2.PRECIOF AS PRECIOR_UND, CMP2.DEP AS Expr1, CMP2.MONTO
+                          FROM            (SELECT        CMP1.SUC, CMP1.DEP, CMP1.AÑO, CMP1.MES, CMP1.DIA, CMP1.COD, SUM(CMP1.CANT) AS CANT, MAX(CMP1.COSTO) AS COSTO, MAX(CMP1.PRECIO) AS PRECIO, MAX(CMP1.PRECIOF) 
+                                                                              AS PRECIOF, SUM(CMP1.MONTO) AS MONTO
+                                                    FROM            (SELECT        c_codlocalidad AS SUC, c_DEPOSITO AS DEP, YEAR(f_fecha) AS AÑO, MONTH(f_fecha) AS MES, DAY(f_fecha) AS DIA, c_CODARTICULO AS COD, 
+                                                                                                        CASE WHEN C_CONCEPTO = 'DCM' THEN n_cant_teorica * - 1 ELSE n_cant_teorica END AS CANT, n_COSTO AS COSTO, N_PRECIO AS PRECIO, 
+                                                                                                        N_PRECIO_ORIGINAL AS PRECIOF, CASE WHEN C_CONCEPTO = 'DCM' THEN ((N_SUBTOTAL * n_factorcambio) / n_factormonedaprod) 
+                                                                                                        * - 1 ELSE N_SUBTOTAL END AS MONTO
+                                                                              FROM            TR_INVENTARIO
+                                                                              WHERE        (c_CONCEPTO = N'COM' OR
+                                                                                                        c_CONCEPTO = N'DCM') AND (f_fecha > CONVERT(DATETIME, '2023-01-01 00:00:00', 102))) AS CMP1 LEFT OUTER JOIN
+                                                                              FACTOR_DOLAR ON CMP1.AÑO = FACTOR_DOLAR.año AND CMP1.MES = FACTOR_DOLAR.mes AND CMP1.DIA = FACTOR_DOLAR.dia
+                                                    GROUP BY CMP1.SUC, CMP1.DEP, CMP1.AÑO, CMP1.MES, CMP1.DIA, CMP1.COD, FACTOR_DOLAR.factor
+                                                    HAVING         (SUM(CMP1.CANT) <> 0)) AS CMP2 INNER JOIN
+                                                    MA_PRODUCTOS ON CMP2.COD = MA_PRODUCTOS.C_CODIGO INNER JOIN
+                                                    MA_DEPOSITO ON CMP2.DEP = MA_DEPOSITO.c_coddeposito INNER JOIN
+                                                    MA_SUCURSALES ON CMP2.SUC = MA_SUCURSALES.C_codigo LEFT OUTER JOIN
+                                                    MA_SUBGRUPOS ON MA_PRODUCTOS.c_departamento = MA_SUBGRUPOS.c_in_departamento AND MA_PRODUCTOS.c_grupo = MA_SUBGRUPOS.c_in_grupo AND 
+                                                    MA_PRODUCTOS.c_subgrupo = MA_SUBGRUPOS.c_CODIGO LEFT OUTER JOIN
+                                                    MA_GRUPOS ON MA_PRODUCTOS.c_departamento = MA_GRUPOS.c_departamento AND MA_PRODUCTOS.c_grupo = MA_GRUPOS.c_CODIGO LEFT OUTER JOIN
+                                                    MA_DEPARTAMENTOS ON MA_PRODUCTOS.c_departamento = MA_DEPARTAMENTOS.C_CODIGO) AS TH
+GROUP BY AÑO, MES, SUCURSAL, ALMACEN, DEP, GRP, SUBGRP, COD, DESCRIPCION

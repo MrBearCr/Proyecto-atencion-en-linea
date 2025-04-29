@@ -29,6 +29,11 @@ from win10toast import ToastNotifier
 
 
 CONFIG_FILE = 'db_config.ini'
+LOCATION_GROUPS = {
+    'BARINAS': ['0101', '0108'],
+    'GUANARE': ['0401', '0402'],
+    'CDT': ['0106'],
+}
 
 def load_modules_config():
         """Lee la sección [Modules] de db_config.ini o crea valores por defecto."""
@@ -735,6 +740,9 @@ class DatabaseApp:
 
     def monitorear_favoritos(self):
         while True:
+            if not self.db_manager.conn:
+                time.sleep(60)  # Esperar y reintentar
+                continue
             try:
                 favoritos = self.db_manager.obtener_favoritos()
                 # Usar la misma lógica que obtener_alertas_stock
@@ -755,18 +763,41 @@ class DatabaseApp:
                 """)
             
                 for codigo, stock, nivel in current_alerts:
+
                     clave = (codigo, stock, nivel)  # Incluir stock en la clave
                     if (codigo, nivel) not in self.ultimas_notificaciones:
                         self.mostrar_notificacion(codigo, stock, nivel)
                         self.ultimas_notificaciones.add(clave)
                     
             except Exception as e:
-                print(f"Error monitoreando favoritos: {str(e)}")
                 self.log(f"Error monitoreo favoritos: {str(e)}", "ERROR")
             time.sleep(100) # 5 minutos
 
     def mostrar_notificacion(self, codigo, stock, nivel):
-        mensaje = f"Código: {codigo}\nStock: {stock}\nNivel: {nivel}"
+        """
+        Muestra un toast con el nivel de alerta en el depósito principal
+        y las existencias en las ubicaciones de transferencia.
+        """
+        # Base del mensaje
+        mensaje = f"Código:{codigo}| Stock actual:{stock}|Nivel:{nivel} "
+
+        # Para cada grupo de transferencia, hacemos un SELECT SUM(...)
+        for region, deps in LOCATION_GROUPS.items():
+            placeholders = ','.join('?' for _ in deps)
+            sql = (
+                f"SELECT SUM(n_cantidad) "
+                f"FROM MA_DEPOPROD "
+                f"WHERE c_codarticulo = ? AND c_coddeposito IN ({placeholders})"
+            )
+            params = [codigo] + deps
+            try:
+                result = self.db_manager.fetch_data(sql, params)
+                existencias = result[0][0] or 0
+                mensaje += f"{region}:{existencias} "
+            except Exception as e:
+                mensaje += f"{region}: error al consultar\n"
+
+        # Mostrar toast
         self.toaster.show_toast(
             "CASAPRO STOCK",
             mensaje,
@@ -923,7 +954,36 @@ class DatabaseApp:
         main_frame = ttk.Frame(self.stock_tab)
         main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-        # ----- Nuevo: Filtro de texto -----
+        # ① --- Filtros jerárquicos ---
+        hier_frame = ttk.Frame(main_frame)
+        hier_frame.pack(fill=tk.X, pady=5)
+
+        # Departamento
+        ttk.Label(hier_frame, text="Departamento:").pack(side=tk.LEFT)
+        self.dept_var = tk.StringVar(value='Todos')
+        self.dept_combo = ttk.Combobox(hier_frame, textvariable=self.dept_var, state='readonly')
+        self.dept_combo['values'] = ['Todos']
+        self.dept_combo.pack(side=tk.LEFT, padx=5)
+        self.dept_combo.bind('<<ComboboxSelected>>', lambda e: self.on_dept_selected())
+
+        # Grupo
+        ttk.Label(hier_frame, text="Grupo:").pack(side=tk.LEFT)
+        self.group_var = tk.StringVar(value='Todos')
+        self.group_combo = ttk.Combobox(hier_frame, textvariable=self.group_var, state='readonly')
+        self.group_combo['values'] = ['Todos']
+        self.group_combo.pack(side=tk.LEFT, padx=5)
+        self.group_combo.bind('<<ComboboxSelected>>', lambda e: self.on_group_selected())
+
+        # Subgrupo
+        ttk.Label(hier_frame, text="Subgrupo:").pack(side=tk.LEFT)
+        self.sub_var = tk.StringVar(value='Todos')
+        self.sub_combo = ttk.Combobox(hier_frame, textvariable=self.sub_var, state='readonly')
+        self.sub_combo['values'] = ['Todos']
+        self.sub_combo.pack(side=tk.LEFT, padx=5)
+        self.sub_combo.bind('<<ComboboxSelected>>', lambda e: self.aplicar_filtro_stock())
+        # --------------------------------
+
+        # Filtro de texto
         search_frame = ttk.Frame(main_frame)
         search_frame.pack(fill=tk.X, pady=5)
         ttk.Label(search_frame, text="Buscar Descripción:").pack(side=tk.LEFT)
@@ -931,68 +991,47 @@ class DatabaseApp:
         entry_search = ttk.Entry(search_frame, textvariable=self.search_var)
         entry_search.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
         self.search_var.trace_add('write', lambda *args: self.aplicar_filtro_stock())
-    
-        # Controles superiores en 2 filas
+
+        # Controles superiores en dos filas
         top_controls = ttk.Frame(main_frame)
         top_controls.pack(fill=tk.X, pady=5)
-    
-        # Fila 1: Filtros
+
+        # Fila 1: Filtros de nivel
         filter_frame = ttk.Frame(top_controls)
         filter_frame.pack(fill=tk.X, pady=5)
-    
         ttk.Label(filter_frame, text="Filtrar:").pack(side=tk.LEFT)
         self.filter_var = tk.StringVar(value='TODAS')
-    
+
         filters = [
             ('Todas', 'TODAS'),
             ('Críticas (<8)', 'CRÍTICA'),
             ('Medias (8-14)', 'MEDIA'),
             ('Leves (15-20)', 'LEVE')
         ]
-    
+
         for text, val in filters:
-            ttk.Radiobutton(filter_frame, 
-                        text=text, 
-                        variable=self.filter_var,
-                        value=val,
-                        command=self.aplicar_filtro).pack(side=tk.LEFT, padx=5)
-    
-        # Fila 2: Controles de acción
+            ttk.Radiobutton(filter_frame, text=text, variable=self.filter_var, value=val,
+                            command=self.aplicar_filtro_stock).pack(side=tk.LEFT, padx=5)
+
+        # Fila 2: Acciones y paginación
         action_frame = ttk.Frame(top_controls)
         action_frame.pack(fill=tk.X, pady=5)
-    
-        # Botón Exportar (NUEVA POSICIÓN)
-        ttk.Button(action_frame, 
-                text="📥 Exportar CSV", 
-                command=self.exportar_csv
-                ).pack(side=tk.LEFT, padx=5)
-    
-        # Paginación a la derecha
+
+        ttk.Button(action_frame, text="📥 Exportar CSV", command=self.exportar_csv).pack(side=tk.LEFT, padx=5)
+
         pagination_frame = ttk.Frame(action_frame)
         pagination_frame.pack(side=tk.RIGHT)
-    
-        self.btn_prev = ttk.Button(pagination_frame, 
-                                text="◄ Anterior",
-                                command=lambda: self.cambiar_pagina(-1),
-                                width=10)
+        self.btn_prev = ttk.Button(pagination_frame, text="◄ Anterior", command=lambda: self.cambiar_pagina(-1), width=10)
         self.btn_prev.pack(side=tk.LEFT)
-    
-        self.pagination_label = ttk.Label(pagination_frame, 
-                                    text="Página 1/1",
-                                    width=15)
+        self.pagination_label = ttk.Label(pagination_frame, text="Página 1/1", width=15)
         self.pagination_label.pack(side=tk.LEFT, padx=5)
-    
-        self.btn_next = ttk.Button(pagination_frame, 
-                             text="Siguiente ►",
-                             command=lambda: self.cambiar_pagina(1),
-                             width=10)
+        self.btn_next = ttk.Button(pagination_frame, text="Siguiente ►", command=lambda: self.cambiar_pagina(1), width=10)
         self.btn_next.pack(side=tk.LEFT)
-    
+
         # Árbol de datos
         tree_frame = ttk.Frame(main_frame)
         tree_frame.pack(fill=tk.BOTH, expand=True)
-    
-        # Define columns configuration first
+
         columns_config = {
             "Favorito": {"width": 50, "anchor": "center", "stretch": False},
             "Código": {"width": 100, "anchor": "center"},
@@ -1000,80 +1039,189 @@ class DatabaseApp:
             "Stock": {"width": 80, "anchor": "center"},
             "Nivel": {"width": 100, "anchor": "center"}
         }
-        
-        # Configurar Treeview y scrollbars
-        self.stock_tree = ttk.Treeview(tree_frame, 
-                                    columns=("Favorito", "Código", "Descripción", "Stock", "Nivel"),
-                                    show="headings",
-                                    height=15)
-        
-        # Crear scrollbars antes de usarlas
+
+        self.stock_tree = ttk.Treeview(tree_frame, columns=list(columns_config.keys()), show="headings", height=15)
         vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.stock_tree.yview)
         hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.stock_tree.xview)
         self.stock_tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
 
-        # Colocar componentes en el grid
         self.stock_tree.grid(row=0, column=0, sticky="nsew")
         vsb.grid(row=0, column=1, sticky="ns")
         hsb.grid(row=1, column=0, sticky="ew")
-    
+
         tree_frame.grid_rowconfigure(0, weight=1)
         tree_frame.grid_columnconfigure(0, weight=1)
-        
-        # Configurar cabeceras y columnas
-        self.stock_tree.tag_configure('favorito')
-        self.stock_tree.heading("Favorito", text="✓")
-        self.stock_tree.column("Favorito", width=40, anchor=tk.CENTER)
 
+        # Configurar columnas y encabezados
         for col, config in columns_config.items():
             self.stock_tree.heading(col, text=col)
             self.stock_tree.column(col, **config)
-    
+
         # Estilos de filas
         self.stock_tree.tag_configure('leve', background='#abebc6')
         self.stock_tree.tag_configure('media', background='#DAF7A6')
         self.stock_tree.tag_configure('critica', background='#ff856b')
-        self.stock_tree.tag_configure('hover', background='#f0f0f0')
-        self.stock_tree.tag_configure('selected', background='#d0d0d0')
-    
-        # Manejar clics en la columna de favoritos
-        # Configurar primero todos los tags
         self.stock_tree.tag_configure('favorito', background='#FFFFE0')
         self.stock_tree.tag_configure('hover', background='#f0f0f0')
         self.stock_tree.tag_configure('selected', background='#d0d0d0')
-        
-        # Luego enlazar los eventos con manejadores que retornan valores apropiados
+
         self.stock_tree.bind('<Button-1>', self.on_favorito_click)
         self.stock_tree.bind('<Enter>', self.hover_row)
         self.stock_tree.bind('<Leave>', self.leave_row)
         self.stock_tree.bind('<<TreeviewSelect>>', self.select_row)
-        # Carga inicial sólo si hay conexión activa
+
+        # Carga inicial solo si hay conexión
+        self.current_page = 1
+        self.page_size = 250
         if hasattr(self.db_manager, 'conn') and self.db_manager.conn:
-            self.actualizar_alertas_stock()
+            self.aplicar_filtro_stock()
         else:
             print("No hay conexión activa a la base de datos para cargar alertas iniciales")
 
+    def load_stock_filters(self):
+        """Puebla Combobox tras conectar a BD usando descripciones como identificador visible"""
+        try:
+            deps = self.db_manager.fetch_data(
+                "SELECT C_CODIGO, C_DESCRIPCIO FROM MA_DEPARTAMENTOS"
+            )
+            self.dept_dict = {desc: cod for cod, desc in deps if cod and desc}
+            self.dept_combo['values'] = ['Todos'] + list(self.dept_dict.keys())
+        except Exception as e:
+            print("Error cargando departamentos:", e)
+            self.dept_dict = {}
+            self.dept_combo['values'] = ['Todos']
+        self.dept_var.set('Todos')
 
-        # Nota: Configuraciones de hover ya realizadas arriba
+        self.group_dict = {}
+        self.group_combo['values'] = ['Todos']
+        self.group_var.set('Todos')
+
+        self.sub_dict = {}
+        self.sub_combo['values'] = ['Todos']
+        self.sub_var.set('Todos')
+
+    def on_dept_selected(self):
+        desc = self.dept_var.get()
+        codigo = self.dept_dict.get(desc)
+        if not codigo:
+            self.group_combo['values'] = ['Todos']
+            self.group_var.set('Todos')
+            self.sub_combo['values'] = ['Todos']
+            self.sub_var.set('Todos')
+            self.aplicar_filtro_stock()
+            return
+        try:
+            grupos = self.db_manager.fetch_data(
+                "SELECT C_CODIGO, C_DESCRIPCIO FROM MA_GRUPOS WHERE C_DEPARTAMENTO = ?",
+                (codigo,)
+            )
+        except Exception as e:
+            print("Error cargando grupos:", e)
+            grupos = []
+        self.group_dict = {desc: cod for cod, desc in grupos if cod and desc}
+        self.group_combo['values'] = ['Todos'] + list(self.group_dict.keys())
+        self.group_var.set('Todos')
+        self.sub_combo['values'] = ['Todos']
+        self.sub_var.set('Todos')
+        self.aplicar_filtro_stock()
+
+    def on_group_selected(self):
+        dept_desc = self.dept_var.get()
+        grupo_desc = self.group_var.get()
+        dept_codigo = self.dept_dict.get(dept_desc)
+        grupo_codigo = self.group_dict.get(grupo_desc)
+        if not (dept_codigo and grupo_codigo):
+            self.sub_combo['values'] = ['Todos']
+            self.sub_var.set('Todos')
+            self.aplicar_filtro_stock()
+            return
+        try:
+            subs = self.db_manager.fetch_data(
+                "SELECT C_CODIGO, C_DESCRIPCIO FROM MA_SUBGRUPOS WHERE C_IN_DEPARTAMENTO = ? AND C_IN_GRUPO = ?",
+                (dept_codigo, grupo_codigo)
+            )
+        except Exception as e:
+            print("Error cargando subgrupos:", e)
+            subs = []
+        self.sub_dict = {desc: cod for cod, desc in subs if cod and desc}
+        self.sub_combo['values'] = ['Todos'] + list(self.sub_dict.keys())
+        self.sub_var.set('Todos')
+        self.aplicar_filtro_stock()
+    
+    def cargar_jerarquia_productos(self):
+        try:
+            filas = self.db_manager.fetch_data(
+                "SELECT C_CODIGO, C_DEPARTAMENTO, C_GRUPO, C_SUBGRUPO FROM MA_PRODUCTOS"
+            )
+            self.producto_jerarquia = {
+                fila[0]: (fila[1], fila[2], fila[3])  # producto → (dep, grupo, subgrupo)
+                for fila in filas if all(fila)
+            }
+            print(f"DEBUG: cargados {len(self.producto_jerarquia)} productos con jerarquía")
+        except Exception as e:
+            self.log(f"Error cargando jerarquía de productos:", e)
+            self.producto_jerarquia = {}
 
     def aplicar_filtro_stock(self):
-        """Aplica filtro de nivel y texto y refresca paginación."""
-        # Filtrar por nivel
-        nivel = self.filter_var.get()
-        datos = [r for r in self.cached_alertas if nivel=='TODAS' or r[3].upper()==nivel]
-        # Filtrar por texto en descripción
+        # Asegurar que hay datos en caché
+        if not getattr(self, 'cached_alertas', None):
+            self.actualizar_alertas_stock(force_refresh=True)
+
+        datos = list(self.cached_alertas)
+        #print(f"DEBUG: cached_alertas inicial = {len(datos)} registros")
+
+        dept_desc = self.dept_var.get()
+        dept_code = self.dept_dict.get(dept_desc)
+
+        group_desc = self.group_var.get()
+        group_code = self.group_dict.get(group_desc)
+
+        sub_desc = self.sub_var.get()
+        sub_code = self.sub_dict.get(sub_desc)
+
+        def coincide_jerarquia(codigo):
+            jerarquia = self.producto_jerarquia.get(codigo)
+            if not jerarquia:
+                return False
+            dep, grp, sub = jerarquia
+            if dept_code and dep != dept_code:
+                return False
+            if group_code and grp != group_code:
+                return False
+            if sub_code and sub != sub_code:
+                return False
+            return True
+
+        datos = [r for r in datos if coincide_jerarquia(r[0])]
+        #print(f"DEBUG: tras filtro jerárquico: {len(datos)} registros")
+
+        # Filtro de texto y nivel
         texto = self.search_var.get().lower()
         if texto:
             datos = [r for r in datos if texto in (str(r[1]).lower() + str(r[2]).lower())]
-        # Paginación
+        nivel = self.filter_var.get()
+        if nivel != 'TODAS':
+            datos = [r for r in datos if r[3].upper() == nivel]
+        #print(f"DEBUG: tras filtro texto y nivel: {len(datos)} registros")
+
+        try:
+            favoritos = {f[0] for f in self.db_manager.obtener_favoritos()}
+        except Exception as e:
+            self.log(f"Error obteniendo favoritos:", e)
+            favoritos = set()
+
+        datos.sort(key=lambda r: (r[0] not in favoritos))
+
         total = len(datos)
-        total_pages = max(1, (total + self.page_size -1)//self.page_size)
-        start = (self.current_page-1)*self.page_size
+        self.log(f"DEBUG: total a mostrar en TreeView: {total}")
+        total_pages = max(1, (total + self.page_size - 1) // self.page_size)
+        start = (self.current_page - 1) * self.page_size
         end = start + self.page_size
+
         self.mostrar_alertas_paginadas(datos[start:end])
         self.pagination_label.config(text=f"Página {self.current_page}/{total_pages}")
-        self.btn_prev['state'] = 'normal' if self.current_page>1 else 'disabled'
-        self.btn_next['state'] = 'normal' if self.current_page<total_pages else 'disabled'
+        self.btn_prev['state'] = 'normal' if self.current_page > 1 else 'disabled'
+        self.btn_next['state'] = 'normal' if self.current_page < total_pages else 'disabled'
 
 
     def hover_row(self, event):
@@ -1565,6 +1713,14 @@ class DatabaseApp:
                     self.update_status('connected', server=server, api_token=api_token)
                     self.log("Conexión a BD exitosa", "SUCCESS")
                     self.search_records()
+
+                    # Cargar filtros jerárquicos de stock
+                    if self.modules_enabled.get("stock", False):
+                        self.load_stock_filters()
+                        self.actualizar_alertas_stock(force_refresh=True)
+                        self.cargar_jerarquia_productos()
+                        self.aplicar_filtro_stock()
+
                     return
 
             self.show_settings()

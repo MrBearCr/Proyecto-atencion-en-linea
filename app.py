@@ -807,34 +807,40 @@ class DatabaseApp:
 
     def exportar_csv(self):
         try:
-                # Aplicar filtro actual a los datos
-            filtered = [
-                r for r in self.cached_alertas 
-                if (self.current_filter == 'TODAS' or 
-                    r[3].upper() == self.current_filter.upper())
-            ]
-        
-            filename = f"reporte_stock_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
-    
-            with open(filename, 'w', newline='', encoding='utf-8') as f:
+            # 1) Obtenemos solo los ítems que están actualmente visibles en el TreeView
+            visibles = self.stock_tree.get_children()
+            if not visibles:
+                messagebox.showwarning("Sin datos", "No hay registros para exportar")
+                return
+
+            # 2) Nombre de archivo con timestamp
+            filename = f"reporte_stock_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+
+            # 3) Abrimos con BOM UTF-8 para que Excel muestre bien los acentos
+            with open(filename, 'w', newline='', encoding='utf-8-sig') as f:
                 writer = csv.writer(f, delimiter=';')
+                # Cabecera
                 writer.writerow(["Código", "Descripción", "Stock", "Nivel Alerta"])
-        
-                for registro in filtered:  # Usar filtered en lugar de self.cached_alertas
+                # Filas: extraemos los valores tal como están en pantalla
+                for item in visibles:
+                    estado, codigo, descripcion, stock, nivel = self.stock_tree.item(item, 'values')
+                    # Reemplazamos ';' en la descripción si acaso, y escribimos
                     writer.writerow([
-                        registro[0],
-                        registro[1].replace(';', ','),
-                        registro[2],
-                        registro[3]
+                        codigo,
+                        descripcion.replace(';', ','),  
+                        stock,
+                        nivel
                     ])
-                
-            self.log(f"Reporte completo exportado: {filename}", "INFO")
-            messagebox.showinfo("Éxito", 
-                f"Reporte generado con {len(filtered)} registros\n"
-                f"Ubicación: {os.path.abspath(filename)}")
-            
+
+            # 4) Feedback al usuario
+            self.log(f"Reporte exportado: {filename}", "SUCCESS")
+            messagebox.showinfo(
+                "Éxito",
+                f"Se exportaron {len(visibles)} registros.\nArchivo: {os.path.abspath(filename)}"
+            )
         except Exception as e:
             self.log(f"Error exportando CSV: {str(e)}", "ERROR")
+            messagebox.showerror("Error", f"No se pudo generar el CSV:\n{str(e)}")
     
     def buscar_por_fecha(self):
         # Obtener fechas como objetos datetime.datetime (incluyendo hora)
@@ -1149,18 +1155,39 @@ class DatabaseApp:
         self.aplicar_filtro_stock()
     
     def cargar_jerarquia_productos(self):
+        """Filtra self.all_jerarquia usando solo los códigos en cached_alertas."""
+        try:
+            if not getattr(self, 'cached_alertas', None):
+                self.producto_jerarquia = {}
+                self.log("Sin datos en cache; salto carga de jerarquía", "WARNING")
+                return
+
+            codigos_en_alerta = {r[0] for r in self.cached_alertas}
+            # Filtrado puro en Python, O( n ):
+            self.producto_jerarquia = {
+                cod: self.all_jerarquia[cod]
+                for cod in codigos_en_alerta
+                if cod in self.all_jerarquia
+            }
+            print(f"DEBUG: jerarquía filtrada a {len(self.producto_jerarquia)} productos en alerta")
+        except Exception as e:
+            self.log(f"Error filtrando jerarquía: {e}", "ERROR")
+            self.producto_jerarquia = {}
+
+    def _cargar_toda_jerarquia_productos(self):
+        """Carga TODO el mapping C_CODIGO → (dep, grupo, sub) UNA sola vez."""
         try:
             filas = self.db_manager.fetch_data(
                 "SELECT C_CODIGO, C_DEPARTAMENTO, C_GRUPO, C_SUBGRUPO FROM MA_PRODUCTOS"
             )
-            self.producto_jerarquia = {
-                fila[0]: (fila[1], fila[2], fila[3])  # producto → (dep, grupo, subgrupo)
+            self.all_jerarquia = {
+                fila[0]: (fila[1], fila[2], fila[3])
                 for fila in filas if all(fila)
             }
-            print(f"DEBUG: cargados {len(self.producto_jerarquia)} productos con jerarquía")
+            print(f"DEBUG: jerarquía total cargada: {len(self.all_jerarquia)} productos")
         except Exception as e:
-            self.log(f"Error cargando jerarquía de productos:", e)
-            self.producto_jerarquia = {}
+            self.log(f"Error cargando jerarquía total: {e}", "ERROR")
+            self.all_jerarquia = {}
 
     def aplicar_filtro_stock(self):
         # Asegurar que hay datos en caché
@@ -1288,8 +1315,8 @@ class DatabaseApp:
             tags = ('favorito' if es_favorito else '', nivel.lower().replace('ítica', 'itica'))
             
             self.stock_tree.insert("", tk.END, 
-                                 values=(estado, codigo, desc, stock, nivel),
-                                 tags=tags)
+                                values=(estado, codigo, desc, stock, nivel),
+                                tags=tags)
         
     def aplicar_filtro(self):
         self.current_filter = self.filter_var.get()
@@ -1714,14 +1741,21 @@ class DatabaseApp:
                     self.log("Conexión a BD exitosa", "SUCCESS")
                     self.search_records()
 
-                    # Cargar filtros jerárquicos de stock
+                    # Módulo de stock
                     if self.modules_enabled.get("stock", False):
                         self.load_stock_filters()
                         self.actualizar_alertas_stock(force_refresh=True)
-                        self.cargar_jerarquia_productos()
-                        self.aplicar_filtro_stock()
 
-                    return
+                    # 1) Carga one‐time de toda la jerarquía
+                    self._cargar_toda_jerarquia_productos()
+
+                    # 2) Filtra esa jerarquía según los códigos en cache
+                    self.cargar_jerarquia_productos()
+
+                    # 3) Refresca la vista con los filtros activos
+                    self.aplicar_filtro_stock()
+
+                return
 
             self.show_settings()
         except Exception as e:

@@ -17,6 +17,7 @@ import socket
 import http.server
 import socketserver
 import threading
+import json
 from tkcalendar import Calendar, DateEntry
 from datetime import datetime, timedelta
 import requests
@@ -29,6 +30,9 @@ from win10toast import ToastNotifier
 
 
 CONFIG_FILE = 'db_config.ini'
+JERARQUIA_CACHE_FILE = "jerarquia_cache.json"
+FAVORITOS_CACHE_FILE = 'favoritos_cache.json'
+JERARQUIA_CACHE_TTL = timedelta(hours=15)
 LOCATION_GROUPS = {
     'BARINAS': ['0101', '0108'],
     'GUANARE': ['0401', '0402'],
@@ -311,17 +315,17 @@ class DatabaseManager:
         self.password = None
 
     def table_exists(self, table_name: str) -> bool:
-        """Verifica si una tabla existe en la base de datos."""
+        """Verifica si una tabla existe en la base de datos con manejo de errores mejorado"""
         try:
             query = """
                 SELECT COUNT(*) 
                 FROM INFORMATION_SCHEMA.TABLES 
-                WHERE TABLE_NAME = ?
+                WHERE TABLE_NAME = LOWER(?)
             """
-            result = self.fetch_data(query, (table_name,))
-            return result[0][0] > 0
+            result = self.fetch_data(query, (table_name.lower(),))
+            return result[0][0] > 0 if result else False
         except Exception as e:
-            print(f"Error verificando existencia de tabla: {str(e)}")
+            print(f"Error verificando tabla {table_name}: {str(e)}")
             return False
 
     def connect(self, server, database, user, password, retry_attempts=2):
@@ -434,53 +438,43 @@ class DatabaseManager:
             """)
             self.conn.commit()
 
-            # Crear tabla de favoritos si no existe
-            self.cursor.execute("""
-                IF NOT EXISTS (
-                    SELECT * FROM sysobjects 
-                    WHERE name='favoritos_productos' AND xtype='U'
-                )
-                CREATE TABLE favoritos_productos (
-                    codigo NVARCHAR(15) PRIMARY KEY,
-                    favorito BIT DEFAULT 0,
-                    fecha_creacion DATETIME DEFAULT GETDATE()
-                )
-            """)
-            self.conn.commit()
-
             # Crear tabla envios_programados con índices
             self.cursor.execute("""
             IF NOT EXISTS (
-            SELECT * FROM sys.tables 
-            WHERE name = 'envios_programados' AND type = 'U'
+                SELECT * FROM sys.tables 
+                WHERE name = 'envios_programados' AND type = 'U'
             )
-                CREATE TABLE envios_programados (
-                    id INT IDENTITY(1,1) PRIMARY KEY,
-                    numero_cliente NVARCHAR(50) NOT NULL,
-                    fecha_programada DATETIME NOT NULL,
-                    fecha_creacion DATETIME DEFAULT GETDATE(),
-                    estado NVARCHAR(20) DEFAULT 'PENDIENTE',
-                    tipo_envio NVARCHAR(20) NOT NULL 
-                    CHECK (tipo_envio IN ('ENTREGA', 'DISPONIBILIDAD'))
-                );
-            """)
+            CREATE TABLE envios_programados (
+                id INT IDENTITY(1,1) PRIMARY KEY,
+                numero_cliente NVARCHAR(50) NOT NULL,
+                fecha_programada DATETIME NOT NULL,
+                fecha_creacion DATETIME DEFAULT GETDATE(),
+                estado NVARCHAR(20) DEFAULT 'PENDIENTE',
+                tipo_envio NVARCHAR(20) NOT NULL 
+                    CHECK (tipo_envio IN ('ENTREGA', 'DISPONIBILIDAD')),
+                codigo_producto NVARCHAR(15) NULL  -- Nueva columna añadida
+            );
 
-            self.cursor.execute("""
-                IF NOT EXISTS (
-                    SELECT * FROM sys.indexes 
-                    WHERE name = 'idx_envios_fecha_estado'
-                )
-                CREATE INDEX idx_envios_fecha_estado 
-                ON envios_programados (fecha_programada, estado);
-                """)
+            IF NOT EXISTS (
+                SELECT * FROM sys.indexes 
+                WHERE name = 'idx_envios_fecha_estado'
+            )
+            CREATE INDEX idx_envios_fecha_estado 
+            ON envios_programados (fecha_programada, estado);
 
-            self.cursor.execute("""
             IF NOT EXISTS (
                 SELECT * FROM sys.indexes 
                 WHERE name = 'idx_envios_numero'
             )
             CREATE INDEX idx_envios_numero 
             ON envios_programados (numero_cliente);
+
+            IF NOT EXISTS (
+                SELECT * FROM sys.indexes 
+                WHERE name = 'idx_envios_producto'
+            )
+            CREATE INDEX idx_envios_producto 
+            ON envios_programados (codigo_producto);  -- Nuevo índice añadido
         """)
             self.conn.commit()
 
@@ -509,7 +503,7 @@ class DatabaseManager:
                 """
             return self.fetch_data(query)
         except Exception as e:
-            print(f"Error obteniendo alertas de stock: {str(e)}")
+            print(f"{str(e)}")
             return []
         
     def toggle_favorito(self, codigo_producto):
@@ -529,9 +523,6 @@ class DatabaseManager:
             print(f"Error actualizando favorito: {str(e)}")
             return False
 
-    def obtener_favoritos(self):
-        return self.fetch_data("SELECT codigo FROM favoritos_productos WHERE favorito = 1")
-
     def execute_query(self, query, params=None):
         try:
             if params:
@@ -546,31 +537,32 @@ class DatabaseManager:
             raise Exception(error_msg) from e
 
     def fetch_data(self, query, params=None):
-        if not self.conn:  # <-- Validación crítica
-            # Attempt to reconnect if we have connection parameters
-            if self.server and self.database:
-                try:
-                    print("Intentando reconexión a la base de datos...")
-                    if self.connect(self.server, self.database, self.user, self.password):
-                        print("Reconexión exitosa")
-                    else:
-                        error_msg = f"{ErrorCode.DB_CONNECTION_FAILED}: No se pudo reconectar"
-                        raise Exception(error_msg)
-                except Exception as e:
-                    error_msg = f"{ErrorCode.DB_CONNECTION_FAILED}: No hay conexión activa - {str(e)}"
-                    raise Exception(error_msg)
-            else:
-                error_msg = f"{ErrorCode.DB_CONNECTION_FAILED}: No hay conexión activa"
-                raise Exception(error_msg)
         try:
-            if params:
-                self.cursor.execute(query, params)
-            else:
-                self.cursor.execute(query)
-            return self.cursor.fetchall()
+            if not self.conn:
+                self.connect(self.server, self.database, self.user, self.password)
+            
+            # Añadir reintentos para errores transitorios
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    self.cursor.execute(query, params or ())
+                    return self.cursor.fetchall()
+                except pyodbc.OperationalError as e:
+                    if attempt < max_retries - 1:
+                        time.sleep(2)
+                        self.connect(self.server, self.database, self.user, self.password)
+                        continue
+                    raise
+                
         except pyodbc.Error as e:
-            error_msg = f"{ErrorCode.DB_QUERY_EXECUTION}: {str(e)}"
-            raise Exception(error_msg) from e
+            error_msg = f"""
+            Error en consulta SQL:
+            Query: {query}
+            Params: {params}
+            Error: {str(e)}
+            """
+            print(error_msg, "ERROR")
+            raise
 
 
 class DatabaseApp:
@@ -589,6 +581,8 @@ class DatabaseApp:
         self.settings_window = None
         self.show_pwd_var = None
         self.httpd = None
+        self.favoritos = set()
+        self._load_favoritos_cache()
         
         # Inicialización temprana de atributos de paginación
         self.page_size = 250
@@ -628,10 +622,40 @@ class DatabaseApp:
          
 
         # forma de verificar hilos activos en segundo plano
-        #self.monitor_thread = threading.Thread(target=self.monitorear_favoritos, name="MonitoreoFavoritos", daemon=True)
-        #self.monitor_thread.start()
-        #self.listar_hilos_activos()
+        self.listar_hilos_activos()
 
+    def _load_favoritos_cache(self):
+        """Carga el archivo JSON de favoritos si existe"""
+        try:
+            if os.path.exists(FAVORITOS_CACHE_FILE):
+                with open(FAVORITOS_CACHE_FILE, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                self.favoritos = set(data)
+            else:
+                self.favoritos = set()
+        except Exception:
+            self.favoritos = set()
+
+    def _save_favoritos_cache(self):
+        """Guarda el set de favoritos al archivo JSON"""
+        try:
+            with open(FAVORITOS_CACHE_FILE, 'w', encoding='utf-8') as f:
+                json.dump(list(self.favoritos), f, ensure_ascii=False)
+        except Exception:
+            pass
+
+    def _toggle_favorito_local(self, codigo):
+        """Alterna un código en el set de favoritos y lo cachea"""
+        if codigo in self.favoritos:
+            self.favoritos.remove(codigo)
+        else:
+            self.favoritos.add(codigo)
+        self._save_favoritos_cache()
+        return True
+
+    def _get_favoritos_local(self):
+        """Devuelve el set de códigos favoritos"""
+        return set(self.favoritos)
 
     def obtener_descripcion_producto(self, codigo: str) -> Optional[str]:
         """Obtiene la descripción de un producto desde la base de datos."""
@@ -671,6 +695,8 @@ class DatabaseApp:
             return None
     
     def actualizar_alertas_stock(self, force_refresh=False):
+        if not self.modules_enabled.get("stock", False):
+            return
         """Actualiza las alertas con paginación y caché"""
         try:
             # Check for active database connection
@@ -715,7 +741,7 @@ class DatabaseApp:
     def mostrar_alertas_paginadas(self, datos):
         """Mostrar datos con estado de favoritos"""
         self.stock_tree.delete(*self.stock_tree.get_children())
-        favoritos = {f[0] for f in self.db_manager.obtener_favoritos()}
+        favoritos = self._get_favoritos_local()
     
         for codigo, desc, stock, nivel in datos:
             es_favorito = codigo in favoritos
@@ -739,39 +765,31 @@ class DatabaseApp:
         self.btn_next['state'] = 'normal' if self.current_page < total_pages else 'disabled'
 
     def monitorear_favoritos(self):
+        """Monitorea favoritos usando el archivo JSON"""
         while True:
-            if not self.db_manager.conn:
-                time.sleep(60)  # Esperar y reintentar
-                continue
             try:
-                favoritos = self.db_manager.obtener_favoritos()
-                # Usar la misma lógica que obtener_alertas_stock
-                current_alerts = self.db_manager.fetch_data("""
-                    SELECT 
-                        d.c_codarticulo AS codigo,
-                        SUM(d.n_cantidad) AS stock,
-                        CASE
-                            WHEN SUM(d.n_cantidad) BETWEEN 15 AND 20 THEN 'Leve'  
-                            WHEN SUM(d.n_cantidad) BETWEEN 8 AND 14 THEN 'Media'
-                            ELSE 'Crítica'
-                        END AS nivel
-                    FROM MA_DEPOPROD d
-                    INNER JOIN favoritos_productos f ON d.c_codarticulo = f.codigo
-                    WHERE d.c_coddeposito = '0301' AND f.favorito = 1
-                    GROUP BY d.c_codarticulo
-                    HAVING SUM(d.n_cantidad) < 21
-                """)
+                if not self.db_manager.conn:
+                    time.sleep(60)
+                    continue
             
-                for codigo, stock, nivel in current_alerts:
-
-                    clave = (codigo, stock, nivel)  # Incluir stock en la clave
-                    if (codigo, nivel) not in self.ultimas_notificaciones:
-                        self.mostrar_notificacion(codigo, stock, nivel)
-                        self.ultimas_notificaciones.add(clave)
-                    
+                # Obtener favoritos desde el JSON
+                favoritos = self._get_favoritos_local()  # <- Cambio clave aquí
+            
+                # Mantener lógica original de alertas
+                current_alerts = self.db_manager.obtener_alertas_stock()
+            
+                for codigo, desc, stock, nivel in current_alerts:
+                    if codigo in favoritos:  # <- Solo verificar los favoritos del JSON
+                        clave = (codigo, stock, nivel)
+                        if clave not in self.ultimas_notificaciones:
+                            self.mostrar_notificacion(codigo, stock, nivel)
+                            self.ultimas_notificaciones.add(clave)
+                        
+                time.sleep(300)  # 5 minutos
+            
             except Exception as e:
                 self.log(f"Error monitoreo favoritos: {str(e)}", "ERROR")
-            time.sleep(100) # 5 minutos
+                time.sleep(100)
 
     def mostrar_notificacion(self, codigo, stock, nivel):
         """
@@ -906,20 +924,20 @@ class DatabaseApp:
         self.style.configure("Header.TFrame", background="white")
         self.style.configure("Sidebar.TFrame", background="#e9ecef")
         self.style.configure("Nav.TButton", 
-                           font=("Segoe UI", 11), 
-                           anchor="w",
-                           padding=(20, 10),      #e9ecef
-                           background="#e9ecef")    #004C97
+                        font=("Segoe UI", 11), 
+                        anchor="w",
+                        padding=(20, 10),      #e9ecef
+                        background="#e9ecef")    #004C97
         self.style.map("Nav.TButton",
-                      background=[("active", "#004C97"), ("!active", "#e9ecef")],
-                      foreground=[("active", "white")])
+                    background=[("active", "#004C97"), ("!active", "#e9ecef")],
+                    foreground=[("active", "white")])
         
 
         
 
         self.style.configure("Disabled.TButton", 
-                       foreground="#666666",
-                       background="#e0e0e0")
+                    foreground="#666666",
+                    background="#e0e0e0")
         self.style.configure(
             "HeaderMenu.TMenubutton",
             background="#004C97",
@@ -953,10 +971,12 @@ class DatabaseApp:
         style = ttk.Style()
         style.configure("TButton", background="#FFB81C", foreground="#004C97")
         style.map("TButton",
-              background=[('active', '#e89f00')],
-              foreground=[('active', '#003f7e')])
+            background=[('active', '#e89f00')],
+            foreground=[('active', '#003f7e')])
         
     def setup_stock_tab(self):
+        if not self.modules_enabled.get("stock", False):
+            return
         main_frame = ttk.Frame(self.stock_tab)
         main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
@@ -1155,39 +1175,64 @@ class DatabaseApp:
         self.aplicar_filtro_stock()
     
     def cargar_jerarquia_productos(self):
-        """Filtra self.all_jerarquia usando solo los códigos en cached_alertas."""
+        """Filtra la jerarquía usando solo los códigos actualmente en alerta."""
+        start = time.perf_counter()
         try:
-            if not getattr(self, 'cached_alertas', None):
-                self.producto_jerarquia = {}
-                self.log("Sin datos en cache; salto carga de jerarquía", "WARNING")
-                return
+            if not hasattr(self, 'all_jerarquia') or not self.all_jerarquia:
+                self.log("Jerarquía vacía, iniciando carga completa", "WARNING")
+                self._cargar_toda_jerarquia_productos()
 
             codigos_en_alerta = {r[0] for r in self.cached_alertas}
-            # Filtrado puro en Python, O( n ):
-            self.producto_jerarquia = {
-                cod: self.all_jerarquia[cod]
-                for cod in codigos_en_alerta
-                if cod in self.all_jerarquia
-            }
-            print(f"DEBUG: jerarquía filtrada a {len(self.producto_jerarquia)} productos en alerta")
+            self.producto_jerarquia = {cod: self.all_jerarquia[cod] for cod in codigos_en_alerta if cod in self.all_jerarquia}
+            elapsed = time.perf_counter() - start
+            self.log(f"🔍 Filtrado de jerarquía: {len(self.producto_jerarquia)} en {elapsed:.2f}s", "DEBUG")
         except Exception as e:
             self.log(f"Error filtrando jerarquía: {e}", "ERROR")
             self.producto_jerarquia = {}
 
     def _cargar_toda_jerarquia_productos(self):
-        """Carga TODO el mapping C_CODIGO → (dep, grupo, sub) UNA sola vez."""
+        """Carga el mapeo completo de productos a jerarquía con caché local."""
+        start = time.perf_counter()
         try:
+            if os.path.exists(JERARQUIA_CACHE_FILE):
+                mtime = datetime.fromtimestamp(os.path.getmtime(JERARQUIA_CACHE_FILE))
+                if datetime.now() - mtime < JERARQUIA_CACHE_TTL:
+                    self.log("Cargando jerarquía desde cache", "INFO")
+                    with open(JERARQUIA_CACHE_FILE, 'r', encoding='utf-8') as f:
+                        self.all_jerarquia = json.load(f)
+                    elapsed = time.perf_counter() - start
+                    self.log(f"✅ Jerarquía leída en {elapsed:.2f}s (productos: {len(self.all_jerarquia)})", "DEBUG")
+                    return
+                else:
+                    self.log("Cache vencido, recargando jerarquía desde BD", "INFO")
+            else:
+                self.log("Cache no existe, cargando jerarquía desde BD", "INFO")
+
             filas = self.db_manager.fetch_data(
                 "SELECT C_CODIGO, C_DEPARTAMENTO, C_GRUPO, C_SUBGRUPO FROM MA_PRODUCTOS"
             )
-            self.all_jerarquia = {
-                fila[0]: (fila[1], fila[2], fila[3])
-                for fila in filas if all(fila)
-            }
-            print(f"DEBUG: jerarquía total cargada: {len(self.all_jerarquia)} productos")
+            self.all_jerarquia = {fila[0]: (fila[1], fila[2], fila[3]) for fila in filas if all(fila)}
+            with open(JERARQUIA_CACHE_FILE, 'w', encoding='utf-8') as f:
+                json.dump(self.all_jerarquia, f, ensure_ascii=False)
+            elapsed = time.perf_counter() - start
+            self.log(f"✅ Jerarquía cargada y cacheada ({len(self.all_jerarquia)} productos) en {elapsed:.2f}s", "SUCCESS")
+
         except Exception as e:
-            self.log(f"Error cargando jerarquía total: {e}", "ERROR")
+            self.log(f"Error cargando jerarquía: {e}", "ERROR")
             self.all_jerarquia = {}
+
+    def _init_jerarquia_async(self):
+        """Thread en background para cargar y filtrar jerarquía sin bloquear UI."""
+        total_start = time.perf_counter()
+        self._cargar_toda_jerarquia_productos()
+        self.cargar_jerarquia_productos()
+        elapsed = time.perf_counter() - total_start
+        self.log(f"🏁 Jerarquía inicializada en {elapsed:.2f}s", "INFO")
+        # Actualizar UI en hilo principal
+        try:
+            self.root.after(0, self.aplicar_filtro_stock)
+        except Exception:
+            pass
 
     def aplicar_filtro_stock(self):
         # Asegurar que hay datos en caché
@@ -1232,7 +1277,7 @@ class DatabaseApp:
         #print(f"DEBUG: tras filtro texto y nivel: {len(datos)} registros")
 
         try:
-            favoritos = {f[0] for f in self.db_manager.obtener_favoritos()}
+            favoritos = self._get_favoritos_local()
         except Exception as e:
             self.log(f"Error obteniendo favoritos:", e)
             favoritos = set()
@@ -1286,28 +1331,27 @@ class DatabaseApp:
     
 
     def on_favorito_click(self, event):
-        """Manejar clic en la columna de favoritos"""
+        """Manejar clic en la columna de favoritos usando cache local"""
         try:
             region = self.stock_tree.identify_region(event.x, event.y)
             if region == "cell":
                 col = self.stock_tree.identify_column(event.x)
                 item = self.stock_tree.identify_row(event.y)
-                
-                if item and col == "#1":  # Columna de favoritos (ajustar según la posición real)
+                if item and col == "#1":
                     values = self.stock_tree.item(item, 'values')
                     if values and len(values) > 1:
-                        codigo = values[1]  # Obtener código
-                        if self.db_manager.toggle_favorito(codigo):
-                            self.actualizar_alertas_stock(force_refresh=True)
+                        codigo = values[1]
+                        if self._toggle_favorito_local(codigo):
+                            self.aplicar_filtro_stock()
         except Exception as e:
-            print(f"Error en on_favorito_click: {str(e)}")
-        return 0  # Valor entero apropiado para WNDPROC en Windows
+            print(f"Error en on_favorito_click: {e}")
+        return 0
         
 
     def mostrar_alertas_paginadas(self, datos):
         """Mostrar datos con estado de favoritos"""
         self.stock_tree.delete(*self.stock_tree.get_children())
-        favoritos = {f[0] for f in self.db_manager.obtener_favoritos()}
+        favoritos = self._get_favoritos_local()
         
         for codigo, desc, stock, nivel in datos:
             es_favorito = codigo in favoritos
@@ -1476,6 +1520,7 @@ class DatabaseApp:
         # Cargar eventos iniciales
         self.cargar_eventos_calendario()
         self.cal.bind("<<CalendarSelected>>", lambda e: self.mostrar_eventos_fecha(e) or 0)
+
     def mostrar_eventos_fecha(self, event=None):
         fecha_seleccionada = self.cal.get_date()
         # Ensure return value for WNDPROC
@@ -1524,8 +1569,8 @@ class DatabaseApp:
         top_frame.pack(fill=tk.X)
     
         btn_masivo = ttk.Button(top_frame, 
-                          text="▶ Iniciar envío masivo", 
-                          command=self.enviar_a_todos)
+                        text="▶ Iniciar envío masivo", 
+                        command=self.enviar_a_todos)
         btn_masivo.pack(side=tk.LEFT)
         self.buttons['btn_envio_masivo'] = btn_masivo  # 
     
@@ -1636,7 +1681,6 @@ class DatabaseApp:
             )
 
             if tipo == "ENTREGA":
-                # Obtener y validar lista de números
                 numeros_texto = self.entry_numeros.get().strip()
                 if not numeros_texto:
                     messagebox.showerror("Error", "Ingrese al menos un número de teléfono.")
@@ -1645,27 +1689,84 @@ class DatabaseApp:
                 if not all(re.match(r"^\d{7,15}$", n) for n in numeros):
                     messagebox.showerror("Error", "Formato de número inválido. Use solo dígitos (7-15 caracteres).")
                     return
-                # Insertar para cada número
+            
                 for num in numeros:
                     self.db_manager.execute_query(
                         "INSERT INTO envios_programados (numero_cliente, fecha_programada, tipo_envio, estado) VALUES (?, ?, ?, 'PENDIENTE')",
                         (num, fecha_completa, tipo)
                     )
                 messagebox.showinfo("Éxito", f"Envíos programados para {len(numeros)} número(s) como 'ENTREGA'.")
-            else:
-                # Disponibilidad: sin números
-                self.db_manager.execute_query(
-                    "INSERT INTO envios_programados (numero_cliente, fecha_programada, tipo_envio, estado) VALUES (?, ?, ?, 'PENDIENTE')",
-                    ("", fecha_completa, tipo)
+
+            elif tipo == "DISPONIBILIDAD":
+
+
+                clientes = self.db_manager.fetch_data(
+                    """SELECT c.numero_cliente, c.C_CODIGO 
+                    FROM clientes c
+                    WHERE c.C_CODIGO IS NOT NULL 
+                    AND c.numero_cliente IS NOT NULL"""
                 )
-                messagebox.showinfo("Éxito", f"Disponibilidad programada para {fecha_completa}.")
+            
+                if not clientes:
+                    messagebox.showwarning("Sin clientes", "No hay clientes válidos con productos asociados")
+                    return
+
+                envios_creados = 0
+                errores = 0
+            
+                for numero_cliente, codigo_producto in clientes:
+                    try:
+                        # Validar número de cliente
+                        if not re.match(r'^58\d{10}$', f"58{numero_cliente.lstrip('0')}"):
+                            raise ValueError(f"Número inválido: {numero_cliente}")
+                    
+                        # Verificar existencia del producto
+                        if not self.db_manager.fetch_data(
+                            "SELECT 1 FROM MA_PRODUCTOS WHERE C_CODIGO = ?",
+                            (codigo_producto,)
+                        ):
+                            raise ValueError(f"Producto {codigo_producto} no existe")
+
+                        # Verificar stock
+                        stock_result = self.db_manager.fetch_data(
+                            """SELECT n_cantidad 
+                            FROM MA_DEPOPROD 
+                            WHERE c_codarticulo = ? 
+                            AND c_coddeposito = '0301'""",
+                            (codigo_producto,)
+                        )  
+                    
+                        if not stock_result or stock_result[0][0] <= 0:
+                            continue  # Saltar clientes sin stock
+                        
+                        # Insertar registro
+                        self.db_manager.execute_query(
+                            """INSERT INTO envios_programados 
+                            (numero_cliente, fecha_programada, tipo_envio, estado, codigo_producto)
+                            VALUES (?, ?, ?, ?, ?)""",
+                            (numero_cliente, fecha_completa, tipo, 'PENDIENTE', codigo_producto)
+                        )
+                        envios_creados += 1
+                    
+                    except Exception as e:
+                        errores += 1
+                        self.log(f"Error cliente {numero_cliente}: {str(e)}", "ERROR")
+
+                messagebox.showinfo("Resumen", 
+                    f"Envíos creados: {envios_creados}\n"
+                    f"Errores: {errores}\n"
+                    f"Clientes sin stock: {len(clientes) - envios_creados - errores}")
+
+            else:
+                messagebox.showerror("Error", "Tipo de envío no reconocido")
+
         except Exception as e:
             messagebox.showerror("Error de programación", str(e))
 
 
     def limpiar_logs(self):
         self.logs_text.delete('1.0', tk.END)
-        self.log_counter = 0
+        self.logs_counter = 0
 
     def log(self, message: str, level: str = 'INFO'):
         """Registrar mensaje en el panel de debug"""
@@ -1736,24 +1837,20 @@ class DatabaseApp:
             api_token = self.cred_manager.get_whatsapp_token()
 
             if server and database:
+                total_start = time.perf_counter()
                 if self.db_manager.connect(server, database, user, password):
                     self.update_status('connected', server=server, api_token=api_token)
                     self.log("Conexión a BD exitosa", "SUCCESS")
                     self.search_records()
 
-                    # Módulo de stock
                     if self.modules_enabled.get("stock", False):
                         self.load_stock_filters()
                         self.actualizar_alertas_stock(force_refresh=True)
 
-                    # 1) Carga one‐time de toda la jerarquía
-                    self._cargar_toda_jerarquia_productos()
+                        threading.Thread(target=self._init_jerarquia_async, daemon=True).start()
 
-                    # 2) Filtra esa jerarquía según los códigos en cache
-                    self.cargar_jerarquia_productos()
-
-                    # 3) Refresca la vista con los filtros activos
-                    self.aplicar_filtro_stock()
+                    total_elapsed = time.perf_counter() - total_start
+                    self.log(f"🏁 App inicializada en {total_elapsed:.2f}s", "INFO")
 
                 return
 
@@ -2587,54 +2684,62 @@ class DatabaseApp:
             messagebox.showerror("Error", f"Error obteniendo descripción o cantidad: {str(e)}")
 
     def procesar_envio_programado(self, id_envio, numero_cliente):
-        """Envía un mensaje programado y actualiza el estado en la base de datos"""
+        """Envía un mensaje programado usando plantillas de WhatsApp y actualiza el estado"""
         try:
+            # 1. Obtener datos extendidos del envío
             envio_data = self.db_manager.fetch_data(
-                "SELECT tipo_envio FROM envios_programados WHERE id = ?", 
+                "SELECT tipo_envio, codigo_producto FROM envios_programados WHERE id = ?", 
                 (id_envio,)
             )
-            tipo_envio = envio_data[0][0] if envio_data else None
-
-            # Enviar mensaje según el tipo de envío
-            if tipo_envio in ("ENTREGA", "DISPONIBILIDAD"):
-                if self.enviar_mensaje_whatsapp(numero_cliente, tipo_envio=tipo_envio):
-                    # Actualizar estado después de enviar
-                    self.db_manager.execute_query(
-                        "UPDATE envios_programados SET estado = 'ENVIADO' WHERE id = ?",
-                        (id_envio,)
-                    )
-                    return True
+            
+            if not envio_data:
+                self.log(f"Envío {id_envio}: no encontrado", "ERROR")
                 return False
             else:
-                # Lógica para envíos no tipificados (stock)
-                codigo = self.obtener_codigo_producto_cliente(numero_cliente)
-                if not codigo:
-                    self.log(f"Cliente {numero_cliente} sin producto asociado", "ERROR")
-                    return False
+                tipo_envio, codigo_producto = envio_data[0]
 
-                stock_result = self.db_manager.fetch_data(
-                    "SELECT n_cantidad FROM MA_DEPOPROD WHERE c_codarticulo = ? AND c_coddeposito = '0301'",
-                    (codigo,)
+            tipo_envio, codigo_producto = envio_data[0]
+            productos = None
+
+            # 2. Configurar plantillas según tipo de envío
+            if tipo_envio == "DISPONIBILIDAD": 
+
+                # Validar datos del producto
+                if not codigo_producto:
+                    self.log(f"Envío {id_envio}: Sin código de producto", "ERROR")
+                    return False
+                
+                # Obtener descripción del producto
+                descripcion = self.db_manager.fetch_data(
+                    "SELECT C_DESCRI FROM MA_PRODUCTOS WHERE C_CODIGO = ?",
+                    (codigo_producto,)
                 )
-                if not stock_result or stock_result[0][0] <= 0:
-                    self.log(f"Sin stock para cliente {numero_cliente}", "WARNING")
-                    return False
-
-                descripcion = self.obtener_descripcion_producto(codigo)
+            
                 if not descripcion:
-                    self.log(f"Descripción no encontrada para código {codigo}", "ERROR")
+                    self.log(f"Producto {codigo_producto} no encontrado", "ERROR")
                     return False
 
-                if self.enviar_mensaje_whatsapp(numero_cliente, [descripcion]):
-                    # Actualizar estado después de enviar
-                    self.db_manager.execute_query(
-                        "UPDATE envios_programados SET estado = 'ENVIADO' WHERE id = ?",
-                        (id_envio,)
-                    )
-                    return True
-                return False
+                productos = [descripcion[0][0]]  # Adaptado al parámetro "productos" del método
+
+            elif tipo_envio == "ENTREGA":
+                pass  # Nombre exacto de tu plantilla en Meta
+
+            # 3. Envío para tipos conocidos
+            if self.enviar_mensaje_whatsapp(
+                numero_cliente=numero_cliente,
+                productos=productos,
+                tipo_envio=tipo_envio
+            ):
+                self.db_manager.execute_query(
+                    "UPDATE envios_programados SET estado = 'ENVIADO' WHERE id = ?",
+                    (id_envio,)
+                )
+                return True
+
+            return False
+
         except Exception as e:
-            self.log(f"Error en envío programado ID {id_envio}: {str(e)}", "ERROR")
+            self.log(f"Error en envío {id_envio}: {str(e)}", "ERROR")
             self.audit_log.log_event(
                 "ENVIO_PROGRAMADO_ERROR",
                 os.getlogin(),
@@ -2642,7 +2747,10 @@ class DatabaseApp:
                 error_code=ErrorCode.WHATSAPP_API_FAILURE
             )
             return False
-
+        finally:
+            self.log(f"Finalizado el procesamiento del envío {id_envio} para el cliente {numero_cliente}", "INFO")
+            error_code=ErrorCode.WHATSAPP_API_FAILURE
+            return False
 
     def procesar_envio_masivo(self,):
 

@@ -774,6 +774,14 @@ class DatabaseApp:
                 self.log(f"Error monitoreo favoritos: {str(e)}", "ERROR")
                 time.sleep(100)
 
+    def obtener_existencias_por_ubicacion(self, codigo, ubicaciones_seleccionadas):
+        resultado = {}
+        for ubicacion in ubicaciones_seleccionadas:
+            depositos = LOCATION_GROUPS[ubicacion]
+            existencia = self.consultar_existencia_ubicaciones(codigo, depositos)
+            resultado[ubicacion] = existencia
+        return resultado
+
     def mostrar_notificacion(self, codigo, stock, nivel):
         """
         Muestra un toast con el nivel de alerta en el depósito principal
@@ -808,71 +816,99 @@ class DatabaseApp:
 
     def exportar_csv(self):
         try:
-            # 1. Obtener datos filtrados completos
-            datos_exportar = self._obtener_datos_filtrados()
+            # 1. Mostrar diálogo para seleccionar ubicaciones
+            dialog = tk.Toplevel(self.root)
+            dialog.title("Seleccionar Ubicaciones")
+            dialog.transient(self.root)
+            dialog.grab_set()
         
+            ubicaciones_vars = {
+                ubicacion: tk.BooleanVar(value=True)
+                for ubicacion in LOCATION_GROUPS
+            }
+
+            ttk.Label(dialog, text="Seleccione las ubicaciones a incluir:").pack(pady=10)
+            for ubicacion in LOCATION_GROUPS:
+                cb = ttk.Checkbutton(
+                    dialog,
+                    text=f"{ubicacion} ({len(LOCATION_GROUPS[ubicacion])} depósitos)",
+                    variable=ubicaciones_vars[ubicacion]
+                )
+                cb.pack(anchor='w', padx=20)
+
+            seleccionadas = []
+            def confirmar():
+                nonlocal seleccionadas
+                seleccionadas = [u for u, var in ubicaciones_vars.items() if var.get()]
+                dialog.destroy()
+        
+            btn_frame = ttk.Frame(dialog)
+            btn_frame.pack(pady=10)
+            ttk.Button(btn_frame, text="Exportar", command=confirmar).pack(side=tk.LEFT, padx=5)
+            ttk.Button(btn_frame, text="Cancelar", command=dialog.destroy).pack(side=tk.RIGHT)
+
+            dialog.wait_window()
+            if not seleccionadas:
+                return
+
+            # 2. Obtener datos filtrados
+            datos_exportar = self._obtener_datos_filtrados()
             if not datos_exportar:
                 messagebox.showwarning("Sin datos", "No hay registros para exportar")
                 return
 
-            # Configurar barra global
-            self.global_progress.pack(side=tk.RIGHT, padx=10)  # Mostrar barra
+            # 3. Configurar progreso
+            total_registros = len(datos_exportar)
+            self.global_progress.pack(side=tk.RIGHT, padx=10)
             self.global_progress['value'] = 0
-            self.global_progress['maximum'] = len(datos_exportar)
+            self.global_progress['maximum'] = total_registros
+            self.api_status.config(text="Exportando: 0%", foreground="#004C97")
 
-            # Usar etiqueta de API para mostrar progreso
-            self.api_status.config(text="Exportando: 0%")
-       
-            # 3. Generar archivo con progreso
             filename = f"reporte_stock_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-        
             with open(filename, 'w', newline='', encoding='utf-8-sig') as f:
-                writer = csv.writer(f, delimiter=';')
-            
-                # Cabecera
-                writer.writerow(["Código", "Descripción", "Stock", "Nivel Alerta"])
-            
-                # Filas con actualización de progreso
+                encabezados = ['Código', 'Descripción', 'Nivel Alerta', 'Stock Principal', *seleccionadas]
+                writer = csv.DictWriter(f, fieldnames=encabezados, delimiter=';')
+                writer.writeheader()
+
                 for i, item in enumerate(datos_exportar, 1):
-                    writer.writerow([
-                        item[0],  # Código
-                        item[1].replace(';', ','),  # Descripción
-                        item[2],  # Stock
-                        item[3]   # Nivel
-                    ])
-                
-                    # Actualizar cada 2% de progreso o último elemento
-                    if i % max(1, len(datos_exportar)//50) == 0 or i == len(datos_exportar):
-                        progress_percent = int((i/len(datos_exportar)))*100
+                    row_data = {
+                        'Código': item[0],
+                        'Descripción': item[1].replace(';', ','),
+                        'Nivel Alerta': item[3],
+                        'Stock Principal': item[2]
+                    }
+                    for ubicacion in seleccionadas:
+                        depositos = LOCATION_GROUPS[ubicacion]
+                        row_data[ubicacion] = self.obtener_existencias_por_ubicacion(item[0], depositos)
+
+                    writer.writerow(row_data)
+
+                    if i % max(1, total_registros // 50) == 0 or i == total_registros:
+                        progreso = int((i / total_registros) * 100)
                         self.global_progress['value'] = i
-                        self.api_status.config(
-                            text=f"Exportando: {progress_percent}%",
-                            foreground="#004C97"  # Color corporativo
-                        )
+                        self.api_status.config(text=f"Exportando: {progreso}%")
                         self.root.update_idletasks()
 
-            # Restablecer UI
+            # 4. Mostrar resumen final
             self.api_status.config(text="API: Lista", foreground="green")
-            self.global_progress.pack_forget()
-
-            # 4. Ocultar barra al finalizar
-        
-            # 5. Notificación final
-            self.log(f"Exportados {len(datos_exportar)} registros", "SUCCESS")
             messagebox.showinfo(
-                "Exportación Completa",
-                f"Archivo guardado en:\n{os.path.abspath(filename)}"
+                "Exportación Exitosa",
+                f"Reporte generado con éxito:\n\n"
+                f"• Registros: {total_registros}\n"
+                f"• Ubicaciones incluidas: {len(seleccionadas)}\n"
+                f"• Depósitos consultados: {sum(len(LOCATION_GROUPS[u]) for u in seleccionadas)}\n"
+                f"• Ruta: {os.path.abspath(filename)}"
             )
-        
+
         except Exception as e:
-            self.api_status.config(text="API: Error", foreground="red")
-            self.global_progress.pack_forget()
             self.log(f"Error en exportación: {str(e)}", "ERROR")
-            messagebox.showerror("Error", f"Fallo en exportación:\n{str(e)}")
+            self.api_status.config(text="API: Error", foreground="red")
+            messagebox.showerror("Error en Exportación", f"Error durante la exportación:\n{str(e)}")
 
         finally:
+            self.global_progress.pack_forget()
             self.root.after(3000, lambda: self.api_status.config(
-                text="API: Lista", 
+                text="API: Lista",
                 foreground="green"
             ))
                 

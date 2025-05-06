@@ -774,13 +774,17 @@ class DatabaseApp:
                 self.log(f"Error monitoreo favoritos: {str(e)}", "ERROR")
                 time.sleep(100)
 
-    def obtener_existencias_por_ubicacion(self, codigo, ubicaciones_seleccionadas):
-        resultado = {}
-        for ubicacion in ubicaciones_seleccionadas:
-            depositos = LOCATION_GROUPS[ubicacion]
-            existencia = self.consultar_existencia_ubicaciones(codigo, depositos)
-            resultado[ubicacion] = existencia
-        return resultado
+    def obtener_existencias_por_ubicacion(self, codigo, depositos):
+        # depositos es lista de strings, p. ej. ['0101','0108']
+        placeholders = ','.join('?' for _ in depositos)
+        sql = (
+            f"SELECT SUM(n_cantidad) "
+            f"FROM MA_DEPOPROD "
+            f"WHERE c_codarticulo = ? AND c_coddeposito IN ({placeholders})"
+        )
+        params = [codigo] + depositos
+        result = self.db_manager.fetch_data(sql, params)
+        return int(result[0][0] or 0)
 
     def mostrar_notificacion(self, codigo, stock, nivel):
         """
@@ -879,7 +883,8 @@ class DatabaseApp:
                     }
                     for ubicacion in seleccionadas:
                         depositos = LOCATION_GROUPS[ubicacion]
-                        row_data[ubicacion] = self.obtener_existencias_por_ubicacion(item[0], depositos)
+                        existencia = self.obtener_existencias_por_ubicacion(item[0], depositos)
+                        row_data[ubicacion] = existencia
 
                     writer.writerow(row_data)
 

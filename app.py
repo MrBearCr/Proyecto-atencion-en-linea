@@ -18,6 +18,7 @@ import http.server
 import socketserver
 import threading
 import json
+import math
 from tkcalendar import Calendar, DateEntry
 from datetime import datetime, timedelta
 import requests
@@ -346,7 +347,7 @@ class DatabaseManager:
             Exception: If connection fails after all retries
         """
         # Log connection attempt with sanitized info
-        #print(f"Attempting to connect to server: {server}, database: {database}, user: {user if user else 'Windows Auth'}")
+        print(f"Attempting to connect to server: {server}, database: {database}, user: {user if user else 'Windows Auth'}")
         
         # Cadena inicial sin database para crear la BD si no existe
         initial_conn_str = (
@@ -716,24 +717,6 @@ class DatabaseApp:
                 self.ultimas_notificaciones.clear()  # <-- Limpiar notificaciones
                 self.log("Datos de alertas actualizados desde BD", "INFO")
         
-            # Aplicar filtro
-            filtered = [
-                r for r in self.cached_alertas 
-                if (self.current_filter == 'TODAS' or 
-                    r[3].upper() == self.current_filter.upper())
-            ]
-        
-            # Calcular paginación
-            total_items = len(filtered)
-            total_pages = max(1, (total_items + self.page_size - 1) // self.page_size)
-            start_index = (self.current_page - 1) * self.page_size
-            end_index = start_index + self.page_size
-        
-            # Mostrar datos paginados
-            self.mostrar_alertas_paginadas(filtered[start_index:end_index])
-            self.actualizar_contador_paginacion(total_pages)
-            self.stock_tree.update_idletasks() 
-        
         except Exception as e:
             print(f"Error al actualizar alertas: {str(e)}")
             self.log(f"Error crítico al actualizar alertas: {str(e)}", "ERROR")
@@ -825,41 +808,109 @@ class DatabaseApp:
 
     def exportar_csv(self):
         try:
-            # 1) Obtenemos solo los ítems que están actualmente visibles en el TreeView
-            visibles = self.stock_tree.get_children()
-            if not visibles:
+            # 1. Obtener datos filtrados completos
+            datos_exportar = self._obtener_datos_filtrados()
+        
+            if not datos_exportar:
                 messagebox.showwarning("Sin datos", "No hay registros para exportar")
                 return
 
-            # 2) Nombre de archivo con timestamp
-            filename = f"reporte_stock_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+            # Configurar barra global
+            self.global_progress.pack(side=tk.RIGHT, padx=10)  # Mostrar barra
+            self.global_progress['value'] = 0
+            self.global_progress['maximum'] = len(datos_exportar)
 
-            # 3) Abrimos con BOM UTF-8 para que Excel muestre bien los acentos
+            # Usar etiqueta de API para mostrar progreso
+            self.api_status.config(text="Exportando: 0%")
+       
+            # 3. Generar archivo con progreso
+            filename = f"reporte_stock_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        
             with open(filename, 'w', newline='', encoding='utf-8-sig') as f:
                 writer = csv.writer(f, delimiter=';')
+            
                 # Cabecera
                 writer.writerow(["Código", "Descripción", "Stock", "Nivel Alerta"])
-                # Filas: extraemos los valores tal como están en pantalla
-                for item in visibles:
-                    estado, codigo, descripcion, stock, nivel = self.stock_tree.item(item, 'values')
-                    # Reemplazamos ';' en la descripción si acaso, y escribimos
+            
+                # Filas con actualización de progreso
+                for i, item in enumerate(datos_exportar, 1):
                     writer.writerow([
-                        codigo,
-                        descripcion.replace(';', ','),  
-                        stock,
-                        nivel
+                        item[0],  # Código
+                        item[1].replace(';', ','),  # Descripción
+                        item[2],  # Stock
+                        item[3]   # Nivel
                     ])
+                
+                    # Actualizar cada 2% de progreso o último elemento
+                    if i % max(1, len(datos_exportar)//50) == 0 or i == len(datos_exportar):
+                        progress_percent = int((i/len(datos_exportar)))*100
+                        self.global_progress['value'] = i
+                        self.api_status.config(
+                            text=f"Exportando: {progress_percent}%",
+                            foreground="#004C97"  # Color corporativo
+                        )
+                        self.root.update_idletasks()
 
-            # 4) Feedback al usuario
-            self.log(f"Reporte exportado: {filename}", "SUCCESS")
+            # Restablecer UI
+            self.api_status.config(text="API: Lista", foreground="green")
+            self.global_progress.pack_forget()
+
+            # 4. Ocultar barra al finalizar
+        
+            # 5. Notificación final
+            self.log(f"Exportados {len(datos_exportar)} registros", "SUCCESS")
             messagebox.showinfo(
-                "Éxito",
-                f"Se exportaron {len(visibles)} registros.\nArchivo: {os.path.abspath(filename)}"
+                "Exportación Completa",
+                f"Archivo guardado en:\n{os.path.abspath(filename)}"
             )
+        
         except Exception as e:
-            self.log(f"Error exportando CSV: {str(e)}", "ERROR")
-            messagebox.showerror("Error", f"No se pudo generar el CSV:\n{str(e)}")
+            self.api_status.config(text="API: Error", foreground="red")
+            self.global_progress.pack_forget()
+            self.log(f"Error en exportación: {str(e)}", "ERROR")
+            messagebox.showerror("Error", f"Fallo en exportación:\n{str(e)}")
+
+        finally:
+            self.root.after(3000, lambda: self.api_status.config(
+                text="API: Lista", 
+                foreground="green"
+            ))
+                
+            
+            
+    def _obtener_datos_filtrados(self):
+        """Réplica de la lógica de filtrado SIN paginación"""
+        # Aplicar mismos filtros que en aplicar_filtro_stock
+        datos_filtrados = list(self.cached_alertas)
     
+        # Filtro jerárquico
+        dept_code = self.dept_dict.get(self.dept_var.get())
+        group_code = self.group_dict.get(self.group_var.get())
+        sub_code = self.sub_dict.get(self.sub_var.get())
+    
+        if any([dept_code, group_code, sub_code]):
+            datos_filtrados = [
+                r for r in datos_filtrados 
+                if self._coincide_jerarquia(r[0], dept_code, group_code, sub_code)
+            ]
+    
+        # Filtro texto
+        texto_busqueda = self.search_var.get().strip().lower()
+        if texto_busqueda:
+            datos_filtrados = [
+                r for r in datos_filtrados 
+                if texto_busqueda in (r[1].lower() + r[0].lower())
+            ]
+    
+        # Filtro nivel
+        filtro_nivel = self.filter_var.get().upper()
+        if filtro_nivel != 'TODAS':
+            datos_filtrados = [r for r in datos_filtrados if r[3].upper() == filtro_nivel]
+    
+        # Ordenar por favoritos
+        favoritos = self._get_favoritos_local()
+        return sorted(datos_filtrados, key=lambda x: x[0] not in favoritos)
+
     def buscar_por_fecha(self):
         # Obtener fechas como objetos datetime.datetime (incluyendo hora)
         fecha_inicio = datetime.combine(self.fecha_inicio.get_date(), datetime.min.time())
@@ -1027,6 +1078,7 @@ class DatabaseApp:
         filter_frame.pack(fill=tk.X, pady=5)
         ttk.Label(filter_frame, text="Filtrar:").pack(side=tk.LEFT)
         self.filter_var = tk.StringVar(value='TODAS')
+        self.current_filter = 'TODAS'
 
         filters = [
             ('Todas', 'TODAS'),
@@ -1036,8 +1088,17 @@ class DatabaseApp:
         ]
 
         for text, val in filters:
-            ttk.Radiobutton(filter_frame, text=text, variable=self.filter_var, value=val,
-                            command=self.aplicar_filtro_stock).pack(side=tk.LEFT, padx=5)
+            ttk.Radiobutton(
+                filter_frame,
+                text=text,
+                variable=self.filter_var,
+                value=val,
+                command=lambda v=val: (
+                    setattr(self, 'current_page', 1),
+                    setattr(self, 'current_filter', v),
+                    self.aplicar_filtro_stock()
+                )
+            ).pack(side=tk.LEFT, padx=5)
 
         # Fila 2: Acciones y paginación
         action_frame = ttk.Frame(top_controls)
@@ -1235,66 +1296,76 @@ class DatabaseApp:
             pass
 
     def aplicar_filtro_stock(self):
-        # Asegurar que hay datos en caché
-        if not getattr(self, 'cached_alertas', None):
+        # 1. Cargar datos desde caché (solo se actualiza con force_refresh o primera carga)
+        if not hasattr(self, 'cached_alertas') or not self.cached_alertas:
             self.actualizar_alertas_stock(force_refresh=True)
+    
+        # 2. Obtener copia de los datos en caché para trabajar
+        datos_filtrados = list(self.cached_alertas)
+    
+        # 3. Aplicar filtros jerárquicos (departamento/grupo/subgrupo)
+        dept_code = self.dept_dict.get(self.dept_var.get())
+        group_code = self.group_dict.get(self.group_var.get())
+        sub_code = self.sub_dict.get(self.sub_var.get())
+    
+        if any([dept_code, group_code, sub_code]):
+            datos_filtrados = [
+                r for r in datos_filtrados 
+                if self._coincide_jerarquia(r[0], dept_code, group_code, sub_code)
+            ]
+    
+        # 4. Aplicar filtro de texto en descripción y código
+        texto_busqueda = self.search_var.get().strip().lower()
+        if texto_busqueda:
+            datos_filtrados = [
+                r for r in datos_filtrados 
+                if texto_busqueda in (r[1].lower() + r[0].lower())
+            ]
+    
+        # 5. Aplicar filtro de nivel de alerta
+        filtro_nivel = self.filter_var.get().upper()
+        if filtro_nivel != 'TODAS':
+            datos_filtrados = [r for r in datos_filtrados if r[3].upper() == filtro_nivel]
+    
+        # 6. Ordenar por favoritos (sin modificar datos originales)
+        favoritos = self._get_favoritos_local()
+        datos_ordenados = sorted(
+            datos_filtrados,
+            key=lambda x: x[0] not in favoritos  # Favoritos primero
+        )
+    
+        # 7. Calcular paginación
+        total_items = len(datos_ordenados)
+        total_paginas = max(1, math.ceil(total_items / self.page_size))
+    
+        # Asegurar que la página actual sea válida
+        self.current_page = max(1, min(self.current_page, total_paginas))
+    
+        # 8. Obtener slice de datos para la página actual
+        inicio = (self.current_page - 1) * self.page_size
+        fin = inicio + self.page_size
+        datos_pagina = datos_ordenados[inicio:fin]
+    
+        # 9. Actualizar interfaz
+        self.mostrar_alertas_paginadas(datos_pagina)
+        self.actualizar_controles_paginacion(total_paginas)
 
-        datos = list(self.cached_alertas)
-        #print(f"DEBUG: cached_alertas inicial = {len(datos)} registros")
-
-        dept_desc = self.dept_var.get()
-        dept_code = self.dept_dict.get(dept_desc)
-
-        group_desc = self.group_var.get()
-        group_code = self.group_dict.get(group_desc)
-
-        sub_desc = self.sub_var.get()
-        sub_code = self.sub_dict.get(sub_desc)
-
-        def coincide_jerarquia(codigo):
-            jerarquia = self.producto_jerarquia.get(codigo)
-            if not jerarquia:
-                return False
-            dep, grp, sub = jerarquia
-            if dept_code and dep != dept_code:
-                return False
-            if group_code and grp != group_code:
-                return False
-            if sub_code and sub != sub_code:
-                return False
-            return True
-
-        datos = [r for r in datos if coincide_jerarquia(r[0])]
-        #print(f"DEBUG: tras filtro jerárquico: {len(datos)} registros")
-
-        # Filtro de texto y nivel
-        texto = self.search_var.get().lower()
-        if texto:
-            datos = [r for r in datos if texto in (str(r[1]).lower() + str(r[2]).lower())]
-        nivel = self.filter_var.get()
-        if nivel != 'TODAS':
-            datos = [r for r in datos if r[3].upper() == nivel]
-        #print(f"DEBUG: tras filtro texto y nivel: {len(datos)} registros")
-
-        try:
-            favoritos = self._get_favoritos_local()
-        except Exception as e:
-            self.log(f"Error obteniendo favoritos:", e)
-            favoritos = set()
-
-        datos.sort(key=lambda r: (r[0] not in favoritos))
-
-        total = len(datos)
-        self.log(f"DEBUG: total a mostrar en TreeView: {total}")
-        total_pages = max(1, (total + self.page_size - 1) // self.page_size)
-        start = (self.current_page - 1) * self.page_size
-        end = start + self.page_size
-
-        self.mostrar_alertas_paginadas(datos[start:end])
-        self.pagination_label.config(text=f"Página {self.current_page}/{total_pages}")
+    def _coincide_jerarquia(self, codigo, dept_code, group_code, sub_code):
+        """Helper function para filtro jerárquico optimizado"""
+        jerarquia = self.producto_jerarquia.get(codigo)
+        if not jerarquia:
+            return False
+    
+        dep, grp, sub = jerarquia
+        return  (not dept_code or dep == dept_code) and \
+                (not group_code or grp == group_code) and \
+                (not sub_code or sub == sub_code)
+        
+    def actualizar_controles_paginacion(self, total_paginas):
+        """Actualiza los controles de paginación"""
+        self.pagination_label.config(text=f"Página {self.current_page}/{total_paginas}")
         self.btn_prev['state'] = 'normal' if self.current_page > 1 else 'disabled'
-        self.btn_next['state'] = 'normal' if self.current_page < total_pages else 'disabled'
-
+        self.btn_next['state'] = 'normal' if self.current_page < total_paginas else 'disabled'    
 
     def hover_row(self, event):
         item = self.stock_tree.identify_row(event.y)
@@ -1371,7 +1442,7 @@ class DatabaseApp:
 
     def cambiar_pagina(self, delta):
         self.current_page += delta
-        self.actualizar_alertas_stock()
+        self.aplicar_filtro_stock()
         
 
     def create_header(self):
@@ -1997,8 +2068,15 @@ class DatabaseApp:
         self.api_status.pack(side=tk.LEFT)
         
         # Barra de progreso global
-        self.global_progress = ttk.Progressbar(status_frame, mode="determinate", length=200)
+        self.global_progress = ttk.Progressbar(
+        status_frame, 
+        orient="horizontal",
+        length=200,
+        mode="determinate"
+        )
         self.global_progress.pack(side=tk.RIGHT, padx=10)
+        self.global_progress.pack_forget()  # Ocultar inicialmente
+
 
     def setup_tooltips(self):
         self.help_tooltips.add_tooltip(self.num_cliente, "Número de cliente (1-11 dígitos)")

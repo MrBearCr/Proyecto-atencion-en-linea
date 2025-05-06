@@ -26,6 +26,8 @@ from enum import Enum
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from win10toast import ToastNotifier
+from PIL import Image, ImageTk
+import sys
 
 
 
@@ -39,6 +41,85 @@ LOCATION_GROUPS = {
     'GUANARE': ['0401', '0402'],
     'CDT': ['0106'],
 }
+
+def main():
+    root = tk.Tk()
+    root.withdraw()
+
+    splash = SplashScreen(root)
+    init_done = threading.Event()
+    timeout_done = threading.Event()
+
+    # Protocolo de cierre para splash
+    splash.protocol("WM_DELETE_WINDOW", lambda: None)
+
+    def on_both_ready():
+        if init_done.is_set() and timeout_done.is_set():
+            if splash.winfo_exists():
+                try:
+                    splash.progress.stop()
+                    splash.destroy()
+                except tk.TclError:
+                    pass
+            if not root.winfo_exists():
+                return
+            root.deiconify()
+
+    # Guardar el after_id para posible cancelación
+    splash.after_id = splash.after(3000, lambda: (timeout_done.set(), on_both_ready()))
+
+    def init_app():
+        DatabaseApp(root)
+        init_done.set()
+        # Solo programar callback si root aún existe
+        if root.winfo_exists():
+            try:
+                root.after(0, on_both_ready)
+            except tk.TclError:
+                pass
+
+    threading.Thread(target=init_app, daemon=True).start()
+
+    try:
+        splash.mainloop()
+    except tk.TclError:
+        pass
+
+    try:
+        root.mainloop()
+    except tk.TclError:
+        pass
+
+class SplashScreen(tk.Toplevel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.overrideredirect(True)
+        self.config(bg='white')
+        width, height = 400, 300
+        ws = self.winfo_screenwidth()
+        hs = self.winfo_screenheight()
+        x = (ws - width) // 2
+        y = (hs - height) // 2
+        self.geometry(f"{width}x{height}+{x}+{y}")
+
+        # Imagen ficticia
+        try:
+            img = Image.open("splash_image.png")  # Asegúrate de tener esta imagen
+            img = img.resize((150, 150), Image.ANTIALIAS)
+            self.photo = ImageTk.PhotoImage(img)
+            img_label = tk.Label(self, image=self.photo, bg='white').pack(pady=10)
+        except Exception as e:
+            tk.Label(self, text="[Imagen no disponible]", bg='white').pack(pady=10)
+
+        tk.Label(self, text="CPCapp 1.0BETA...", bg='white', font=("Segoe UI", 14)).pack(pady=5)
+
+        self.progress = ttk.Progressbar(self, orient="horizontal", mode="indeterminate", length=200)
+        self.progress.pack(pady=10)
+        self.progress.start(10)  # Simulación de progreso
+
+        # Evitar errores al cerrar
+        self.protocol("WM_DELETE_WINDOW", lambda: None)
+
 
 def load_modules_config():
         """Lee la sección [Modules] de db_config.ini o crea valores por defecto."""
@@ -568,6 +649,10 @@ class DatabaseManager:
 
 class DatabaseApp:
     def __init__(self, root):
+        self.root = root
+        time.sleep(1.5) # Simular carga de splash
+        self.build_ui(root)
+
         self.ultimas_notificaciones = set()
         
         # Inicialización de componentes críticos
@@ -575,7 +660,6 @@ class DatabaseApp:
         self.enviando = False
         self.session = SessionManager(root)
         self.session.start_session()
-        self.root = root
         self.modules_enabled = load_modules_config()
         self.audit_log = AuditLogger()
         self.db_manager = DatabaseManager()
@@ -620,10 +704,22 @@ class DatabaseApp:
         self.setup_tooltips()
         #Notificaciones de Win10
         self.toaster = ToastNotifier()
-         
+        
 
         # forma de verificar hilos activos en segundo plano
         self.listar_hilos_activos()
+    
+
+    def build_ui(self, root):
+        self.root.title("Mi Aplicación")
+        # Interceptar botón de cerrar ventana
+        self.root.protocol("WM_DELETE_WINDOW", self.exit_app)
+
+        welcome = tk.Label(self.root, text="¡Bienvenido!", font=("Segoe UI", 16))
+        welcome.pack(pady=20)
+        self.root.after(3000, welcome.destroy)
+
+        root.after(6000, welcome.destroy)
 
     def _load_favoritos_cache(self):
         """Carga el archivo JSON de favoritos si existe"""
@@ -1527,16 +1623,26 @@ class DatabaseApp:
     def create_sidebar(self):
         sidebar = ttk.Frame(self.root, width=250, style="Sidebar.TFrame")
         sidebar.pack(side=tk.LEFT, fill=tk.Y, padx=10, pady=10)
-        
         nav_items = [
             ('📋 Registros', self.show_records_view),
             ('📨 Mensajería', self.show_messaging_view),
-            ('⚙ Configuración', self.show_settings)
+            ('⚙ Configuración', self.show_settings),
+            ('SALIR', self.exit_app)
         ]
-        
         for text, cmd in nav_items:
             btn = ttk.Button(sidebar, text=text, style="Nav.TButton", command=cmd)
             btn.pack(fill=tk.X, pady=2)
+
+    def exit_app(self):
+        if messagebox.askokcancel("Salir", "¿Deseas salir de la aplicación?" ):
+            # Detener cualquier callback pendiente
+            for widget in [self.root]:
+                try:
+                    widget.after_cancel(widget.after_id)
+                except Exception:
+                    pass
+            self.root.quit()
+            self.root.destroy()
 
     def create_main_workspace(self):
 
@@ -2726,7 +2832,7 @@ class DatabaseApp:
             messagebox.showerror("Error", f"Error obteniendo datos: {str(e)}")
         return 0  # Return integer for WNDPROC
     
-                       
+                
     def on_tree_double_click(self, event):
         """Manejo de doble click en la tabla con limpieza de datos"""
         # Return 0 at end for WNDPROC
@@ -3076,6 +3182,7 @@ class DatabaseApp:
         self.descripcion.update_idletasks()
 
 if __name__ == "__main__":
+    main()
     root = tk.Tk()
     app = DatabaseApp(root)
     root.mainloop() 

@@ -16,7 +16,7 @@ from typing import Optional
 import socket
 import http.server
 import socketserver
-import threading
+import threading 
 import json
 import math
 from tkcalendar import Calendar, DateEntry
@@ -26,8 +26,8 @@ from enum import Enum
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from win10toast import ToastNotifier
-
-
+from PIL import Image, ImageTk
+from threading import Event
 
 
 CONFIG_FILE = 'db_config.ini'
@@ -74,6 +74,72 @@ def save_modules_config(mods: dict):
             config['Modules'][key] = 'True' if val else 'False'
         with open(CONFIG_FILE, 'w') as f:
             config.write(f)
+
+class SplashScreen(tk.Toplevel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title("Cargando...")
+        self.geometry("400x300")
+        self.configure(bg="#FFFFFF")
+        self.overrideredirect(True)
+        
+        # Centrar en pantalla
+        screen_width = self.winfo_screenwidth()
+        screen_height = self.winfo_screenheight()
+        x = (screen_width - 400) // 2
+        y = (screen_height - 300) // 2
+        self.geometry(f"+{x}+{y}")
+        
+        # Contenedor principal
+        self.container = ttk.Frame(self)
+        self.container.pack(expand=True, fill="both", padx=20, pady=20)
+        
+        try:
+            self.logo = tk.PhotoImage(file="logo.png").subsample(2, 2)
+            ttk.Label(self.container, image=self.logo).pack(pady=10)
+        except Exception as e:
+            tk.Label(self, text="[Imagen no disponible]", bg='white').pack(pady=10)
+        
+        # Texto de carga
+        ttk.Label(self.container, 
+                text="CPCapp 1.0BETA", 
+                font=("Segoe UI", 12)).pack(pady=5)
+        
+        # Barra de progreso
+        self.progress = ttk.Progressbar(self.container, 
+                                      orient="horizontal",
+                                      length=300,
+                                      mode="determinate")
+        self.progress.pack(pady=10)
+        
+        # Variables de control
+        self.minimum_time_elapsed = Event()
+        self.app_initialized = Event()
+        self.progress_value = 0
+
+    def start_animation(self):
+        # Iniciar temporizador mínimo de 3 segundos
+        self.after(3000, self.minimum_time_elapsed.set)
+        
+        # Iniciar animación de progreso
+        self._update_progress()
+        
+        # Verificar estado combinado
+        self._check_loading_status()
+
+    def _update_progress(self):
+        if self.progress_value < 100:
+            self.progress_value += 1
+            self.progress["value"] = self.progress_value
+            self.after(30, self._update_progress)
+
+    def _check_loading_status(self):
+        if self.minimum_time_elapsed.is_set() and self.app_initialized.is_set():
+            self.destroy()
+        else:
+            self.after(100, self._check_loading_status)
+        
+        
     
 class CacheDescripciones:
     def __init__(self, ttl=3600):
@@ -568,62 +634,90 @@ class DatabaseManager:
 
 class DatabaseApp:
     def __init__(self, root):
-        self.ultimas_notificaciones = set()
-        
-        # Inicialización de componentes críticos
-        self.cred_manager = SecureCredentialsManager()
-        self.enviando = False
-        self.session = SessionManager(root)
-        self.session.start_session()
         self.root = root
-        self.modules_enabled = load_modules_config()
-        self.audit_log = AuditLogger()
-        self.db_manager = DatabaseManager()
-        self.settings_window = None
-        self.show_pwd_var = None
-        self.httpd = None
-        self.favoritos = set()
-        self._load_favoritos_cache()
+        self.root.withdraw()  # Ocultar ventana principal
+
+        # Mostrar splash screen
+        self.splash = SplashScreen(self.root)
+        self.splash.start_animation()
         
-        # Inicialización temprana de atributos de paginación
-        self.page_size = 250
-        self.current_page = 1
-        self.current_filter = 'TODAS'
-        self.cached_alertas = []
-        self.last_refresh = None
-        
-        # Configuración de UI y bindings
+        # Iniciar inicialización en segundo plano
+        threading.Thread(target=self._initialize_app, daemon=True).start()
 
-        self.buttons = {}	
-        self.setup_styles()
-        self.setup_modern_ui()
-        self.setup_bindings()
-        self.cache = CacheDescripciones()
+    def _initialize_app(self):
+        try:
+            # Tu lógica de inicialización original
+            self.ultimas_notificaciones = set()
+            
+            # Inicialización de componentes críticos
+            self.cred_manager = SecureCredentialsManager()
+            self.enviando = False
+            self.session = SessionManager(self.root)
+            self.session.start_session()
+            
+            self.modules_enabled = load_modules_config()
+            self.audit_log = AuditLogger()
+            self.db_manager = DatabaseManager()
+            self.settings_window = None
+            self.show_pwd_var = None
+            self.httpd = None
+            self.favoritos = set()
+            self._load_favoritos_cache()
+            
+            # Inicialización temprana de atributos de paginación
+            self.page_size = 250
+            self.current_page = 1
+            self.current_filter = 'TODAS'
+            self.cached_alertas = []
+            self.last_refresh = None
+            
+            # Configuración de UI y bindings
+            self.buttons = {}    
+            self.setup_styles()
+            self.setup_modern_ui()
+            self.setup_bindings()
+            self.cache = CacheDescripciones()
 
-        if self.modules_enabled.get("envio_mensajes", False):
-            self.programador = ProgramadorEnvios(self.db_manager, self)
-            self.envios_programados = EnvioProgramado(self.db_manager)
+            if self.modules_enabled.get("envio_mensajes", False):
+                self.programador = ProgramadorEnvios(self.db_manager, self)
+                self.envios_programados = EnvioProgramado(self.db_manager)
 
-        if self.modules_enabled.get("stock", False):
-            self.monitor_thread = threading.Thread(target=self.monitorear_favoritos, daemon=True)
-            self.monitor_thread.start()
-        
+            if self.modules_enabled.get("stock", False):
+                self.monitor_thread = threading.Thread(target=self.monitorear_favoritos, daemon=True)
+                self.monitor_thread.start()
+            
+            # Sistema de Paginacion ya inicializado arriba
+            self.attempt_auto_connect()
+            self.programar_actualizaciones_stock()
 
+            # Sistema de notificaciones y ayuda
+            self.notification_manager = self.NotificationManager(self.root)  
+            self.help_tooltips = self.HelpTooltips(self.root)  
+            self.setup_tooltips()
+            
+            # Notificaciones de Win10
+            self.toaster = ToastNotifier()
+            
+            # Verificar hilos activos en segundo plano
+            self.listar_hilos_activos()
+            
+        finally:
+            # Marcar inicialización como completada
+            self.splash.app_initialized.set()
+            
+            # Mostrar ventana principal si ya pasó el tiempo mínimo
+            if self.splash.minimum_time_elapsed.is_set():
+                self.root.after(0, self.root.deiconify)
+            else:
+                # Programar para mostrar cuando termine el tiempo mínimo
+                self.root.after(3000 - self.splash.progress_value*30, self.root.deiconify)
 
-        # Sistema de Paginacion ya inicializado arriba
-        self.attempt_auto_connect()
-        self.programar_actualizaciones_stock()
-
-        # Sistema de notificaciones y ayuda
-        self.notification_manager = self.NotificationManager(self.root)  
-        self.help_tooltips = self.HelpTooltips(self.root)  
-        self.setup_tooltips()
-        #Notificaciones de Win10
-        self.toaster = ToastNotifier()
-         
-
-        # forma de verificar hilos activos en segundo plano
-        self.listar_hilos_activos()
+    def _inicializacion_completa(self):
+        # Destruir el splash screen
+        self.splash.destroy()
+    
+        # Mostrar ventana principal
+        self.root.deiconify()
 
     def _load_favoritos_cache(self):
         """Carga el archivo JSON de favoritos si existe"""
@@ -3076,6 +3170,7 @@ class DatabaseApp:
         self.descripcion.update_idletasks()
 
 if __name__ == "__main__":
-    root = tk.Tk()
+    root = tk.Tk() 
+    root.withdraw()
     app = DatabaseApp(root)
     root.mainloop() 

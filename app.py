@@ -50,9 +50,10 @@ def load_modules_config():
         if 'Modules' not in config:
             config['Modules'] = {
                 'envio_mensajes': 'True',
-                'estadisticas':   'True',
+                'estadisticas':   'False',
                 'calendario':     'False',
-                'stock':          'True'
+                'stock':          'False',
+                'tra':          'False',
             }
             with open(CONFIG_FILE, 'w') as f:
                 config.write(f)
@@ -79,15 +80,15 @@ class SplashScreen(tk.Toplevel):
     def __init__(self, parent):
         super().__init__(parent)
         self.title("Cargando...")
-        self.geometry("400x300")
+        self.geometry("715x315")
         self.configure(bg="#FFFFFF")
         self.overrideredirect(True)
         
         # Centrar en pantalla
         screen_width = self.winfo_screenwidth()
         screen_height = self.winfo_screenheight()
-        x = (screen_width - 400) // 2
-        y = (screen_height - 300) // 2
+        x = (screen_width - 715) // 2
+        y = (screen_height - 315) // 2
         self.geometry(f"+{x}+{y}")
         
         # Contenedor principal
@@ -95,8 +96,8 @@ class SplashScreen(tk.Toplevel):
         self.container.pack(expand=True, fill="both", padx=20, pady=20)
         
         try:
-            self.logo = tk.PhotoImage(file="logo.png").subsample(2, 2)
-            ttk.Label(self.container, image=self.logo).pack(pady=10)
+            self.logo = tk.PhotoImage(file="casapro-icono.png").subsample(2, 2)
+            ttk.Label(self.container, image=self.logo).pack(pady=30)
         except Exception as e:
             tk.Label(self, text="[Imagen no disponible]", bg='white').pack(pady=10)
         
@@ -420,14 +421,14 @@ class DatabaseManager:
             f"DRIVER={{SQL Server}};"
             f"SERVER={server};"
             "Encrypt=no;"          
-            "TrustServerCertificate=yes;"  # Changed to yes for better compatibility
+            "TrustServerCertificate=no;"  # Changed to yes for better compatibility
             "Connection Timeout=30;"       # Increased timeout
         )
     
         if user:
             initial_conn_str += f"UID={user};PWD={password or ''};"
         else:
-            initial_conn_str += "Trusted_Connection=yes;"
+            initial_conn_str += "Trusted_Connection=no;"
 
         # Track retries
         attempt = 0
@@ -568,6 +569,7 @@ class DatabaseManager:
                     HAVING SUM(n_cantidad) < 21  
                     ORDER BY stock ASC
                 """
+        
             return self.fetch_data(query)
         except Exception as e:
             print(f"{str(e)}")
@@ -685,6 +687,11 @@ class DatabaseApp:
             if self.modules_enabled.get("stock", False):
                 self.monitor_thread = threading.Thread(target=self.monitorear_favoritos, daemon=True)
                 self.monitor_thread.start()
+
+            if self.modules_enabled.get("tra", False):
+                self.tra_tab = ttk.Frame(self.main_notebook)
+                self.main_notebook.add(self.tra_tab, text="📈 T.R.A")
+                self.setup_tra_tab()
             
             # Sistema de Paginacion ya inicializado arriba
             self.attempt_auto_connect()
@@ -1296,6 +1303,7 @@ class DatabaseApp:
         self.current_page = 1
         self.page_size = 250
         if hasattr(self.db_manager, 'conn') and self.db_manager.conn:
+            self.load_stock_filters()
             self.aplicar_filtro_stock()
         else:
             print("No hay conexión activa a la base de datos para cargar alertas iniciales")
@@ -1308,6 +1316,7 @@ class DatabaseApp:
             )
             self.dept_dict = {desc: cod for cod, desc in deps if cod and desc}
             self.dept_combo['values'] = ['Todos'] + list(self.dept_dict.keys())
+            self.dept_var.set('Todos')
         except Exception as e:
             print("Error cargando departamentos:", e)
             self.dept_dict = {}
@@ -1368,7 +1377,14 @@ class DatabaseApp:
         self.sub_dict = {desc: cod for cod, desc in subs if cod and desc}
         self.sub_combo['values'] = ['Todos'] + list(self.sub_dict.keys())
         self.sub_var.set('Todos')
-        self.aplicar_filtro_stock()
+        def esperar_inicio():
+            if self.db_manager.conn:
+                self.aplicar_filtro_stock()
+            else:
+                self.root.after(100, esperar_inicio)
+
+        esperar_inicio()
+        
     
     def cargar_jerarquia_productos(self):
         """Filtra la jerarquía usando solo los códigos actualmente en alerta."""
@@ -1495,6 +1511,17 @@ class DatabaseApp:
         return  (not dept_code or dep == dept_code) and \
                 (not group_code or grp == group_code) and \
                 (not sub_code or sub == sub_code)
+    
+    def _coincide_jerarquia_tra(self, codigo, tra_dept_code, tra_group_code, tra_sub_code):
+        """Helper function para filtro jerárquico optimizado"""
+        jerarquia = self.producto_jerarquia.get(codigo)
+        if not jerarquia:
+            return False
+    
+        dep, grp, sub = jerarquia
+        return  (not tra_dept_code or dep == tra_dept_code) and \
+                (not tra_group_code or grp == tra_group_code) and \
+                (not tra_sub_code or sub == tra_sub_code)
         
     def actualizar_controles_paginacion(self, total_paginas):
         """Actualiza los controles de paginación"""
@@ -1666,7 +1693,243 @@ class DatabaseApp:
             self.stock_tab = ttk.Frame(self.main_notebook)
             self.main_notebook.add(self.stock_tab, text="🚨 Alertas Stock")
             self.setup_stock_tab()
-    
+
+    def setup_tra_tab(self):
+        main_frame = ttk.Frame(self.tra_tab)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # ----- Filtro superior -----
+        filter_frame = ttk.Frame(main_frame)
+        filter_frame.pack(fill=tk.X, pady=5)
+
+        # Fecha inicio
+        ttk.Label(filter_frame, text="Desde:").pack(side=tk.LEFT, padx=(10, 5))
+        self.fecha_inicio_entry = DateEntry(filter_frame, width=12, background='darkblue',
+                                        foreground='white', borderwidth=2, date_pattern='yyyy-mm-dd')
+        self.fecha_inicio_entry.set_date(datetime(datetime.now().year, 1, 1))  # Año en curso
+        self.fecha_inicio_entry.pack(side=tk.LEFT)
+
+        # Fecha fin
+        ttk.Label(filter_frame, text="Hasta:").pack(side=tk.LEFT, padx=(10, 5))
+        self.fecha_fin_entry = DateEntry(filter_frame, width=12, background='darkblue',
+                                     foreground='white', borderwidth=2, date_pattern='yyyy-mm-dd')
+        self.fecha_fin_entry.set_date(datetime.now())
+        self.fecha_fin_entry.pack(side=tk.LEFT)
+
+        # Sede
+        ttk.Label(filter_frame, text="Sede:").pack(side=tk.LEFT, padx=10)
+        self.sede_var = tk.StringVar()
+        self.sede_combo = ttk.Combobox(filter_frame, textvariable=self.sede_var,
+                                    values=["0301 - Cabudare", "0401 - Guanare", "0101 - Barinas"], state='readonly')
+        self.sede_combo.pack(side=tk.LEFT)
+        self.sede_combo.bind("<<ComboboxSelected>>", lambda e: self.on_cargar_ventas())
+
+        # Botón para cargar
+        self.boton_cargar = ttk.Button(filter_frame, text="Cargar Ventas", command=self.on_cargar_ventas)
+        self.boton_cargar.pack(side=tk.RIGHT, padx=10)
+
+        # ----- Filtro jerárquico -----
+        jerarquia_frame = ttk.Frame(main_frame)
+        jerarquia_frame.pack(fill=tk.X, pady=5)
+
+        # Departamento
+        ttk.Label(jerarquia_frame, text="Departamento:").pack(side=tk.LEFT)
+        self.tra_dept_var = tk.StringVar(value='Todos')
+        self.tra_dept_combo = ttk.Combobox(jerarquia_frame, textvariable=self.dept_var, state='readonly')
+        self.tra_dept_combo.pack(side=tk.LEFT, padx=5)
+
+        # Grupo
+        ttk.Label(jerarquia_frame, text="Grupo:").pack(side=tk.LEFT)
+        self.tra_group_var = tk.StringVar(value='Todos')
+        self.tra_group_combo = ttk.Combobox(jerarquia_frame, textvariable=self.group_var, state='readonly')
+        self.tra_group_combo.pack(side=tk.LEFT, padx=5)
+
+        # Subgrupo
+        ttk.Label(jerarquia_frame, text="Subgrupo:").pack(side=tk.LEFT)
+        self.tra_sub_var = tk.StringVar(value='Todos')
+        self.tra_sub_combo = ttk.Combobox(jerarquia_frame, textvariable=self.sub_var, state='readonly')
+        self.tra_sub_combo.pack(side=tk.LEFT, padx=5)
+
+        # ----- Treeview -----
+        columns = ("Código", "Descripción", "Unidades Vendidas", "Promedio Mensual", "Stock Ideal", "Inventario", "Diferencia", "Rotación")
+        self.tra_tree = ttk.Treeview(main_frame, columns=columns, show="headings", height=15)
+
+        for col in columns:
+            self.tra_tree.heading(col, text=col)
+            self.tra_tree.column(col, width=140, anchor='center')
+
+        # Colores
+        self.tra_tree.tag_configure("alta", background="#ffcccc")     # rojo claro
+        self.tra_tree.tag_configure("media", background="#fff7cc")    # amarillo claro
+        self.tra_tree.tag_configure("baja", background="#ccffcc")     # verde claro
+
+        vsb = ttk.Scrollbar(main_frame, orient="vertical", command=self.tra_tree.yview)
+        self.tra_tree.configure(yscrollcommand=vsb.set)
+
+        self.tra_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Cargar datos iniciales cuando haya conexión
+        #def delayed_load():
+            #if self.db_manager.conn:
+                #self.cargar_ventas()
+            #else:
+                #self.root.after(100, delayed_load)
+
+        #delayed_load()
+
+    def on_cargar_ventas(self):
+        try:
+            self.boton_cargar.config(state='disabled')  # 🔒
+            fi_date = self.fecha_inicio_entry.get_date()
+            fecha_inicio = datetime.combine(fi_date, datetime.min.time())
+            ff_date = self.fecha_fin_entry.get_date()
+            fecha_fin    = datetime.combine(ff_date, datetime.max.time())
+            sede = self.sede_var.get().split(" - ")[0] if self.sede_var.get() else None
+
+            productos = self.cargar_ventas(fecha_inicio, fecha_fin, sede)
+
+            dept_code  = self.dept_dict.get(self.tra_dept_var.get())
+            group_code = self.group_dict.get(self.tra_group_var.get())
+            sub_code   = self.sub_dict.get(self.tra_sub_var.get())
+
+            # Mostrar resultados en Treeview
+            self.tra_tree.delete(*self.tra_tree.get_children())
+            for p in productos:
+                if not self._coincide_jerarquia_tra(p["codigo"], dept_code, group_code, sub_code):
+                    continue  # Filtrado por departamento/grupo/subgrupo
+
+                tag = "baja"
+                if p["rotacion"] == "Alta":
+                    tag = "alta"
+                elif p["rotacion"] == "Media":
+                    tag = "media"
+
+                self.tra_tree.insert("", tk.END, values=(
+                    p["codigo"],
+                    p["descripcion"],
+                    p["neto"],
+                    p["promedio_mensual"],
+                    p["inventario"],
+                    p["stock_ideal"],
+                    p["diferencia"],
+                    p["rotacion"]
+                ), tags=(tag,))
+
+        except Exception as e:
+            self.log(f"Error al cargar ventas: {str(e)}", "ERROR")
+            messagebox.showerror("Error", "No se pudo cargar el reporte de ventas.")
+        finally:
+            self.boton_cargar.config(state='normal')  # 🔓
+        
+    def cargar_ventas(self, fecha_inicio, fecha_fin, sede_codigo=None):
+        try:
+            query = """
+                SELECT 
+                    i.c_Codarticulo,
+                    MAX(p.C_DESCRI)          AS Descripcion,
+                    p.C_DEPARTAMENTO         AS departamento,
+                    p.C_GRUPO                AS grupo,
+                    p.C_SUBGRUPO             AS subgrupo,
+                    SUM(
+                        CASE 
+                            WHEN i.c_Concepto = 'VEN' THEN i.n_Cantidad
+                            WHEN i.c_Concepto IN ('DEV', 'DCM', 'NDC') THEN -i.n_Cantidad
+                            ELSE 0
+                        END
+                    ) AS Neto
+                FROM TR_INVENTARIO i
+                JOIN MA_VENTAS v ON i.c_Documento = v.c_Documento
+                LEFT JOIN MA_PRODUCTOS p ON i.c_Codarticulo = p.c_Codigo
+                WHERE 
+                    v.d_FECHA BETWEEN ? AND ?
+                    AND v.c_CONCEPTO = 'VEN'
+                    AND i.c_Concepto IN ('VEN', 'DEV', 'DCM', 'NDC')
+            """
+            params = [fecha_inicio, fecha_fin]
+
+            if sede_codigo:
+                if sede_codigo.startswith("03"):
+                    query += " AND i.c_Deposito LIKE '03%'"
+                elif sede_codigo.startswith("04"):
+                    query += " AND i.c_Deposito LIKE '04%'"
+                elif sede_codigo.startswith("01"):
+                    query += " AND i.c_Deposito LIKE '01%'"
+
+            query += """
+                GROUP BY 
+                    i.c_Codarticulo, 
+                    p.C_DEPARTAMENTO, 
+                    p.C_GRUPO, 
+                    p.C_SUBGRUPO
+            """
+
+            resultados = self.db_manager.fetch_data(query, params)
+
+            productos = []
+            total_global = 0
+            dias = (fecha_fin.date() - fecha_inicio.date()).days
+            meses_reales = dias / 30.0 if dias > 0 else 1
+
+            for cod, desc, dep, grp, subgrp, neto in resultados:
+                if neto <= 0:
+                    continue
+
+                promedio_mensual = round(neto / meses_reales, 2)
+                stock_ideal = round(promedio_mensual * 1.4375)
+
+                productos.append({
+                    "codigo": cod,
+                    "descripcion": desc or "SIN DESCRIPCIÓN",
+                    "departamento": dep,
+                    "grupo": grp,
+                    "subgrupo": subgrp,
+                    "neto": neto,
+                    "promedio_mensual": promedio_mensual,
+                    "stock_ideal": stock_ideal,
+                    "inventario": 0  # se calcula luego
+                })
+                total_global += neto
+
+            # Inventario actual por sede
+            depositos = []
+            if sede_codigo:
+                if sede_codigo.startswith("03"):
+                    depositos = LOCATION_GROUPS.get("Cabudare", [])
+                elif sede_codigo.startswith("04"):
+                    depositos = LOCATION_GROUPS.get("Guanare", [])
+                elif sede_codigo.startswith("01"):
+                    depositos = LOCATION_GROUPS.get("Barinas", [])
+
+            for p in productos:
+                if depositos:
+                    p["inventario"] = self.obtener_existencias_por_ubicacion(p["codigo"], depositos)
+                else:
+                    p["inventario"] = 0
+
+            # Clasificación por rotación y diferencia
+            productos.sort(key=lambda x: x["neto"], reverse=True)
+            acumulado = 0
+            for p in productos:
+                porcentaje = (p["neto"] / total_global) * 100 if total_global > 0 else 0
+                acumulado += porcentaje
+                if acumulado <= 80:
+                    rotacion = "Alta"
+                elif acumulado <= 95:
+                    rotacion = "Media"
+                else:
+                    rotacion = "Baja"
+                p["rotacion"] = rotacion
+                p["acumulado"] = round(acumulado, 2)
+                p["diferencia"] = p["inventario"] - p["stock_ideal"]
+
+            return productos
+
+        except Exception as e:
+            self.log(f"Error en reporte de rotación: {str(e)}", "ERROR")
+            return []
+
+
     def setup_stats_tab(self):
         self.stats_frame = ttk.Frame(self.stats_tab)
         self.stats_frame.pack(fill=tk.BOTH, expand=True)
@@ -2252,7 +2515,8 @@ class DatabaseApp:
             ("envio_mensajes", "Envío de Mensajes"),
             ("estadisticas",   "Estadísticas"),
             ("calendario",     "Calendario"),
-            ("stock",          "Alertas Stock")
+            ("stock",          "Alertas Stock"),
+            ("tra",          "T.R.A")
         ]):
             var = tk.BooleanVar(value=self.modules_enabled.get(key, False))
             cb  = ttk.Checkbutton(modules_frame, text=label, variable=var)

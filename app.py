@@ -16,7 +16,7 @@ from typing import Optional
 import socket
 import http.server
 import socketserver
-import threading
+import threading 
 import json
 import math
 from tkcalendar import Calendar, DateEntry
@@ -27,9 +27,7 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from win10toast import ToastNotifier
 from PIL import Image, ImageTk
-import sys
-
-
+from threading import Event
 
 
 CONFIG_FILE = 'db_config.ini'
@@ -42,85 +40,6 @@ LOCATION_GROUPS = {
     'CDT': ['0106'],
 }
 
-def main():
-    root = tk.Tk()
-    root.withdraw()
-
-    splash = SplashScreen(root)
-    init_done = threading.Event()
-    timeout_done = threading.Event()
-
-    # Protocolo de cierre para splash
-    splash.protocol("WM_DELETE_WINDOW", lambda: None)
-
-    def on_both_ready():
-        if init_done.is_set() and timeout_done.is_set():
-            if splash.winfo_exists():
-                try:
-                    splash.progress.stop()
-                    splash.destroy()
-                except tk.TclError:
-                    pass
-            if not root.winfo_exists():
-                return
-            root.deiconify()
-
-    # Guardar el after_id para posible cancelación
-    splash.after_id = splash.after(3000, lambda: (timeout_done.set(), on_both_ready()))
-
-    def init_app():
-        DatabaseApp(root)
-        init_done.set()
-        # Solo programar callback si root aún existe
-        if root.winfo_exists():
-            try:
-                root.after(0, on_both_ready)
-            except tk.TclError:
-                pass
-
-    threading.Thread(target=init_app, daemon=True).start()
-
-    try:
-        splash.mainloop()
-    except tk.TclError:
-        pass
-
-    try:
-        root.mainloop()
-    except tk.TclError:
-        pass
-
-class SplashScreen(tk.Toplevel):
-    def __init__(self, parent):
-        super().__init__(parent)
-        self.overrideredirect(True)
-        self.config(bg='white')
-        width, height = 400, 300
-        ws = self.winfo_screenwidth()
-        hs = self.winfo_screenheight()
-        x = (ws - width) // 2
-        y = (hs - height) // 2
-        self.geometry(f"{width}x{height}+{x}+{y}")
-
-        # Imagen ficticia
-        try:
-            img = Image.open("splash_image.png")  # Asegúrate de tener esta imagen
-            img = img.resize((150, 150), Image.ANTIALIAS)
-            self.photo = ImageTk.PhotoImage(img)
-            img_label = tk.Label(self, image=self.photo, bg='white').pack(pady=10)
-        except Exception as e:
-            tk.Label(self, text="[Imagen no disponible]", bg='white').pack(pady=10)
-
-        tk.Label(self, text="CPCapp 1.0BETA...", bg='white', font=("Segoe UI", 14)).pack(pady=5)
-
-        self.progress = ttk.Progressbar(self, orient="horizontal", mode="indeterminate", length=200)
-        self.progress.pack(pady=10)
-        self.progress.start(10)  # Simulación de progreso
-
-        # Evitar errores al cerrar
-        self.protocol("WM_DELETE_WINDOW", lambda: None)
-
-
 def load_modules_config():
         """Lee la sección [Modules] de db_config.ini o crea valores por defecto."""
         config = configparser.ConfigParser()
@@ -131,9 +50,10 @@ def load_modules_config():
         if 'Modules' not in config:
             config['Modules'] = {
                 'envio_mensajes': 'True',
-                'estadisticas':   'True',
+                'estadisticas':   'False',
                 'calendario':     'False',
-                'stock':          'True'
+                'stock':          'False',
+                'tra':          'False',
             }
             with open(CONFIG_FILE, 'w') as f:
                 config.write(f)
@@ -155,6 +75,72 @@ def save_modules_config(mods: dict):
             config['Modules'][key] = 'True' if val else 'False'
         with open(CONFIG_FILE, 'w') as f:
             config.write(f)
+
+class SplashScreen(tk.Toplevel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title("Cargando...")
+        self.geometry("715x315")
+        self.configure(bg="#FFFFFF")
+        self.overrideredirect(True)
+        
+        # Centrar en pantalla
+        screen_width = self.winfo_screenwidth()
+        screen_height = self.winfo_screenheight()
+        x = (screen_width - 715) // 2
+        y = (screen_height - 315) // 2
+        self.geometry(f"+{x}+{y}")
+        
+        # Contenedor principal
+        self.container = ttk.Frame(self)
+        self.container.pack(expand=True, fill="both", padx=20, pady=20)
+        
+        try:
+            self.logo = tk.PhotoImage(file="casapro-icono.png").subsample(2, 2)
+            ttk.Label(self.container, image=self.logo).pack(pady=30)
+        except Exception as e:
+            tk.Label(self, text="[Imagen no disponible]", bg='white').pack(pady=10)
+        
+        # Texto de carga
+        ttk.Label(self.container, 
+                text="CPCapp 1.0BETA", 
+                font=("Segoe UI", 12)).pack(pady=5)
+        
+        # Barra de progreso
+        self.progress = ttk.Progressbar(self.container, 
+                                      orient="horizontal",
+                                      length=300,
+                                      mode="determinate")
+        self.progress.pack(pady=10)
+        
+        # Variables de control
+        self.minimum_time_elapsed = Event()
+        self.app_initialized = Event()
+        self.progress_value = 0
+
+    def start_animation(self):
+        # Iniciar temporizador mínimo de 3 segundos
+        self.after(3000, self.minimum_time_elapsed.set)
+        
+        # Iniciar animación de progreso
+        self._update_progress()
+        
+        # Verificar estado combinado
+        self._check_loading_status()
+
+    def _update_progress(self):
+        if self.progress_value < 100:
+            self.progress_value += 1
+            self.progress["value"] = self.progress_value
+            self.after(30, self._update_progress)
+
+    def _check_loading_status(self):
+        if self.minimum_time_elapsed.is_set() and self.app_initialized.is_set():
+            self.destroy()
+        else:
+            self.after(100, self._check_loading_status)
+        
+        
     
 class CacheDescripciones:
     def __init__(self, ttl=3600):
@@ -435,14 +421,14 @@ class DatabaseManager:
             f"DRIVER={{SQL Server}};"
             f"SERVER={server};"
             "Encrypt=no;"          
-            "TrustServerCertificate=yes;"  # Changed to yes for better compatibility
+            "TrustServerCertificate=no;"  # Changed to yes for better compatibility
             "Connection Timeout=30;"       # Increased timeout
         )
     
         if user:
             initial_conn_str += f"UID={user};PWD={password or ''};"
         else:
-            initial_conn_str += "Trusted_Connection=yes;"
+            initial_conn_str += "Trusted_Connection=no;"
 
         # Track retries
         attempt = 0
@@ -583,6 +569,7 @@ class DatabaseManager:
                     HAVING SUM(n_cantidad) < 21  
                     ORDER BY stock ASC
                 """
+        
             return self.fetch_data(query)
         except Exception as e:
             print(f"{str(e)}")
@@ -650,76 +637,94 @@ class DatabaseManager:
 class DatabaseApp:
     def __init__(self, root):
         self.root = root
-        time.sleep(1.5) # Simular carga de splash
-        self.build_ui(root)
+        self.root.withdraw()  # Ocultar ventana principal
 
-        self.ultimas_notificaciones = set()
+        # Mostrar splash screen
+        self.splash = SplashScreen(self.root)
+        self.splash.start_animation()
         
-        # Inicialización de componentes críticos
-        self.cred_manager = SecureCredentialsManager()
-        self.enviando = False
-        self.session = SessionManager(root)
-        self.session.start_session()
-        self.modules_enabled = load_modules_config()
-        self.audit_log = AuditLogger()
-        self.db_manager = DatabaseManager()
-        self.settings_window = None
-        self.show_pwd_var = None
-        self.httpd = None
-        self.favoritos = set()
-        self._load_favoritos_cache()
-        
-        # Inicialización temprana de atributos de paginación
-        self.page_size = 250
-        self.current_page = 1
-        self.current_filter = 'TODAS'
-        self.cached_alertas = []
-        self.last_refresh = None
-        
-        # Configuración de UI y bindings
+        # Iniciar inicialización en segundo plano
+        threading.Thread(target=self._initialize_app, daemon=True).start()
 
-        self.buttons = {}	
-        self.setup_styles()
-        self.setup_modern_ui()
-        self.setup_bindings()
-        self.cache = CacheDescripciones()
+    def _initialize_app(self):
+        try:
+            # Tu lógica de inicialización original
+            self.ultimas_notificaciones = set()
+            
+            # Inicialización de componentes críticos
+            self.cred_manager = SecureCredentialsManager()
+            self.enviando = False
+            self.session = SessionManager(self.root)
+            self.session.start_session()
+            
+            self.modules_enabled = load_modules_config()
+            self.audit_log = AuditLogger()
+            self.db_manager = DatabaseManager()
+            self.settings_window = None
+            self.show_pwd_var = None
+            self.httpd = None
+            self.favoritos = set()
+            self._load_favoritos_cache()
+            
+            # Inicialización temprana de atributos de paginación
+            self.page_size = 250
+            self.current_page = 1
+            self.current_filter = 'TODAS'
+            self.cached_alertas = []
+            self.last_refresh = None
+            
+            # Configuración de UI y bindings
+            self.buttons = {}    
+            self.setup_styles()
+            self.setup_modern_ui()
+            self.setup_bindings()
+            self.cache = CacheDescripciones()
 
-        if self.modules_enabled.get("envio_mensajes", False):
-            self.programador = ProgramadorEnvios(self.db_manager, self)
-            self.envios_programados = EnvioProgramado(self.db_manager)
+            if self.modules_enabled.get("envio_mensajes", False):
+                self.programador = ProgramadorEnvios(self.db_manager, self)
+                self.envios_programados = EnvioProgramado(self.db_manager)
 
-        if self.modules_enabled.get("stock", False):
-            self.monitor_thread = threading.Thread(target=self.monitorear_favoritos, daemon=True)
-            self.monitor_thread.start()
-        
+            if self.modules_enabled.get("stock", False):
+                self.monitor_thread = threading.Thread(target=self.monitorear_favoritos, daemon=True)
+                self.monitor_thread.start()
 
+            if self.modules_enabled.get("tra", False):
+                self.tra_tab = ttk.Frame(self.main_notebook)
+                self.main_notebook.add(self.tra_tab, text="📈 T.R.A")
+                self.setup_tra_tab()
+            
+            # Sistema de Paginacion ya inicializado arriba
+            self.attempt_auto_connect()
+            self.programar_actualizaciones_stock()
 
-        # Sistema de Paginacion ya inicializado arriba
-        self.attempt_auto_connect()
-        self.programar_actualizaciones_stock()
+            # Sistema de notificaciones y ayuda
+            self.notification_manager = self.NotificationManager(self.root)  
+            self.help_tooltips = self.HelpTooltips(self.root)  
+            self.setup_tooltips()
+            
+            # Notificaciones de Win10
+            self.toaster = ToastNotifier()
+            
+            # Verificar hilos activos en segundo plano
+            self.listar_hilos_activos()
+            
+        finally:
+            # Marcar inicialización como completada
+            self.splash.app_initialized.set()
+            
+            # Mostrar ventana principal si ya pasó el tiempo mínimo
+            if self.splash.minimum_time_elapsed.is_set():
+                self.root.after(0, self.root.deiconify)
+            else:
+                # Programar para mostrar cuando termine el tiempo mínimo
+                self.root.after(3000 - self.splash.progress_value*30, self.root.deiconify)
 
-        # Sistema de notificaciones y ayuda
-        self.notification_manager = self.NotificationManager(self.root)  
-        self.help_tooltips = self.HelpTooltips(self.root)  
-        self.setup_tooltips()
-        #Notificaciones de Win10
-        self.toaster = ToastNotifier()
-        
-
-        # forma de verificar hilos activos en segundo plano
-        self.listar_hilos_activos()
+    def _inicializacion_completa(self):
+        # Destruir el splash screen
+        self.splash.destroy()
     
-
-    def build_ui(self, root):
-        self.root.title("Mi Aplicación")
-        # Interceptar botón de cerrar ventana
-        self.root.protocol("WM_DELETE_WINDOW", self.exit_app)
-
-        welcome = tk.Label(self.root, text="¡Bienvenido!", font=("Segoe UI", 16))
-        welcome.pack(pady=20)
-        self.root.after(3000, welcome.destroy)
-
-        root.after(6000, welcome.destroy)
+        # Mostrar ventana principal
+        self.root.deiconify()
 
     def _load_favoritos_cache(self):
         """Carga el archivo JSON de favoritos si existe"""
@@ -1298,6 +1303,7 @@ class DatabaseApp:
         self.current_page = 1
         self.page_size = 250
         if hasattr(self.db_manager, 'conn') and self.db_manager.conn:
+            self.load_stock_filters()
             self.aplicar_filtro_stock()
         else:
             print("No hay conexión activa a la base de datos para cargar alertas iniciales")
@@ -1310,6 +1316,7 @@ class DatabaseApp:
             )
             self.dept_dict = {desc: cod for cod, desc in deps if cod and desc}
             self.dept_combo['values'] = ['Todos'] + list(self.dept_dict.keys())
+            self.dept_var.set('Todos')
         except Exception as e:
             print("Error cargando departamentos:", e)
             self.dept_dict = {}
@@ -1370,7 +1377,14 @@ class DatabaseApp:
         self.sub_dict = {desc: cod for cod, desc in subs if cod and desc}
         self.sub_combo['values'] = ['Todos'] + list(self.sub_dict.keys())
         self.sub_var.set('Todos')
-        self.aplicar_filtro_stock()
+        def esperar_inicio():
+            if self.db_manager.conn:
+                self.aplicar_filtro_stock()
+            else:
+                self.root.after(100, esperar_inicio)
+
+        esperar_inicio()
+        
     
     def cargar_jerarquia_productos(self):
         """Filtra la jerarquía usando solo los códigos actualmente en alerta."""
@@ -1497,6 +1511,17 @@ class DatabaseApp:
         return  (not dept_code or dep == dept_code) and \
                 (not group_code or grp == group_code) and \
                 (not sub_code or sub == sub_code)
+    
+    def _coincide_jerarquia_tra(self, codigo, tra_dept_code, tra_group_code, tra_sub_code):
+        """Helper function para filtro jerárquico optimizado"""
+        jerarquia = self.producto_jerarquia.get(codigo)
+        if not jerarquia:
+            return False
+    
+        dep, grp, sub = jerarquia
+        return  (not tra_dept_code or dep == tra_dept_code) and \
+                (not tra_group_code or grp == tra_group_code) and \
+                (not tra_sub_code or sub == tra_sub_code)
         
     def actualizar_controles_paginacion(self, total_paginas):
         """Actualiza los controles de paginación"""
@@ -1623,26 +1648,16 @@ class DatabaseApp:
     def create_sidebar(self):
         sidebar = ttk.Frame(self.root, width=250, style="Sidebar.TFrame")
         sidebar.pack(side=tk.LEFT, fill=tk.Y, padx=10, pady=10)
+        
         nav_items = [
             ('📋 Registros', self.show_records_view),
             ('📨 Mensajería', self.show_messaging_view),
-            ('⚙ Configuración', self.show_settings),
-            ('SALIR', self.exit_app)
+            ('⚙ Configuración', self.show_settings)
         ]
+        
         for text, cmd in nav_items:
             btn = ttk.Button(sidebar, text=text, style="Nav.TButton", command=cmd)
             btn.pack(fill=tk.X, pady=2)
-
-    def exit_app(self):
-        if messagebox.askokcancel("Salir", "¿Deseas salir de la aplicación?" ):
-            # Detener cualquier callback pendiente
-            for widget in [self.root]:
-                try:
-                    widget.after_cancel(widget.after_id)
-                except Exception:
-                    pass
-            self.root.quit()
-            self.root.destroy()
 
     def create_main_workspace(self):
 
@@ -1678,7 +1693,243 @@ class DatabaseApp:
             self.stock_tab = ttk.Frame(self.main_notebook)
             self.main_notebook.add(self.stock_tab, text="🚨 Alertas Stock")
             self.setup_stock_tab()
-    
+
+    def setup_tra_tab(self):
+        main_frame = ttk.Frame(self.tra_tab)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # ----- Filtro superior -----
+        filter_frame = ttk.Frame(main_frame)
+        filter_frame.pack(fill=tk.X, pady=5)
+
+        # Fecha inicio
+        ttk.Label(filter_frame, text="Desde:").pack(side=tk.LEFT, padx=(10, 5))
+        self.fecha_inicio_entry = DateEntry(filter_frame, width=12, background='darkblue',
+                                        foreground='white', borderwidth=2, date_pattern='yyyy-mm-dd')
+        self.fecha_inicio_entry.set_date(datetime(datetime.now().year, 1, 1))  # Año en curso
+        self.fecha_inicio_entry.pack(side=tk.LEFT)
+
+        # Fecha fin
+        ttk.Label(filter_frame, text="Hasta:").pack(side=tk.LEFT, padx=(10, 5))
+        self.fecha_fin_entry = DateEntry(filter_frame, width=12, background='darkblue',
+                                     foreground='white', borderwidth=2, date_pattern='yyyy-mm-dd')
+        self.fecha_fin_entry.set_date(datetime.now())
+        self.fecha_fin_entry.pack(side=tk.LEFT)
+
+        # Sede
+        ttk.Label(filter_frame, text="Sede:").pack(side=tk.LEFT, padx=10)
+        self.sede_var = tk.StringVar()
+        self.sede_combo = ttk.Combobox(filter_frame, textvariable=self.sede_var,
+                                    values=["0301 - Cabudare", "0401 - Guanare", "0101 - Barinas"], state='readonly')
+        self.sede_combo.pack(side=tk.LEFT)
+        self.sede_combo.bind("<<ComboboxSelected>>", lambda e: self.on_cargar_ventas())
+
+        # Botón para cargar
+        self.boton_cargar = ttk.Button(filter_frame, text="Cargar Ventas", command=self.on_cargar_ventas)
+        self.boton_cargar.pack(side=tk.RIGHT, padx=10)
+
+        # ----- Filtro jerárquico -----
+        jerarquia_frame = ttk.Frame(main_frame)
+        jerarquia_frame.pack(fill=tk.X, pady=5)
+
+        # Departamento
+        ttk.Label(jerarquia_frame, text="Departamento:").pack(side=tk.LEFT)
+        self.tra_dept_var = tk.StringVar(value='Todos')
+        self.tra_dept_combo = ttk.Combobox(jerarquia_frame, textvariable=self.dept_var, state='readonly')
+        self.tra_dept_combo.pack(side=tk.LEFT, padx=5)
+
+        # Grupo
+        ttk.Label(jerarquia_frame, text="Grupo:").pack(side=tk.LEFT)
+        self.tra_group_var = tk.StringVar(value='Todos')
+        self.tra_group_combo = ttk.Combobox(jerarquia_frame, textvariable=self.group_var, state='readonly')
+        self.tra_group_combo.pack(side=tk.LEFT, padx=5)
+
+        # Subgrupo
+        ttk.Label(jerarquia_frame, text="Subgrupo:").pack(side=tk.LEFT)
+        self.tra_sub_var = tk.StringVar(value='Todos')
+        self.tra_sub_combo = ttk.Combobox(jerarquia_frame, textvariable=self.sub_var, state='readonly')
+        self.tra_sub_combo.pack(side=tk.LEFT, padx=5)
+
+        # ----- Treeview -----
+        columns = ("Código", "Descripción", "Unidades Vendidas", "Promedio Mensual", "Stock Ideal", "Inventario", "Diferencia", "Rotación")
+        self.tra_tree = ttk.Treeview(main_frame, columns=columns, show="headings", height=15)
+
+        for col in columns:
+            self.tra_tree.heading(col, text=col)
+            self.tra_tree.column(col, width=140, anchor='center')
+
+        # Colores
+        self.tra_tree.tag_configure("alta", background="#ffcccc")     # rojo claro
+        self.tra_tree.tag_configure("media", background="#fff7cc")    # amarillo claro
+        self.tra_tree.tag_configure("baja", background="#ccffcc")     # verde claro
+
+        vsb = ttk.Scrollbar(main_frame, orient="vertical", command=self.tra_tree.yview)
+        self.tra_tree.configure(yscrollcommand=vsb.set)
+
+        self.tra_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Cargar datos iniciales cuando haya conexión
+        #def delayed_load():
+            #if self.db_manager.conn:
+                #self.cargar_ventas()
+            #else:
+                #self.root.after(100, delayed_load)
+
+        #delayed_load()
+
+    def on_cargar_ventas(self):
+        try:
+            self.boton_cargar.config(state='disabled')  # 🔒
+            fi_date = self.fecha_inicio_entry.get_date()
+            fecha_inicio = datetime.combine(fi_date, datetime.min.time())
+            ff_date = self.fecha_fin_entry.get_date()
+            fecha_fin    = datetime.combine(ff_date, datetime.max.time())
+            sede = self.sede_var.get().split(" - ")[0] if self.sede_var.get() else None
+
+            productos = self.cargar_ventas(fecha_inicio, fecha_fin, sede)
+
+            dept_code  = self.dept_dict.get(self.tra_dept_var.get())
+            group_code = self.group_dict.get(self.tra_group_var.get())
+            sub_code   = self.sub_dict.get(self.tra_sub_var.get())
+
+            # Mostrar resultados en Treeview
+            self.tra_tree.delete(*self.tra_tree.get_children())
+            for p in productos:
+                if not self._coincide_jerarquia_tra(p["codigo"], dept_code, group_code, sub_code):
+                    continue  # Filtrado por departamento/grupo/subgrupo
+
+                tag = "baja"
+                if p["rotacion"] == "Alta":
+                    tag = "alta"
+                elif p["rotacion"] == "Media":
+                    tag = "media"
+
+                self.tra_tree.insert("", tk.END, values=(
+                    p["codigo"],
+                    p["descripcion"],
+                    p["neto"],
+                    p["promedio_mensual"],
+                    p["inventario"],
+                    p["stock_ideal"],
+                    p["diferencia"],
+                    p["rotacion"]
+                ), tags=(tag,))
+
+        except Exception as e:
+            self.log(f"Error al cargar ventas: {str(e)}", "ERROR")
+            messagebox.showerror("Error", "No se pudo cargar el reporte de ventas.")
+        finally:
+            self.boton_cargar.config(state='normal')  # 🔓
+        
+    def cargar_ventas(self, fecha_inicio, fecha_fin, sede_codigo=None):
+        try:
+            query = """
+                SELECT 
+                    i.c_Codarticulo,
+                    MAX(p.C_DESCRI)          AS Descripcion,
+                    p.C_DEPARTAMENTO         AS departamento,
+                    p.C_GRUPO                AS grupo,
+                    p.C_SUBGRUPO             AS subgrupo,
+                    SUM(
+                        CASE 
+                            WHEN i.c_Concepto = 'VEN' THEN i.n_Cantidad
+                            WHEN i.c_Concepto IN ('DEV', 'DCM', 'NDC') THEN -i.n_Cantidad
+                            ELSE 0
+                        END
+                    ) AS Neto
+                FROM TR_INVENTARIO i
+                JOIN MA_VENTAS v ON i.c_Documento = v.c_Documento
+                LEFT JOIN MA_PRODUCTOS p ON i.c_Codarticulo = p.c_Codigo
+                WHERE 
+                    v.d_FECHA BETWEEN ? AND ?
+                    AND v.c_CONCEPTO = 'VEN'
+                    AND i.c_Concepto IN ('VEN', 'DEV', 'DCM', 'NDC')
+            """
+            params = [fecha_inicio, fecha_fin]
+
+            if sede_codigo:
+                if sede_codigo.startswith("03"):
+                    query += " AND i.c_Deposito LIKE '03%'"
+                elif sede_codigo.startswith("04"):
+                    query += " AND i.c_Deposito LIKE '04%'"
+                elif sede_codigo.startswith("01"):
+                    query += " AND i.c_Deposito LIKE '01%'"
+
+            query += """
+                GROUP BY 
+                    i.c_Codarticulo, 
+                    p.C_DEPARTAMENTO, 
+                    p.C_GRUPO, 
+                    p.C_SUBGRUPO
+            """
+
+            resultados = self.db_manager.fetch_data(query, params)
+
+            productos = []
+            total_global = 0
+            dias = (fecha_fin.date() - fecha_inicio.date()).days
+            meses_reales = dias / 30.0 if dias > 0 else 1
+
+            for cod, desc, dep, grp, subgrp, neto in resultados:
+                if neto <= 0:
+                    continue
+
+                promedio_mensual = round(neto / meses_reales, 2)
+                stock_ideal = round(promedio_mensual * 1.4375)
+
+                productos.append({
+                    "codigo": cod,
+                    "descripcion": desc or "SIN DESCRIPCIÓN",
+                    "departamento": dep,
+                    "grupo": grp,
+                    "subgrupo": subgrp,
+                    "neto": neto,
+                    "promedio_mensual": promedio_mensual,
+                    "stock_ideal": stock_ideal,
+                    "inventario": 0  # se calcula luego
+                })
+                total_global += neto
+
+            # Inventario actual por sede
+            depositos = []
+            if sede_codigo:
+                if sede_codigo.startswith("03"):
+                    depositos = LOCATION_GROUPS.get("Cabudare", [])
+                elif sede_codigo.startswith("04"):
+                    depositos = LOCATION_GROUPS.get("Guanare", [])
+                elif sede_codigo.startswith("01"):
+                    depositos = LOCATION_GROUPS.get("Barinas", [])
+
+            for p in productos:
+                if depositos:
+                    p["inventario"] = self.obtener_existencias_por_ubicacion(p["codigo"], depositos)
+                else:
+                    p["inventario"] = 0
+
+            # Clasificación por rotación y diferencia
+            productos.sort(key=lambda x: x["neto"], reverse=True)
+            acumulado = 0
+            for p in productos:
+                porcentaje = (p["neto"] / total_global) * 100 if total_global > 0 else 0
+                acumulado += porcentaje
+                if acumulado <= 80:
+                    rotacion = "Alta"
+                elif acumulado <= 95:
+                    rotacion = "Media"
+                else:
+                    rotacion = "Baja"
+                p["rotacion"] = rotacion
+                p["acumulado"] = round(acumulado, 2)
+                p["diferencia"] = p["inventario"] - p["stock_ideal"]
+
+            return productos
+
+        except Exception as e:
+            self.log(f"Error en reporte de rotación: {str(e)}", "ERROR")
+            return []
+
+
     def setup_stats_tab(self):
         self.stats_frame = ttk.Frame(self.stats_tab)
         self.stats_frame.pack(fill=tk.BOTH, expand=True)
@@ -2264,7 +2515,8 @@ class DatabaseApp:
             ("envio_mensajes", "Envío de Mensajes"),
             ("estadisticas",   "Estadísticas"),
             ("calendario",     "Calendario"),
-            ("stock",          "Alertas Stock")
+            ("stock",          "Alertas Stock"),
+            ("tra",          "T.R.A")
         ]):
             var = tk.BooleanVar(value=self.modules_enabled.get(key, False))
             cb  = ttk.Checkbutton(modules_frame, text=label, variable=var)
@@ -2832,7 +3084,7 @@ class DatabaseApp:
             messagebox.showerror("Error", f"Error obteniendo datos: {str(e)}")
         return 0  # Return integer for WNDPROC
     
-                
+                       
     def on_tree_double_click(self, event):
         """Manejo de doble click en la tabla con limpieza de datos"""
         # Return 0 at end for WNDPROC
@@ -3182,7 +3434,7 @@ class DatabaseApp:
         self.descripcion.update_idletasks()
 
 if __name__ == "__main__":
-    main()
-    root = tk.Tk()
+    root = tk.Tk() 
+    root.withdraw()
     app = DatabaseApp(root)
     root.mainloop() 

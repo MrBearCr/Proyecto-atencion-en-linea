@@ -421,7 +421,7 @@ class DatabaseManager:
             f"DRIVER={{SQL Server}};"
             f"SERVER={server};"
             "Encrypt=no;"          
-            "TrustServerCertificate=no;"  # Changed to yes for better compatibility
+            "TrustServerCertificate=yes;"  # Changed to yes for better compatibility
             "Connection Timeout=30;"       # Increased timeout
         )
     
@@ -582,9 +582,9 @@ class DatabaseManager:
                 USING (VALUES (?)) AS source(codigo)
                 ON target.codigo = source.codigo
                 WHEN MATCHED THEN
-                   UPDATE SET favorito = ~favorito
+                    UPDATE SET favorito = ~favorito
                 WHEN NOT MATCHED THEN
-                   INSERT (codigo, favorito) VALUES (source.codigo, 1);""",
+                    INSERT (codigo, favorito) VALUES (source.codigo, 1);""",
                 (codigo_producto,)
             )
             return True
@@ -1299,6 +1299,7 @@ class DatabaseApp:
         self.stock_tree.bind('<Leave>', self.leave_row)
         self.stock_tree.bind('<<TreeviewSelect>>', self.select_row)
 
+
         # Carga inicial solo si hay conexión
         self.current_page = 1
         self.page_size = 250
@@ -1331,6 +1332,28 @@ class DatabaseApp:
         self.sub_combo['values'] = ['Todos']
         self.sub_var.set('Todos')
 
+    def load_tra_filters(self):
+        """Carga departamentos, grupos y subgrupos para la pestaña T.R.A"""
+        try:
+            # Departamentos
+            deps = self.db_manager.fetch_data(
+                "SELECT C_CODIGO, C_DESCRIPCIO FROM MA_DEPARTAMENTOS"
+            )
+            self.tra_dept_dict = {desc: cod for cod, desc in deps if cod and desc}
+            self.tra_dept_combo['values'] = ['Todos'] + list(self.tra_dept_dict.keys())
+            self.tra_dept_var.set('Todos')
+        except Exception as e:
+            print("Error cargando departamentos del modulo tra:", e)
+
+            # Inicializar grupos y subgrupos vacíos
+            self.tra_group_dict = {}
+            self.tra_group_combo['values'] = ['Todos']
+            self.tra_group_var.set('Todos')
+
+            self.tra_sub_dict = {}
+            self.tra_sub_combo['values'] = ['Todos']
+            self.tra_sub_var.set('Todos')
+
     def on_dept_selected(self):
         desc = self.dept_var.get()
         codigo = self.dept_dict.get(desc)
@@ -1355,6 +1378,24 @@ class DatabaseApp:
         self.sub_combo['values'] = ['Todos']
         self.sub_var.set('Todos')
         self.aplicar_filtro_stock()
+
+    def on_tra_dept_selected(self, event=None):
+        codigo = self.tra_dept_dict.get(self.tra_dept_var.get())
+        if not codigo:
+            self.tra_group_combo['values'] = ['Todos']
+            self.tra_group_var.set('Todos')
+            self.tra_sub_combo['values'] = ['Todos']
+            self.tra_sub_var.set('Todos')
+            return
+        grupos = self.db_manager.fetch_data(
+            "SELECT C_CODIGO, C_DESCRIPCIO FROM MA_GRUPOS WHERE C_DEPARTAMENTO = ?",
+            (codigo,)
+        )
+        self.tra_group_dict = {desc: cod for cod, desc in grupos if cod and desc}
+        self.tra_group_combo['values'] = ['Todos'] + list(self.tra_group_dict.keys())
+        self.tra_group_var.set('Todos')
+        self.tra_sub_combo['values'] = ['Todos']
+        self.tra_sub_var.set('Todos')
 
     def on_group_selected(self):
         dept_desc = self.dept_var.get()
@@ -1384,6 +1425,23 @@ class DatabaseApp:
                 self.root.after(100, esperar_inicio)
 
         esperar_inicio()
+
+    def on_tra_group_selected(self, event=None):
+        dept_codigo = self.tra_dept_dict.get(self.tra_dept_var.get())
+        grupo_codigo = self.tra_group_dict.get(self.tra_group_var.get())
+        if not (dept_codigo and grupo_codigo):
+            self.tra_sub_combo['values'] = ['Todos']
+            self.tra_sub_var.set('Todos')
+            return
+        subs = self.db_manager.fetch_data(
+            "SELECT C_CODIGO, C_DESCRIPCIO FROM MA_SUBGRUPOS WHERE C_IN_DEPARTAMENTO = ? AND C_IN_GRUPO = ?",
+            (dept_codigo, grupo_codigo)
+        )
+        self.tra_sub_dict = {desc: cod for cod, desc in subs if cod and desc}
+        self.tra_sub_combo['values'] = ['Todos'] + list(self.tra_sub_dict.keys())
+        self.tra_sub_var.set('Todos')
+
+        
         
     
     def cargar_jerarquia_productos(self):
@@ -1706,13 +1764,13 @@ class DatabaseApp:
         ttk.Label(filter_frame, text="Desde:").pack(side=tk.LEFT, padx=(10, 5))
         self.fecha_inicio_entry = DateEntry(filter_frame, width=12, background='darkblue',
                                         foreground='white', borderwidth=2, date_pattern='yyyy-mm-dd')
-        self.fecha_inicio_entry.set_date(datetime(datetime.now().year, 1, 1))  # Año en curso
+        self.fecha_inicio_entry.set_date(datetime(datetime.now().year, 1, 1))
         self.fecha_inicio_entry.pack(side=tk.LEFT)
 
         # Fecha fin
         ttk.Label(filter_frame, text="Hasta:").pack(side=tk.LEFT, padx=(10, 5))
         self.fecha_fin_entry = DateEntry(filter_frame, width=12, background='darkblue',
-                                     foreground='white', borderwidth=2, date_pattern='yyyy-mm-dd')
+                                        foreground='white', borderwidth=2, date_pattern='yyyy-mm-dd')
         self.fecha_fin_entry.set_date(datetime.now())
         self.fecha_fin_entry.pack(side=tk.LEFT)
 
@@ -1735,20 +1793,30 @@ class DatabaseApp:
         # Departamento
         ttk.Label(jerarquia_frame, text="Departamento:").pack(side=tk.LEFT)
         self.tra_dept_var = tk.StringVar(value='Todos')
-        self.tra_dept_combo = ttk.Combobox(jerarquia_frame, textvariable=self.dept_var, state='readonly')
+        self.tra_dept_combo = ttk.Combobox(jerarquia_frame, textvariable=self.tra_dept_var, state='readonly')
         self.tra_dept_combo.pack(side=tk.LEFT, padx=5)
 
         # Grupo
         ttk.Label(jerarquia_frame, text="Grupo:").pack(side=tk.LEFT)
         self.tra_group_var = tk.StringVar(value='Todos')
-        self.tra_group_combo = ttk.Combobox(jerarquia_frame, textvariable=self.group_var, state='readonly')
+        self.tra_group_combo = ttk.Combobox(jerarquia_frame, textvariable=self.tra_group_var, state='readonly')
         self.tra_group_combo.pack(side=tk.LEFT, padx=5)
 
         # Subgrupo
         ttk.Label(jerarquia_frame, text="Subgrupo:").pack(side=tk.LEFT)
         self.tra_sub_var = tk.StringVar(value='Todos')
-        self.tra_sub_combo = ttk.Combobox(jerarquia_frame, textvariable=self.sub_var, state='readonly')
+        self.tra_sub_combo = ttk.Combobox(jerarquia_frame, textvariable=self.tra_sub_var, state='readonly')
         self.tra_sub_combo.pack(side=tk.LEFT, padx=5)
+
+        # Cargar filtros jerárquicos T.R.A
+        def delayed_tra_init():
+            if getattr(self.db_manager, 'conn', None):
+                self.load_tra_filters()
+                self.tra_dept_combo.bind('<<ComboboxSelected>>', self.on_tra_dept_selected)
+                self.tra_group_combo.bind('<<ComboboxSelected>>', self.on_tra_group_selected)
+            else:
+                self.root.after(1000, delayed_tra_init)
+        delayed_tra_init()
 
         # ----- Treeview -----
         columns = ("Código", "Descripción", "Unidades Vendidas", "Promedio Mensual", "Stock Ideal", "Inventario", "Diferencia", "Rotación")
@@ -1758,10 +1826,9 @@ class DatabaseApp:
             self.tra_tree.heading(col, text=col)
             self.tra_tree.column(col, width=140, anchor='center')
 
-        # Colores
-        self.tra_tree.tag_configure("alta", background="#ffcccc")     # rojo claro
-        self.tra_tree.tag_configure("media", background="#fff7cc")    # amarillo claro
-        self.tra_tree.tag_configure("baja", background="#ccffcc")     # verde claro
+        self.tra_tree.tag_configure("alta", background="#ffcccc")
+        self.tra_tree.tag_configure("media", background="#fff7cc")
+        self.tra_tree.tag_configure("baja", background="#ccffcc")
 
         vsb = ttk.Scrollbar(main_frame, orient="vertical", command=self.tra_tree.yview)
         self.tra_tree.configure(yscrollcommand=vsb.set)
@@ -1769,14 +1836,10 @@ class DatabaseApp:
         self.tra_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         vsb.pack(side=tk.RIGHT, fill=tk.Y)
 
-        # Cargar datos iniciales cuando haya conexión
-        #def delayed_load():
-            #if self.db_manager.conn:
-                #self.cargar_ventas()
-            #else:
-                #self.root.after(100, delayed_load)
-
-        #delayed_load()
+    def init_tra_dicts(self):
+        self.tra_dept_dict = {}
+        self.tra_group_dict = {}
+        self.tra_sub_dict = {}
 
     def on_cargar_ventas(self):
         try:
@@ -1789,9 +1852,9 @@ class DatabaseApp:
 
             productos = self.cargar_ventas(fecha_inicio, fecha_fin, sede)
 
-            dept_code  = self.dept_dict.get(self.tra_dept_var.get())
-            group_code = self.group_dict.get(self.tra_group_var.get())
-            sub_code   = self.sub_dict.get(self.tra_sub_var.get())
+            dept_code  = self.tra_dept_dict.get(self.tra_dept_var.get())
+            group_code = self.tra_group_dict.get(self.tra_group_var.get())
+            sub_code   = self.tra_sub_dict.get(self.tra_sub_var.get())
 
             # Mostrar resultados en Treeview
             self.tra_tree.delete(*self.tra_tree.get_children())

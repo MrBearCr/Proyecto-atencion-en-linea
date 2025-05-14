@@ -1753,12 +1753,22 @@ class DatabaseApp:
             self.setup_stock_tab()
 
     def setup_tra_tab(self):
+        self.init_tra_dicts()
         main_frame = ttk.Frame(self.tra_tab)
         main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
         # ----- Filtro superior -----
         filter_frame = ttk.Frame(main_frame)
         filter_frame.pack(fill=tk.X, pady=5)
+
+        # 🔍 Filtro de texto por descripción
+        search_frame = ttk.Frame(main_frame)
+        search_frame.pack(fill=tk.X, pady=5)
+        ttk.Label(search_frame, text="Buscar Descripción:").pack(side=tk.LEFT)
+        self.tra_search_var = tk.StringVar()
+        entry_search = ttk.Entry(search_frame, textvariable=self.tra_search_var)
+        entry_search.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        self.tra_search_var.trace_add('write', lambda *args: self.on_cargar_ventas())
 
         # Fecha inicio
         ttk.Label(filter_frame, text="Desde:").pack(side=tk.LEFT, padx=(10, 5))
@@ -1819,7 +1829,7 @@ class DatabaseApp:
         delayed_tra_init()
 
         # ----- Treeview -----
-        columns = ("Código", "Descripción", "Unidades Vendidas", "Promedio Mensual", "Stock Ideal", "Inventario", "Diferencia", "Rotación")
+        columns = ("Código", "Descripción", "Unidades Vendidas", "Promedio Mensual", "Stock Ideal", "Inventario", "Diferencia","Dias Restantes", "Rotación")
         self.tra_tree = ttk.Treeview(main_frame, columns=columns, show="headings", height=15)
 
         for col in columns:
@@ -1859,8 +1869,19 @@ class DatabaseApp:
             # Mostrar resultados en Treeview
             self.tra_tree.delete(*self.tra_tree.get_children())
             for p in productos:
+                promedio_diario = p["promedio_mensual"] / 30 if p["promedio_mensual"] else 0
+                dias_restantes = (
+                   p["inventario"] / promedio_diario
+                   if promedio_diario > 0 else float('inf')
+               )
+           
                 if not self._coincide_jerarquia_tra(p["codigo"], dept_code, group_code, sub_code):
                     continue  # Filtrado por departamento/grupo/subgrupo
+                
+                # ⬇️ Filtro por descripción (texto)
+                filtro = self.tra_search_var.get().lower()
+                if filtro and filtro not in (p["descripcion"] or "").lower():
+                    continue
 
                 tag = "baja"
                 if p["rotacion"] == "Alta":
@@ -1873,9 +1894,10 @@ class DatabaseApp:
                     p["descripcion"],
                     p["neto"],
                     p["promedio_mensual"],
-                    p["inventario"],
                     p["stock_ideal"],
+                    p["inventario"],
                     p["diferencia"],
+                    round(dias_restantes, 1),
                     p["rotacion"]
                 ), tags=(tag,))
 

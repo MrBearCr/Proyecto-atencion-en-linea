@@ -64,7 +64,7 @@ def load_modules_config():
                 'calendario':     'False',
                 'stock':          'False',
                 'tra':          'False',
-                'pilot_ui':       'False',
+                'mbrp':           'False',
             }
             with open(CONFIG_FILE, 'w') as f:
                 config.write(f)
@@ -99,6 +99,7 @@ def load_debug_config():
             config['Debug'] = {
                 'tra': 'False',
                 'stock': 'False',
+                'mbrp': 'False',
                 'db': 'False',
             }
             with open(CONFIG_FILE, 'w') as f:
@@ -188,6 +189,7 @@ class DatabaseApp:
             self.debug_flags = load_debug_config()
             self.tra_debug = self.debug_flags.get('tra', False)
             self.stock_debug = self.debug_flags.get('stock', False)
+            self.mbrp_debug = self.debug_flags.get('mbrp', False)
             try:
                 # Habilitar/Deshabilitar debug en el gestor de BD
                 setattr(self.db_manager, 'debug_enabled', self.debug_flags.get('db', False))
@@ -213,7 +215,7 @@ class DatabaseApp:
                 self.tra_last_refresh = None
                 self.tra_full_loading_started = False
                 self.tra_loader_thread = None  # Referencia al hilo de carga TRA
-                self.tra_total_neto_scaneado = 0.0  # Neto total de ventas escaneadas (debug)
+                self.tra_total_neto_scaneado = 0.0
                 self.tra_fecha_inicio = None
                 self.tra_fecha_fin = None
                 self.tra_sede_codigo = None
@@ -223,6 +225,26 @@ class DatabaseApp:
                 from pal.ui.tabs.tra import setup_tra_tab as setup_tra_tab_ui
                 setup_tra_tab_ui(self)
             
+            # MBRP - Movimiento de Baja Rotación de Producto
+            if self.modules_enabled.get("mbrp", False):
+                # Diccionarios de filtros (separados para MBRP)
+                self.mbrp_dept_dict = {}
+                self.mbrp_group_dict = {}
+                self.mbrp_sub_dict = {}
+                
+                # Estado de carga MBRP
+                self.cached_ventas_mbrp = []
+                self.mbrp_loader_thread = None
+                self.mbrp_page_size = 500
+                self.mbrp_current_page = 1
+                self.mbrp_fecha_inicio = None
+                self.mbrp_fecha_fin = None
+                self.mbrp_sede_codigo = None
+                
+                self.mbrp_tab = ttk.Frame(self.main_notebook)
+                self.main_notebook.add(self.mbrp_tab, text="📉 MBRP")
+                from pal.ui.tabs.mbrp import setup_mbrp_tab as setup_mbrp_tab_ui
+                setup_mbrp_tab_ui(self)
             
             # Sistema de Paginacion ya inicializado arriba
             self.attempt_auto_connect()
@@ -1748,6 +1770,14 @@ class DatabaseApp:
             except Exception:
                 pass
 
+    def mbrp_debug_log(self, message: str):
+        """Log DEBUG del módulo MBRP controlado por bandera de configuración."""
+        if getattr(self, 'mbrp_debug', False):
+            try:
+                self.log(f"[MBRP DEBUG] {message}", "DEBUG")
+            except Exception:
+                pass
+
     def aplicar_filtro_tra(self):
         """Aplica filtros jerárquicos y de texto a los datos TRA usando las nuevas funciones de filtrado"""
         if not hasattr(self, 'cached_ventas_tra') or not self.cached_ventas_tra:
@@ -1981,6 +2011,52 @@ class DatabaseApp:
             self.tra_group_dict = {}
             self.tra_sub_dict = {}
 
+    def cargar_jerarquia_mbrp(self):
+        """Carga diccionarios para departamentos, grupos y subgrupos MBRP con estructura correcta"""
+        if not getattr(self.db_manager, 'conn', None):
+            return
+        try:
+            # Departamentos
+            deps = self.db_manager.fetch_data(
+                "SELECT C_CODIGO, C_DESCRIPCIO FROM MA_DEPARTAMENTOS"
+            )
+            self.mbrp_dept_dict = {desc: cod for cod, desc in deps if cod and desc}
+            
+            # Actualizar combo de departamentos si existe
+            if hasattr(self, 'mbrp_dept_combo'):
+                self.mbrp_dept_combo['values'] = ['Todos'] + list(self.mbrp_dept_dict.keys())
+                self.mbrp_dept_var.set('Todos')
+        
+            # Grupos por departamento
+            grupos = self.db_manager.fetch_data(
+                "SELECT C_DEPARTAMENTO, C_CODIGO, C_DESCRIPCIO FROM MA_GRUPOS"
+            )
+            self.mbrp_group_dict = {}
+            for dept, cod, desc in grupos:
+                if dept not in self.mbrp_group_dict:
+                    self.mbrp_group_dict[dept] = {}
+                if desc and cod:
+                    self.mbrp_group_dict[dept][desc] = cod
+        
+            # Subgrupos por departamento y grupo
+            subs = self.db_manager.fetch_data(
+                "SELECT C_IN_DEPARTAMENTO, C_IN_GRUPO, C_CODIGO, C_DESCRIPCIO FROM MA_SUBGRUPOS"
+            )
+            self.mbrp_sub_dict = {}
+            for dept, grp, cod, desc in subs:
+                key = (dept, grp)
+                if key not in self.mbrp_sub_dict:
+                    self.mbrp_sub_dict[key] = {}
+                if desc and cod:
+                    self.mbrp_sub_dict[key][desc] = cod
+            
+            self.log("Jerarquía MBRP cargada correctamente", "SUCCESS")
+        
+        except Exception as e:
+            self.log(f"Error cargando jerarquía MBRP: {str(e)}", "ERROR")
+            self.mbrp_dept_dict = {}
+            self.mbrp_group_dict = {}
+            self.mbrp_sub_dict = {}
 
     
     def cargar_tra_base(self):
@@ -2444,6 +2520,12 @@ class DatabaseApp:
                         except Exception as e:
                             self.log(f"Error inicial cargando jerarquía TRA: {e}", "ERROR")
 
+                    if self.modules_enabled.get("mbrp", False):
+                        try:
+                            self.cargar_jerarquia_mbrp()
+                        except Exception as e:
+                            self.log(f"Error inicial cargando jerarquía MBRP: {e}", "ERROR")
+
                     total_elapsed = time.perf_counter() - total_start
                     self.log(f"🏁 App inicializada en {total_elapsed:.2f}s", "INFO")
 
@@ -2526,7 +2608,8 @@ class DatabaseApp:
             ("calendario",     "Calendario"),
             ("stock",          "Alertas Stock"),
             ("tra",          "T.R.A"),
-            ("pilot_ui",      "🚀 Piloto UI Moderna")
+            ("pilot_ui",      "🚀 Piloto UI Moderna"),
+            ("mbrp",          "MBRP - Baja Rotación")
         ]):
             var = tk.BooleanVar(value=self.modules_enabled.get(key, False))
             cb  = ttk.Checkbutton(modules_frame, text=label, variable=var)
@@ -2548,6 +2631,7 @@ class DatabaseApp:
         for idx, (key, label) in enumerate([
             ("tra", "Habilitar logs de depuración de T.R.A"),
             ("stock", "Habilitar logs de depuración de Stock"),
+            ("mbrp", "Habilitar logs de depuración de MBRP"),
             ("db", "Habilitar logs de depuración de Base de Datos"),
         ]):
             var = tk.BooleanVar(value=self.debug_flags.get(key, False) if hasattr(self, 'debug_flags') else False)
@@ -2559,7 +2643,7 @@ class DatabaseApp:
             debug_frame,
             text="Guardar Depuración",
             command=self._save_debug_config
-        ).grid(row=3, column=0, sticky="e", pady=10, padx=10)
+        ).grid(row=4, column=0, sticky="e", pady=10, padx=10)
 
     def _save_modules_config(self):
         try:
@@ -3896,6 +3980,348 @@ class DatabaseApp:
         self.descripcion.insert(0, texto)
         self.descripcion.config(state='readonly')
         self.descripcion.update_idletasks()
+
+    # ====================
+    # MBRP (Baja Rotación)
+    # ====================
+    def cargar_mbrp_base(self):
+        try:
+            # Validar rango
+            fecha_inicio = self.mbrp_fecha_inicio_entry.get_date()
+            fecha_fin = self.mbrp_fecha_fin_entry.get_date()
+            sede = (self.mbrp_sede_var.get() or '').split(' - ')[0]
+            
+            self.mbrp_debug_log(f"Iniciando carga MBRP: {fecha_inicio} - {fecha_fin}, Sede: {sede}")
+
+            # Evitar cargas simultáneas
+            if getattr(self, 'mbrp_loader_thread', None) is not None and self.mbrp_loader_thread.is_alive():
+                self.mbrp_debug_log("Carga MBRP ya en curso, ignorando nuevo clic")
+                self.log("MBRP: Carga en curso; ignorando clic", "WARNING")
+                return
+
+            # Reset datos
+            self.cached_ventas_mbrp = []
+            self.mbrp_fecha_inicio = fecha_inicio
+            self.mbrp_fecha_fin = fecha_fin
+            self.mbrp_sede_codigo = sede
+
+            # Estado UI
+            try:
+                self.api_status.config(text="MBRP: Iniciando carga...", foreground="#004C97")
+                self.global_progress.pack(side=tk.RIGHT, padx=10)
+                self.global_progress.config(mode="indeterminate")
+                self.global_progress.start(5)
+            except Exception:
+                pass
+
+            # Fila de carga
+            if hasattr(self, 'mbrp_tree'):
+                self.mbrp_tree.delete(*self.mbrp_tree.get_children())
+                self.mbrp_tree.insert("", tk.END, values=(
+                    "...", "Cargando productos de baja rotación...", "...", "...", "...", "...", "..."
+                ), tags=("loading",))
+
+            # Lanzar hilo
+            from threading import Thread
+            self.mbrp_loader_thread = Thread(target=self._background_load_ventas_mbrp, daemon=True, name="mbrp_loader")
+            self.mbrp_loader_thread.start()
+        except Exception as e:
+            self.log(f"Error iniciando MBRP: {e}", "ERROR")
+
+    def _background_load_ventas_mbrp(self):
+        try:
+            if not all([self.mbrp_fecha_inicio, self.mbrp_fecha_fin, self.mbrp_sede_codigo]):
+                self.mbrp_debug_log("Parámetros faltantes para carga MBRP")
+                self.log("MBRP: Faltan parámetros", "ERROR")
+                return
+
+            # Carga por chunks (reutiliza infra de TRA)
+            start = 1
+            chunk_size = 1000
+            seen = set()
+            acumulados = []
+            
+            self.mbrp_debug_log(f"Iniciando carga por chunks: chunk_size={chunk_size}")
+
+            chunk_count = 0
+            while True:
+                chunk_count += 1
+                self.mbrp_debug_log(f"Cargando chunk {chunk_count}: start_row={start}")
+                
+                rows = self.db_manager.obtener_ventas_por_producto_chunk(
+                    fecha_inicio=self.mbrp_fecha_inicio,
+                    fecha_fin=self.mbrp_fecha_fin,
+                    sede_codigo=self.mbrp_sede_codigo,
+                    start_row=start,
+                    fetch_size=chunk_size,
+                )
+                if not rows:
+                    self.mbrp_debug_log(f"Chunk {chunk_count} vacío, finalizando carga")
+                    break
+                    
+                self.mbrp_debug_log(f"Chunk {chunk_count}: {len(rows)} registros obtenidos")
+                productos_nuevos = 0
+                productos_duplicados = 0
+                for r in rows:
+                    codigo = str(r[0])
+                    if codigo in seen:
+                        productos_duplicados += 1
+                        continue
+                    seen.add(codigo)
+                    acumulados.append(r)
+                    productos_nuevos += 1
+                
+                self.mbrp_debug_log(f"Chunk {chunk_count}: {productos_nuevos} productos nuevos, {productos_duplicados} duplicados")
+                start += chunk_size
+                if chunk_count % 10 == 0:
+                    self.mbrp_debug_log(f"Progreso: {len(acumulados)} productos únicos acumulados")
+                time.sleep(0.05)
+
+            self.mbrp_debug_log(f"Carga completada: {len(acumulados)} productos únicos cargados")
+            
+            # Clasificar por rotación usando lógica específica para MBRP
+            from pal.services.mbrp import clasificar_rotacion_mbrp, filtrar_productos_baja_rotacion
+            try:
+                self.mbrp_debug_log("Iniciando clasificación MBRP...")
+                # Usar clasificación MBRP que se enfoca en productos de baja rotación
+                clasificados = clasificar_rotacion_mbrp(acumulados)
+                self.mbrp_debug_log(f"Clasificados: {len(clasificados)} productos")
+                
+                # Filtrar productos con Índice de Movilidad bajo (umbral 30%)
+                productos_baja_rotacion = filtrar_productos_baja_rotacion(clasificados, umbral_im=30.0)
+                self.mbrp_debug_log(f"Productos baja rotación: {len(productos_baja_rotacion)} (umbral IM < 30%)")
+                
+                self.cached_ventas_mbrp = productos_baja_rotacion
+            except Exception as e:
+                self.log(f"Error en clasificación MBRP: {e}", "ERROR")
+                self.mbrp_debug_log(f"Error en clasificación, usando datos crudos: {e}")
+                self.cached_ventas_mbrp = list(acumulados)
+
+            # Actualizar UI
+            self.mbrp_debug_log("Finalizando carga MBRP, actualizando UI...")
+            def _finish():
+                try:
+                    self.aplicar_filtro_mbrp()
+                    self.api_status.config(text="MBRP: Completo", foreground="green")
+                    self.global_progress.stop()
+                    self.global_progress.pack_forget()
+                    self.mbrp_debug_log("UI MBRP actualizada correctamente")
+                except Exception as e:
+                    self.mbrp_debug_log(f"Error actualizando UI MBRP: {e}")
+            self.root.after(0, _finish)
+        except Exception as e:
+            self.log(f"MBRP error en carga: {e}", "ERROR")
+            try:
+                self.root.after(0, lambda: (self.global_progress.stop(), self.global_progress.pack_forget()))
+            except Exception:
+                pass
+
+    def aplicar_filtro_mbrp(self):
+        if not hasattr(self, 'cached_ventas_mbrp') or not self.cached_ventas_mbrp:
+            self.mbrp_debug_log("No hay datos MBRP en cache para filtrar")
+            return
+        
+        self.mbrp_debug_log(f"Aplicando filtros MBRP a {len(self.cached_ventas_mbrp)} productos")
+        # Filtros jerárquicos (similar a TRA)
+        dept_cod = self.mbrp_dept_dict.get(self.mbrp_dept_var.get()) if hasattr(self, 'mbrp_dept_var') else None
+        group_cod = None
+        sub_cod = None
+        if dept_cod and hasattr(self, 'mbrp_group_var'):
+            group_desc = self.mbrp_group_var.get()
+            group_cod = self.mbrp_group_dict.get(dept_cod, {}).get(group_desc)
+            if group_cod and hasattr(self, 'mbrp_sub_var'):
+                sub_desc = self.mbrp_sub_var.get()
+                key = (dept_cod, group_cod)
+                sub_cod = self.mbrp_sub_dict.get(key, {}).get(sub_desc)
+
+        texto = self.mbrp_search_var.get() if hasattr(self, 'mbrp_search_var') else ''
+        
+        self.mbrp_debug_log(f"Filtros: Dept={dept_cod}, Group={group_cod}, Sub={sub_cod}, Texto='{texto}'")
+
+        from pal.services.tra import filter_ventas_tra, paginate_tra
+        datos_filtrados = filter_ventas_tra(
+            ventas=self.cached_ventas_mbrp,
+            dept_code=dept_cod,
+            group_code=group_cod,
+            sub_code=sub_cod,
+            search_text=texto,
+            filter_rotacion='TODAS',
+            favoritos=self._get_favoritos_local(),
+        )
+        
+        self.mbrp_debug_log(f"Datos filtrados: {len(datos_filtrados)} productos")
+
+        if not hasattr(self, 'mbrp_current_page') or self.mbrp_current_page < 1:
+            self.mbrp_current_page = 1
+        datos_pagina, total_paginas, self.mbrp_current_page = paginate_tra(
+            datos_filtrados, self.mbrp_current_page, self.mbrp_page_size
+        )
+        
+        self.mbrp_debug_log(f"Paginación: página {self.mbrp_current_page} de {total_paginas}, {len(datos_pagina)} filas en página")
+        self.mostrar_mbrp_paginado(datos_pagina)
+        self.actualizar_controles_paginacion_mbrp(total_paginas)
+
+    def mostrar_mbrp_paginado(self, datos):
+        if not hasattr(self, 'mbrp_tree'):
+            return
+        self.mbrp_tree.delete(*self.mbrp_tree.get_children())
+        if not datos:
+            return
+            
+        # Importar servicios MBRP
+        from pal.services.mbrp import calcular_indice_movilidad, obtener_ultimas_ventas_bulk, calcular_dias_sin_venta
+        
+        # Cache de stock rápido
+        codigos = [r[0] for r in datos]
+        sede = self.mbrp_sede_codigo or '0301'
+        stock_map = self.obtener_stock_actual_bulk(codigos, sede)
+        
+        # Calcular Índices de Movilidad para todos los productos
+        indices_movilidad = calcular_indice_movilidad(self.cached_ventas_mbrp or datos)
+        
+        # Obtener fechas de última venta para todos los productos
+        ultimas_ventas = obtener_ultimas_ventas_bulk(self.db_manager, codigos, sede)
+        
+        for fila in datos:
+            try:
+                codigo = str(fila[0])
+                desc = fila[1]
+                neto = fila[5]
+                rotacion = fila[6] if len(fila) > 6 else 'BAJA'
+                stock_actual = int(stock_map.get(codigo, 0) or 0)
+                
+                # Índice de Movilidad
+                im_porcentaje = indices_movilidad.get(codigo, 0.0)
+                
+                # Calcular días desde última venta
+                fecha_ultima_venta = ultimas_ventas.get(codigo)
+                dias_sin_venta = calcular_dias_sin_venta(fecha_ultima_venta)
+                
+                # Formatear última venta para mostrar
+                if dias_sin_venta == -1:
+                    ultima_venta_texto = "Nunca"
+                elif dias_sin_venta == 0:
+                    ultima_venta_texto = "Hoy"
+                elif dias_sin_venta == 1:
+                    ultima_venta_texto = "1 día"
+                else:
+                    ultima_venta_texto = f"{dias_sin_venta} días"
+                
+                # Determinar tags de color por rotación e Índice de Movilidad
+                tag_rotacion = str(rotacion).lower()
+                
+                # Tag adicional por Índice de Movilidad (prioridad sobre rotación)
+                if im_porcentaje < 5.0:
+                    tag_im = "im_critico"
+                elif im_porcentaje <= 10.0:
+                    tag_im = "im_muy_bajo" 
+                elif im_porcentaje <= 20.0:
+                    tag_im = "im_bajo"
+                else:
+                    tag_im = tag_rotacion  # Usar tag de rotación normal
+                
+                self.mbrp_tree.insert(
+                    "", tk.END,
+                    values=(codigo, desc, rotacion, round(float(neto or 0), 2), stock_actual, f"{im_porcentaje}%", ultima_venta_texto),
+                    tags=(tag_im, tag_rotacion)
+                )
+            except Exception as e:
+                self.log(f"Error procesando fila MBRP {fila}: {str(e)}", "ERROR")
+                continue
+
+    def actualizar_controles_paginacion_mbrp(self, total_paginas):
+        if hasattr(self, 'mbrp_pagina_label'):
+            self.mbrp_pagina_label.config(text=f"Página {self.mbrp_current_page}/{total_paginas}")
+        if hasattr(self, 'mbrp_btn_prev'):
+            self.mbrp_btn_prev['state'] = 'normal' if self.mbrp_current_page > 1 else 'disabled'
+        if hasattr(self, 'mbrp_btn_next'):
+            self.mbrp_btn_next['state'] = 'normal' if self.mbrp_current_page < total_paginas else 'disabled'
+
+    def cambiar_pagina_mbrp(self, delta):
+        self.mbrp_current_page += delta
+        self.aplicar_filtro_mbrp()
+
+    def generar_reporte_mbrp(self):
+        """Genera un reporte detallado de productos de baja rotación"""
+        if not hasattr(self, 'cached_ventas_mbrp') or not self.cached_ventas_mbrp:
+            messagebox.showwarning("Sin datos", "No hay datos MBRP disponibles. Cargue datos primero.")
+            return
+            
+        try:
+            from pal.services.mbrp import generar_reporte_baja_rotacion
+            
+            sede = self.mbrp_sede_codigo or '0301'
+            reporte = generar_reporte_baja_rotacion(
+                self.cached_ventas_mbrp, 
+                self.db_manager, 
+                sede
+            )
+            
+            if "error" in reporte:
+                messagebox.showerror("Error", f"Error generando reporte: {reporte['error']}")
+                return
+            
+            # Crear ventana de reporte
+            reporte_window = tk.Toplevel(self.root)
+            reporte_window.title("Reporte MBRP - Productos de Baja Rotación")
+            reporte_window.geometry("600x500")
+            
+            # Texto del reporte
+            texto_frame = ttk.Frame(reporte_window)
+            texto_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+            
+            texto = tk.Text(texto_frame, wrap=tk.WORD, font=('Consolas', 10))
+            scrollbar = ttk.Scrollbar(texto_frame, orient=tk.VERTICAL, command=texto.yview)
+            texto.configure(yscrollcommand=scrollbar.set)
+            
+            # Generar contenido del reporte
+            contenido = f"""REPORTE MBRP - PRODUCTOS DE BAJA ROTACIÓN
+{'='*50}
+
+Período: {self.mbrp_fecha_inicio} - {self.mbrp_fecha_fin}
+Sede: {sede}
+Fecha reporte: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+RESUMEN EJECUTIVO:
+{'-'*20}
+Total productos analizados: {reporte['total_productos']}
+Sin movimiento (IM = 0%): {reporte['sin_movimiento']}
+Baja rotación (IM ≤ 10%): {reporte['baja_rotacion']}
+Rotación media (IM ≤ 30%): {reporte['media_rotacion']}
+Alta rotación (IM > 30%): {reporte['alta_rotacion']}
+
+Productos críticos identificados: {reporte['productos_criticos']}
+Porcentaje de baja rotación: {reporte['porcentaje_baja_rotacion']}%
+
+PRODUCTOS MÁS CRÍTICOS:
+{'-'*30}
+"""
+            
+            for i, producto in enumerate(reporte['detalle_criticos'], 1):
+                contenido += f"{i}. {producto['codigo']} - {producto['descripcion'][:50]}\n"
+                contenido += f"   IM: {producto['im']}% | Días sin venta: {producto['dias_sin_venta']}\n\n"
+            
+            contenido += "\nRECOMENDACIONES:\n"
+            contenido += "-"*20 + "\n"
+            contenido += "1. Revisar productos sin movimiento para posible descontinuación\n"
+            contenido += "2. Implementar estrategias de liquidación para productos críticos\n"
+            contenido += "3. Analizar causa raíz de baja rotación\n"
+            contenido += "4. Considerar reposicionamiento o cambio de precio\n"
+            
+            texto.insert('1.0', contenido)
+            texto.config(state='disabled')
+            
+            texto.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+            
+            # Botón para cerrar
+            ttk.Button(reporte_window, text="Cerrar", command=reporte_window.destroy).pack(pady=10)
+            
+            self.log(f"Reporte MBRP generado: {reporte['productos_criticos']} productos críticos encontrados", "SUCCESS")
+            
+        except Exception as e:
+            self.log(f"Error generando reporte MBRP: {str(e)}", "ERROR")
+            messagebox.showerror("Error", f"Error generando reporte: {str(e)}")
 
 if __name__ == "__main__":
     root = tk.Tk() 

@@ -23,6 +23,16 @@ from tkcalendar import Calendar, DateEntry
 from datetime import datetime, timedelta
 import requests
 from enum import Enum
+from pal.core.errors import ErrorCode
+from pal.core.credentials import SecureCredentialsManager
+from pal.core.audit import AuditLogger
+from pal.infrastructure.database import DatabaseManager
+from pal.ui.splash import SplashScreen
+from pal.ui.header import setup_styles as ui_setup_styles, create_header
+from pal.ui.sidebar import create_sidebar
+from pal.core.session import SessionManager
+from pal.services.cache import CacheDescripciones
+from pal.services.envios import EnvioProgramado, ProgramadorEnvios
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from win10toast import ToastNotifier
@@ -54,6 +64,7 @@ def load_modules_config():
                 'calendario':     'False',
                 'stock':          'False',
                 'tra':          'False',
+                'pilot_ui':       'False',
             }
             with open(CONFIG_FILE, 'w') as f:
                 config.write(f)
@@ -76,562 +87,12 @@ def save_modules_config(mods: dict):
         with open(CONFIG_FILE, 'w') as f:
             config.write(f)
 
-class SplashScreen(tk.Toplevel):
-    def __init__(self, parent):
-        super().__init__(parent)
-        self.title("Cargando...")
-        self.geometry("715x315")
-        self.configure(bg="#FFFFFF")
-        self.overrideredirect(True)
-        
-        # Centrar en pantalla
-        screen_width = self.winfo_screenwidth()
-        screen_height = self.winfo_screenheight()
-        x = (screen_width - 715) // 2
-        y = (screen_height - 315) // 2
-        self.geometry(f"+{x}+{y}")
-        
-        # Contenedor principal
-        self.container = ttk.Frame(self)
-        self.container.pack(expand=True, fill="both", padx=20, pady=20)
-        
-        try:
-            self.logo = tk.PhotoImage(file="casapro-icono.png").subsample(2, 2)
-            ttk.Label(self.container, image=self.logo).pack(pady=30)
-        except Exception as e:
-            tk.Label(self, text="[Imagen no disponible]", bg='white').pack(pady=10)
-        
-        # Texto de carga
-        ttk.Label(self.container, 
-                text="CPCapp 1.0BETA", 
-                font=("Segoe UI", 12)).pack(pady=5)
-        
-        # Barra de progreso
-        self.progress = ttk.Progressbar(self.container, 
-                                      orient="horizontal",
-                                      length=300,
-                                      mode="determinate")
-        self.progress.pack(pady=10)
-        
-        # Variables de control
-        self.minimum_time_elapsed = Event()
-        self.app_initialized = Event()
-        self.progress_value = 0
 
-    def start_animation(self):
-        # Iniciar temporizador mínimo de 3 segundos
-        self.after(3000, self.minimum_time_elapsed.set)
-        
-        # Iniciar animación de progreso
-        self._update_progress()
-        
-        # Verificar estado combinado
-        self._check_loading_status()
 
-    def _update_progress(self):
-        if self.progress_value < 100:
-            self.progress_value += 1
-            self.progress["value"] = self.progress_value
-            self.after(30, self._update_progress)
 
-    def _check_loading_status(self):
-        if self.minimum_time_elapsed.is_set() and self.app_initialized.is_set():
-            self.destroy()
-        else:
-            self.after(100, self._check_loading_status)
-        
-        
     
-class CacheDescripciones:
-    def __init__(self, ttl=3600):
-        self.cache = {}
-        self.ttl = ttl
-
-    def obtener(self, codigo):
-        item = self.cache.get(codigo)
-        if item and (time.time() - item['timestamp']) < self.ttl:
-            return item['descripcion']
-        return None
-
-    def guardar(self, codigo, descripcion):
-        self.cache[codigo] = {
-            'descripcion': descripcion,
-            'timestamp': time.time()
-        }
-
-class EnvioProgramado:
-    def __init__(self, db_manager):
-        self.db_manager = db_manager
-
-    def programar_envio(self, numero_cliente, fecha):
-        try:
-            self.db_manager.execute_query(
-                "INSERT INTO envios_programados (numero_cliente, fecha_programada, estado) VALUES (?, ?, 'PENDIENTE')",
-                (numero_cliente, fecha)
-            )
-            return True
-        except Exception as e:
-            print(f"Error programando envío: {str(e)}")
-            return False
-
-class ProgramadorEnvios:
-    def __init__(self, db_manager, app):
-        self.db_manager = db_manager
-        self.app = app
-        self.hilo = threading.Thread(target=self.verificar_envios, daemon=True)
-        self.hilo.start()
-
-    def verificar_envios(self):
-        while True:
-            try:
-                if not self.db_manager.conn:
-                    time.sleep(10)
-                    continue
-
-                ahora = datetime.now()
-                pendientes = self.db_manager.fetch_data(
-                    "SELECT id, numero_cliente FROM envios_programados "
-                    "WHERE fecha_programada <= ? AND estado = 'PENDIENTE'",
-                    (ahora,)
-                )
-                self.app.log(f"Envíos pendientes encontrados: {len(pendientes)}", "DEBUG")
-
-                for envio in pendientes:
-                    id_envio, numero_cliente = envio
-                    self.app.procesar_envio_programado(id_envio, numero_cliente)
-
-                    self.verificar_recordatorios()
-
-            except Exception as e:
-                self.app.log(f"Error en programador: {str(e)}", "ERROR")
-            time.sleep(60)
-
-  
-    def verificar_recordatorios(self):
-        ahora = datetime.now()
-        recordatorios = self.db_manager.fetch_data(
-        "SELECT id, numero_cliente, tipo_envio FROM envios_programados "
-        "WHERE fecha_programada BETWEEN ? AND ? AND estado = 'PENDIENTE'",
-        (ahora, ahora + timedelta(hours=24)))
-    
-        for id_envio, numero_cliente, tipo_envio in recordatorios:
-            self.log(f"Enviando recordatorio ({tipo_envio}) a {numero_cliente}", "INFO")
-            self.enviar_mensaje_whatsapp(numero_cliente, tipo_envio=tipo_envio)
-
-class ErrorCode(Enum):
-    # Errores de base de datos (1000-1999)
-    DB_CONNECTION_FAILED = (1001, "Error de conexión a la base de datos")
-    DB_QUERY_EXECUTION = (1002, "Error al ejecutar consulta SQL")
-    DB_TABLE_CREATION = (1003, "Error creando tabla en la base de datos")
-    DB_RECORD_NOT_FOUND = (1004, "Registro no encontrado")
-    DB_DESCRIPTION_NOT_FOUND = (1005, "Descripción no encontrada")
-    AL_CRITIC_ERROR = (1006, "")
-    
-    # Errores de validación (2000-2999)
-    INVALID_CLIENT_NUMBER = (2001, "Número de cliente inválido")
-    INVALID_PRODUCT_CODE = (2002, "Código de producto inválido")
-    DANGEROUS_INPUT = (2003, "Entrada con caracteres potencialmente peligrosos")
-    
-    # Errores de cifrado (3000-3999)
-    ENCRYPTION_FAILED = (3001, "Error al cifrar datos")
-    DECRYPTION_FAILED = (3002, "Error al descifrar datos")
-    KEY_GENERATION = (3003, "Error generando clave de cifrado")
-    
-    # Errores de API (4000-4999)
-    WHATSAPP_API_FAILURE = (4001, "Error en comunicación con API de WhatsApp")
-    INVALID_API_TOKEN = (4002, "Token de API inválido o expirado")
-    
-    # Autenticación y sesión (5000-5999)
-    AUTH_FAILED = (5001, "Error de autenticación")
-    SESSION_EXPIRED = (5002, "Sesión expirada por inactividad")
-    
-    # Configuración (6000-6999)
-    MISSING_CONFIG = (6001, "Configuración faltante")
-    INVALID_CONFIG = (6002, "Configuración inválida")
-
-    def __init__(self, code, description):
-        self.code = code
-        self.description = description
-
-    def __str__(self):
-        return f"[{self.code}] {self.description}"
-    
-class SessionManager:
-    def __init__(self, root: tk.Tk)-> None:
-        self.root: tk.Tk= root
-        self.last_activity = time.time()
-        self.timeout = 900 # 15 minutos
-        self.session_active: bool = False
-        self.enviando = False
-        self.progress = None
-        self.lbl_progreso = None
-        self.after_id: Optional[str] = None
 
 
-        #Monitorear actividad
-        
-        root.bind("<Key>", self.update_activity)
-        root.bind("<Button>", self.update_activity)
-        root.bind("<Motion>", self.update_activity)
-
-    def update_activity(self, event=None):
-        self.last_activity = time.time()
-        if not self.session_active:
-            self.start_session()
-        return 0  # Valor entero apropiado para WNDPROC en Windows
-
-    def start_session(self):
-        self.session_active = True   
-        self.check_activity()        
-
-    def check_activity(self):
-            if self.session_active and (time.time() - self.last_activity) > self.timeout:
-                self.expire_session()
-            elif self.session_active:
-                self.after_id = self.root.after(1000, self.check_activity) 
-                    
-    def expire_session(self):
-        if self.after_id:
-            self.root.after_cancel(self.after_id)
-        try:
-            if keyring.get_password("DBClientApp", "temp_pass"):
-                keyring.delete_password("DBClientApp", "temp_pass")
-        except Exception as e:
-            print(f"Error eliminando contraseña temporal: {str(e)}")
-        
-        messagebox.showinfo("Sesión Expirada", "La sesión ha expirado por inactividad")
-        self.root.destroy()
-
-class AuditLogger:
-    def __init__(self):
-        self.logger = logging.getLogger('audit')
-        self.logger.setLevel(logging.INFO)
-
-        handler = RotatingFileHandler(
-            'audit.log',
-            maxBytes=5*1024*1024, # 5MB
-            backupCount= 3,
-            encoding='utf-8'
-        )
-
-        formatter = logging.Formatter('%(asctime)s | %(levelname)s | %(message)s')
-        handler.setFormatter(formatter)
-        self.logger.addHandler(handler)
-
-    def log_event(self, action, user, status, error_code=None):
-        log_entry = f"USER: {user} | ACTION: {action} | STATUS: {status}"
-        if error_code:
-            log_entry += f" | ERROR: {error_code.code} - {error_code.description}"
-        self.logger.info(log_entry)
-
-class SecureCredentialsManager:
-    def __init__(self):
-        self.service_name = "DBClientApp"
-        self.key = self.get_or_create_key()
-
-    def get_or_create_key(self):
-        key = keyring.get_password(self.service_name, "encryption_key")
-        if not key:    
-            key = Fernet.generate_key().decode()
-            keyring.set_password(self.service_name, "encryption_key", key)  
-        return key.encode()
-
-    def encrypt(self, data):
-        try:
-            return Fernet(self.key).encrypt(data.encode()).decode()
-        except Exception as e:
-            error_msg = f"{ErrorCode.ENCRYPTION_FAILED}: {str(e)}"
-            raise Exception(error_msg) from e
-
-    def decrypt(self, encrypted_data):
-        try:
-            return Fernet(self.key).decrypt(encrypted_data.encode()).decode()
-        except Exception as e:
-            error_msg = f"{ErrorCode.DECRYPTION_FAILED}: {str(e)}"
-            raise Exception(error_msg) from e
-
-    def store_temp_password(self, password):
-        if password:
-            encrypted = self.encrypt(password)
-            keyring.set_password(self.service_name, "temp_pass", encrypted)
-
-    def get_temp_password(self):
-        encrypted = keyring.get_password(self.service_name, "temp_pass")
-        return self.decrypt(encrypted) if encrypted else None
-
-    def get_whatsapp_token(self):
-        encrypted_token = keyring.get_password(self.service_name, "whatsapp_token")
-        return self.decrypt(encrypted_token) if encrypted_token else None
-
-    def store_whatsapp_token(self, token):
-        try:
-            encrypted = self.encrypt(token) if token else ""
-            keyring.set_password(self.service_name, "whatsapp_token", encrypted)
-        except Exception as e:
-            error_msg = f"{ErrorCode.ENCRYPTION_FAILED}: {str(e)}"
-            raise Exception(error_msg) from e
-
-class DatabaseManager:
-    def __init__(self):
-        self.conn = None
-        self.cursor = None
-        self.connected_server = ""
-        self.config = configparser.ConfigParser()
-        self.server = None
-        self.database = None
-        self.user = None
-        self.password = None
-
-    def table_exists(self, table_name: str) -> bool:
-        """Verifica si una tabla existe en la base de datos con manejo de errores mejorado"""
-        try:
-            query = """
-                SELECT COUNT(*) 
-                FROM INFORMATION_SCHEMA.TABLES 
-                WHERE TABLE_NAME = LOWER(?)
-            """
-            result = self.fetch_data(query, (table_name.lower(),))
-            return result[0][0] > 0 if result else False
-        except Exception as e:
-            print(f"Error verificando tabla {table_name}: {str(e)}")
-            return False
-
-    def connect(self, server, database, user, password, retry_attempts=2):
-        """
-        Connect to the database with retry logic and better error handling
-        
-        Parameters:
-            server (str): Database server address
-            database (str): Database name
-            user (str): Username for SQL authentication (empty for Windows auth)
-            password (str): Password for SQL authentication
-            retry_attempts (int): Number of connection retries before failing
-            
-        Returns:
-            bool: True if connected successfully
-            
-        Raises:
-            Exception: If connection fails after all retries
-        """
-        # Log connection attempt with sanitized info
-        print(f"Attempting to connect to server: {server}, database: {database}, user: {user if user else 'Windows Auth'}")
-        
-        # Cadena inicial sin database para crear la BD si no existe
-        initial_conn_str = (
-            f"DRIVER={{SQL Server}};"
-            f"SERVER={server};"
-            "Encrypt=no;"          
-            "TrustServerCertificate=yes;"  # Changed to yes for better compatibility
-            "Connection Timeout=30;"       # Increased timeout
-        )
-    
-        if user:
-            initial_conn_str += f"UID={user};PWD={password or ''};"
-        else:
-            initial_conn_str += "Trusted_Connection=no;"
-
-        # Track retries
-        attempt = 0
-        last_error = None
-        
-        while attempt <= retry_attempts:
-            if attempt > 0:
-                print(f"Retry attempt {attempt} of {retry_attempts}...")
-                time.sleep(2)  # Add delay between retries
-                
-            # Intentar crear la base de datos si no existe
-            try:
-                #print(f"Connecting to server without specifying database...")
-                temp_conn = pyodbc.connect(initial_conn_str)  # Sin database
-                temp_cursor = temp_conn.cursor()
-                #print(f"Creating database {database} if it doesn't exist...")
-                temp_cursor.execute(f"""
-                    IF NOT EXISTS (
-                        SELECT name FROM sys.databases 
-                        WHERE name = '{database}'
-                    )
-                    CREATE DATABASE {database}
-                """)
-                temp_conn.commit()
-                temp_conn.close()
-                # print(f"Database {database} is ready")
-                # If we get here, break out of retry loop
-                break
-            except pyodbc.Error as e:
-                last_error = e
-                error_details = str(e).replace('\n', ' ')
-                print(f"Connection attempt {attempt+1} failed: {error_details}")
-                attempt += 1
-                
-                # Only raise exception if we've exhausted all retries
-                if attempt > retry_attempts:
-                    error_msg = f"{ErrorCode.DB_CONNECTION_FAILED}: {str(e)}"
-                    raise Exception(error_msg) from e
-
-        # Cadena de conexión final CON database
-        final_conn_str = initial_conn_str + f"DATABASE={database};"
-
-        try:
-            self.conn = pyodbc.connect(final_conn_str)
-            self.cursor = self.conn.cursor()
-            self.connected_server = server
-            # Store connection parameters for potential reconnection
-            self.server = server
-            self.database = database
-            self.user = user
-            self.password = password
-            self.create_table()
-            return True
-        except pyodbc.Error as e:
-            error_msg = f"{ErrorCode.DB_CONNECTION_FAILED}: {str(e)}"
-            raise Exception(error_msg) from e
-
-
-    def create_table(self):
-        try:
-            # Crear tabla clientes con índices
-            self.cursor.execute("""
-                IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='clientes' AND xtype='U')
-                CREATE TABLE clientes (
-                    id INT IDENTITY(1,1) PRIMARY KEY,
-                    numero_cliente NVARCHAR(50) NOT NULL,
-                    C_CODIGO NVARCHAR(15) NOT NULL
-                );
-
-                IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name='idx_clientes_numero')
-                CREATE INDEX idx_clientes_numero ON clientes (numero_cliente);
-                
-                IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name='idx_clientes_codigo')
-                CREATE INDEX idx_clientes_codigo ON clientes (C_CODIGO);
-            """)
-            self.conn.commit()
-
-            # Crear tabla envios_programados con índices
-            self.cursor.execute("""
-            IF NOT EXISTS (
-                SELECT * FROM sys.tables 
-                WHERE name = 'envios_programados' AND type = 'U'
-            )
-            CREATE TABLE envios_programados (
-                id INT IDENTITY(1,1) PRIMARY KEY,
-                numero_cliente NVARCHAR(50) NOT NULL,
-                fecha_programada DATETIME NOT NULL,
-                fecha_creacion DATETIME DEFAULT GETDATE(),
-                estado NVARCHAR(20) DEFAULT 'PENDIENTE',
-                tipo_envio NVARCHAR(20) NOT NULL 
-                    CHECK (tipo_envio IN ('ENTREGA', 'DISPONIBILIDAD')),
-                codigo_producto NVARCHAR(15) NULL  -- Nueva columna añadida
-            );
-
-            IF NOT EXISTS (
-                SELECT * FROM sys.indexes 
-                WHERE name = 'idx_envios_fecha_estado'
-            )
-            CREATE INDEX idx_envios_fecha_estado 
-            ON envios_programados (fecha_programada, estado);
-
-            IF NOT EXISTS (
-                SELECT * FROM sys.indexes 
-                WHERE name = 'idx_envios_numero'
-            )
-            CREATE INDEX idx_envios_numero 
-            ON envios_programados (numero_cliente);
-
-            IF NOT EXISTS (
-                SELECT * FROM sys.indexes 
-                WHERE name = 'idx_envios_producto'
-            )
-            CREATE INDEX idx_envios_producto 
-            ON envios_programados (codigo_producto);  -- Nuevo índice añadido
-        """)
-            self.conn.commit()
-
-        except pyodbc.Error as e:
-            error_msg = f"{ErrorCode.DB_TABLE_CREATION}: {str(e)}"
-            raise Exception(error_msg) from e
-        
-    def obtener_alertas_stock(self):
-        try:
-            query = """
-                SELECT 
-                    c_codarticulo AS codigo,
-                    MAX(p.C_DESCRI) AS descripcion,
-                    CAST(SUM(n_cantidad) AS INT) AS stock,  
-                CASE
-                    WHEN SUM(n_cantidad) BETWEEN 15 AND 20 THEN 'Leve'  
-                    WHEN SUM(n_cantidad) BETWEEN 8 AND 14 THEN 'Media'
-                    ELSE 'Crítica'
-                END AS nivel
-                FROM MA_DEPOPROD d
-                    INNER JOIN MA_PRODUCTOS p ON d.c_codarticulo = p.C_CODIGO
-                    WHERE c_coddeposito = '0301'
-                    GROUP BY c_codarticulo
-                    HAVING SUM(n_cantidad) < 21  
-                    ORDER BY stock ASC
-                """
-        
-            return self.fetch_data(query)
-        except Exception as e:
-            print(f"{str(e)}")
-            return []
-        
-    def toggle_favorito(self, codigo_producto):
-        try:
-            self.execute_query(
-                """MERGE INTO favoritos_productos AS target
-                USING (VALUES (?)) AS source(codigo)
-                ON target.codigo = source.codigo
-                WHEN MATCHED THEN
-                    UPDATE SET favorito = ~favorito
-                WHEN NOT MATCHED THEN
-                    INSERT (codigo, favorito) VALUES (source.codigo, 1);""",
-                (codigo_producto,)
-            )
-            return True
-        except Exception as e:
-            print(f"Error actualizando favorito: {str(e)}")
-            return False
-
-    def execute_query(self, query, params=None):
-        try:
-            if params:
-                self.cursor.execute(query, params)
-            else:
-                self.cursor.execute(query)
-            self.conn.commit()
-            return True
-        except pyodbc.Error as e:
-            self.conn.rollback()
-            error_msg = f"{ErrorCode.DB_QUERY_EXECUTION}: {str(e)}"
-            raise Exception(error_msg) from e
-
-    def fetch_data(self, query, params=None):
-        try:
-            if not self.conn:
-                self.connect(self.server, self.database, self.user, self.password)
-            
-            # Añadir reintentos para errores transitorios
-            max_retries = 3
-            for attempt in range(max_retries):
-                try:
-                    self.cursor.execute(query, params or ())
-                    return self.cursor.fetchall()
-                except pyodbc.OperationalError as e:
-                    if attempt < max_retries - 1:
-                        time.sleep(2)
-                        self.connect(self.server, self.database, self.user, self.password)
-                        continue
-                    raise
-                
-        except pyodbc.Error as e:
-            error_msg = f"""
-            Error en consulta SQL:
-            Query: {query}
-            Params: {params}
-            Error: {str(e)}
-            """
-            print(error_msg, "ERROR")
-            raise
 
 
 class DatabaseApp:
@@ -672,13 +133,26 @@ class DatabaseApp:
             self.current_filter = 'TODAS'
             self.cached_alertas = []
             self.last_refresh = None
+            # Carga paralela de stock
+            self.stock_full_loading_started = False
+
+            self.tra_page_size = 500
+            self.tra_current_page = 1
             
             # Configuración de UI y bindings
             self.buttons = {}    
-            self.setup_styles()
+            ui_setup_styles(self)
             self.setup_modern_ui()
+            # Deshabilitar UI dependiente de BD hasta conectar
+            try:
+                self._set_ui_connected(False)
+            except Exception:
+                pass
             self.setup_bindings()
             self.cache = CacheDescripciones()
+            
+            # Modo debug para TRA (logs detallados)
+            self.tra_debug = False
 
             if self.modules_enabled.get("envio_mensajes", False):
                 self.programador = ProgramadorEnvios(self.db_manager, self)
@@ -689,9 +163,24 @@ class DatabaseApp:
                 self.monitor_thread.start()
 
             if self.modules_enabled.get("tra", False):
+                # Initialize TRA dictionaries before setting up UI
+                self.tra_dept_dict = {}
+                self.tra_group_dict = {}
+                self.tra_sub_dict = {}
+                
+                # Inicialización de variables para carga paralela TRA
+                self.cached_ventas_tra = []
+                self.tra_last_refresh = None
+                self.tra_full_loading_started = False
+                self.tra_fecha_inicio = None
+                self.tra_fecha_fin = None
+                self.tra_sede_codigo = None
+                
                 self.tra_tab = ttk.Frame(self.main_notebook)
                 self.main_notebook.add(self.tra_tab, text="📈 T.R.A")
-                self.setup_tra_tab()
+                from pal.ui.tabs.tra import setup_tra_tab as setup_tra_tab_ui
+                setup_tra_tab_ui(self)
+            
             
             # Sistema de Paginacion ya inicializado arriba
             self.attempt_auto_connect()
@@ -813,10 +302,36 @@ class DatabaseApp:
             )
         
             if refresh_needed:
-                self.cached_alertas = self.db_manager.obtener_alertas_stock()
+                # Carga rápida inicial (limitada) para no bloquear la UI
+                self.cached_alertas = self.db_manager.obtener_alertas_stock(limit=300)
                 self.last_refresh = datetime.now()
                 self.ultimas_notificaciones.clear()  # <-- Limpiar notificaciones
+                # Resumen de distribución por nivel para diagnóstico rápido
+                try:
+                    leves = medias = criticas = 0
+                    for _, _, stock, _ in self.cached_alertas:
+                        try:
+                            s = int(stock or 0)
+                        except Exception:
+                            s = 0
+                        if s >= 15:
+                            leves += 1
+                        elif s >= 8:
+                            medias += 1
+                        else:
+                            criticas += 1
+                    self.log(f"Distribución alertas -> Leves: {leves} | Medias: {medias} | Críticas: {criticas}", "DEBUG")
+                except Exception:
+                    pass
                 self.log("Datos de alertas actualizados desde BD", "INFO")
+                # Iniciar carga completa en segundo plano una sola vez
+                try:
+                    if not getattr(self, 'stock_full_loading_started', False):
+                        self.stock_full_loading_started = True
+                        threading.Thread(target=self._background_load_alertas_stock, daemon=True).start()
+                        self.log("Carga paralela de alertas iniciada", "INFO")
+                except Exception as e:
+                    self.log(f"No se pudo iniciar carga paralela: {e}", "ERROR")
         
         except Exception as e:
             print(f"Error al actualizar alertas: {str(e)}")
@@ -843,10 +358,6 @@ class DatabaseApp:
             self.log(f"Hilos activos: {[h.name for h in hilos_activos]}", "DEBUG")
         
 
-    def actualizar_contador_paginacion(self, total_pages):
-        self.pagination_label.config(text=f"Página {self.current_page}/{total_pages}")
-        self.btn_prev['state'] = 'normal' if self.current_page > 1 else 'disabled'
-        self.btn_next['state'] = 'normal' if self.current_page < total_pages else 'disabled'
 
     def monitorear_favoritos(self):
         """Monitorea favoritos usando el archivo JSON"""
@@ -875,40 +386,22 @@ class DatabaseApp:
                 self.log(f"Error monitoreo favoritos: {str(e)}", "ERROR")
                 time.sleep(100)
 
-    def obtener_existencias_por_ubicacion(self, codigo, depositos):
-        # depositos es lista de strings, p. ej. ['0101','0108']
-        placeholders = ','.join('?' for _ in depositos)
-        sql = (
-            f"SELECT SUM(n_cantidad) "
-            f"FROM MA_DEPOPROD "
-            f"WHERE c_codarticulo = ? AND c_coddeposito IN ({placeholders})"
-        )
-        params = [codigo] + depositos
-        result = self.db_manager.fetch_data(sql, params)
-        return int(result[0][0] or 0)
 
     def mostrar_notificacion(self, codigo, stock, nivel):
         """
         Muestra un toast con el nivel de alerta en el depósito principal
         y las existencias en las ubicaciones de transferencia.
         """
+        from pal.services.stock import get_existencias_por_ubicacion
         # Base del mensaje
         mensaje = f"Código:{codigo}| Stock actual:{stock}|Nivel:{nivel} "
 
-        # Para cada grupo de transferencia, hacemos un SELECT SUM(...)
+        # Para cada grupo de transferencia, consultar existencias vía servicio
         for region, deps in LOCATION_GROUPS.items():
-            placeholders = ','.join('?' for _ in deps)
-            sql = (
-                f"SELECT SUM(n_cantidad) "
-                f"FROM MA_DEPOPROD "
-                f"WHERE c_codarticulo = ? AND c_coddeposito IN ({placeholders})"
-            )
-            params = [codigo] + deps
             try:
-                result = self.db_manager.fetch_data(sql, params)
-                existencias = result[0][0] or 0
+                existencias = get_existencias_por_ubicacion(self.db_manager, codigo, deps)
                 mensaje += f"{region}:{existencias} "
-            except Exception as e:
+            except Exception:
                 mensaje += f"{region}: error al consultar\n"
 
         # Mostrar toast
@@ -970,30 +463,25 @@ class DatabaseApp:
             self.api_status.config(text="Exportando: 0%", foreground="#004C97")
 
             filename = f"reporte_stock_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-            with open(filename, 'w', newline='', encoding='utf-8-sig') as f:
-                encabezados = ['Código', 'Descripción', 'Nivel Alerta', 'Stock Principal', *seleccionadas]
-                writer = csv.DictWriter(f, fieldnames=encabezados, delimiter=';')
-                writer.writeheader()
 
-                for i, item in enumerate(datos_exportar, 1):
-                    row_data = {
-                        'Código': item[0],
-                        'Descripción': item[1].replace(';', ','),
-                        'Nivel Alerta': item[3],
-                        'Stock Principal': item[2]
-                    }
-                    for ubicacion in seleccionadas:
-                        depositos = LOCATION_GROUPS[ubicacion]
-                        existencia = self.obtener_existencias_por_ubicacion(item[0], depositos)
-                        row_data[ubicacion] = existencia
+            # Delegar escritura al servicio con callback de progreso
+            from pal.services.exports import export_stock_csv
 
-                    writer.writerow(row_data)
+            def progress_cb(i, total):
+                if i % max(1, total // 50) == 0 or i == total:
+                    progreso = int((i / total) * 100)
+                    self.global_progress['value'] = i
+                    self.api_status.config(text=f"Exportando: {progreso}%")
+                    self.root.update_idletasks()
 
-                    if i % max(1, total_registros // 50) == 0 or i == total_registros:
-                        progreso = int((i / total_registros) * 100)
-                        self.global_progress['value'] = i
-                        self.api_status.config(text=f"Exportando: {progreso}%")
-                        self.root.update_idletasks()
+            total_registros = export_stock_csv(
+                filename=filename,
+                datos_exportar=datos_exportar,
+                seleccionadas=seleccionadas,
+                location_groups=LOCATION_GROUPS,
+                db_manager=self.db_manager,
+                progress_cb=progress_cb,
+            )
 
             # 4. Mostrar resumen final
             self.api_status.config(text="API: Lista", foreground="green")
@@ -1074,74 +562,7 @@ class DatabaseApp:
                 time.sleep(3600)  # <-- Actualizar cada hora
         threading.Thread(target=actualizar, daemon=True).start()
                         
-    def create_gradient_header(self):
-        """Genera un degradado suave de azul corporativo"""
-        width = 1200  # Ancho de la ventana
-        height = 50   # Altura del encabezado
-    
-        self.bg_image = tk.PhotoImage(width=width, height=height)
-    
-        # Colores base
-        start_color = (0, 76, 151)    # #004C97
-        end_color = (0, 45, 92)       # #002D5C
-    
-        # Generar degradado vertical
-        for y in range(height):
-        # Calcular interpolación de color
-            r = start_color[0] + (end_color[0] - start_color[0]) * y // height
-            g = start_color[1] + (end_color[1] - start_color[1]) * y // height
-            b = start_color[2] + (end_color[2] - start_color[2]) * y // height
-        
-            # Crear línea horizontal con el color calculado
-            color = f"#{r:02x}{g:02x}{b:02x}"
-            self.bg_image.put(color, (0, y, width, y+1))
 
-        # Aplicar al frame del encabezado
-        self.style.element_create("Header.TFrame", "image", self.bg_image)
-        self.style.configure("Header.TFrame", background="#004C97")
-
-    def setup_styles(self):
-        self.style = ttk.Style()
-        self.style.theme_create("modern", parent="alt", settings={
-            "TFrame": {"configure": {"background": "#F5F6F8"}},
-            "TNotebook": {"configure": {"background": "#FFFFFF"}},
-            "TButton": {"configure": {"padding": 6, "font": ("Segoe UI", 10)}},
-            "TNotebook.Tab": {
-                "configure": {"padding": (15, 5), "background": "#e9ecef"},
-                "map": {"background": [("selected", "#004C97")], "foreground": [("selected", "white")]}
-            }
-        })
-        self.style.theme_use("modern")
-        
-        # Configuraciones específicas
-        self.style.configure("Header.TFrame", background="white")
-        self.style.configure("Sidebar.TFrame", background="#e9ecef")
-        self.style.configure("Nav.TButton", 
-                        font=("Segoe UI", 11), 
-                        anchor="w",
-                        padding=(20, 10),      #e9ecef
-                        background="#e9ecef")    #004C97
-        self.style.map("Nav.TButton",
-                    background=[("active", "#004C97"), ("!active", "#e9ecef")],
-                    foreground=[("active", "white")])
-        
-
-        
-
-        self.style.configure("Disabled.TButton", 
-                    foreground="#666666",
-                    background="#e0e0e0")
-        self.style.configure(
-            "HeaderMenu.TMenubutton",
-            background="#004C97",
-            foreground="white",
-            font=("Segoe UI", 12),
-            relief="flat"
-        )
-        self.style.map("HeaderMenu.TMenubutton",
-            background=[("active", "#0066CC")],  # Color al hacer hover
-            foreground=[("active", "white")]
-        )
 
     def setup_bindings(self):
         """Configurar eventos del teclado y widgets"""
@@ -1156,8 +577,8 @@ class DatabaseApp:
         self.root.geometry("1200x800")
         self.root.minsize(1000, 600)
         
-        self.create_header()
-        self.create_sidebar()
+        create_header(self)
+        create_sidebar(self)
         self.create_main_workspace()
         self.create_status_panel()
 
@@ -1167,147 +588,6 @@ class DatabaseApp:
             background=[('active', '#e89f00')],
             foreground=[('active', '#003f7e')])
         
-    def setup_stock_tab(self):
-        if not self.modules_enabled.get("stock", False):
-            return
-        main_frame = ttk.Frame(self.stock_tab)
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-
-        # ① --- Filtros jerárquicos ---
-        hier_frame = ttk.Frame(main_frame)
-        hier_frame.pack(fill=tk.X, pady=5)
-
-        # Departamento
-        ttk.Label(hier_frame, text="Departamento:").pack(side=tk.LEFT)
-        self.dept_var = tk.StringVar(value='Todos')
-        self.dept_combo = ttk.Combobox(hier_frame, textvariable=self.dept_var, state='readonly')
-        self.dept_combo['values'] = ['Todos']
-        self.dept_combo.pack(side=tk.LEFT, padx=5)
-        self.dept_combo.bind('<<ComboboxSelected>>', lambda e: self.on_dept_selected())
-
-        # Grupo
-        ttk.Label(hier_frame, text="Grupo:").pack(side=tk.LEFT)
-        self.group_var = tk.StringVar(value='Todos')
-        self.group_combo = ttk.Combobox(hier_frame, textvariable=self.group_var, state='readonly')
-        self.group_combo['values'] = ['Todos']
-        self.group_combo.pack(side=tk.LEFT, padx=5)
-        self.group_combo.bind('<<ComboboxSelected>>', lambda e: self.on_group_selected())
-
-        # Subgrupo
-        ttk.Label(hier_frame, text="Subgrupo:").pack(side=tk.LEFT)
-        self.sub_var = tk.StringVar(value='Todos')
-        self.sub_combo = ttk.Combobox(hier_frame, textvariable=self.sub_var, state='readonly')
-        self.sub_combo['values'] = ['Todos']
-        self.sub_combo.pack(side=tk.LEFT, padx=5)
-        self.sub_combo.bind('<<ComboboxSelected>>', lambda e: self.aplicar_filtro_stock())
-        # --------------------------------
-
-        # Filtro de texto
-        search_frame = ttk.Frame(main_frame)
-        search_frame.pack(fill=tk.X, pady=5)
-        ttk.Label(search_frame, text="Buscar Descripción:").pack(side=tk.LEFT)
-        self.search_var = tk.StringVar()
-        entry_search = ttk.Entry(search_frame, textvariable=self.search_var)
-        entry_search.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-        self.search_var.trace_add('write', lambda *args: self.aplicar_filtro_stock())
-
-        # Controles superiores en dos filas
-        top_controls = ttk.Frame(main_frame)
-        top_controls.pack(fill=tk.X, pady=5)
-
-        # Fila 1: Filtros de nivel
-        filter_frame = ttk.Frame(top_controls)
-        filter_frame.pack(fill=tk.X, pady=5)
-        ttk.Label(filter_frame, text="Filtrar:").pack(side=tk.LEFT)
-        self.filter_var = tk.StringVar(value='TODAS')
-        self.current_filter = 'TODAS'
-
-        filters = [
-            ('Todas', 'TODAS'),
-            ('Críticas (<8)', 'CRÍTICA'),
-            ('Medias (8-14)', 'MEDIA'),
-            ('Leves (15-20)', 'LEVE')
-        ]
-
-        for text, val in filters:
-            ttk.Radiobutton(
-                filter_frame,
-                text=text,
-                variable=self.filter_var,
-                value=val,
-                command=lambda v=val: (
-                    setattr(self, 'current_page', 1),
-                    setattr(self, 'current_filter', v),
-                    self.aplicar_filtro_stock()
-                )
-            ).pack(side=tk.LEFT, padx=5)
-
-        # Fila 2: Acciones y paginación
-        action_frame = ttk.Frame(top_controls)
-        action_frame.pack(fill=tk.X, pady=5)
-
-        ttk.Button(action_frame, text="📥 Exportar CSV", command=self.exportar_csv).pack(side=tk.LEFT, padx=5)
-
-        pagination_frame = ttk.Frame(action_frame)
-        pagination_frame.pack(side=tk.RIGHT)
-        self.btn_prev = ttk.Button(pagination_frame, text="◄ Anterior", command=lambda: self.cambiar_pagina(-1), width=10)
-        self.btn_prev.pack(side=tk.LEFT)
-        self.pagination_label = ttk.Label(pagination_frame, text="Página 1/1", width=15)
-        self.pagination_label.pack(side=tk.LEFT, padx=5)
-        self.btn_next = ttk.Button(pagination_frame, text="Siguiente ►", command=lambda: self.cambiar_pagina(1), width=10)
-        self.btn_next.pack(side=tk.LEFT)
-
-        # Árbol de datos
-        tree_frame = ttk.Frame(main_frame)
-        tree_frame.pack(fill=tk.BOTH, expand=True)
-
-        columns_config = {
-            "Favorito": {"width": 50, "anchor": "center", "stretch": False},
-            "Código": {"width": 100, "anchor": "center"},
-            "Descripción": {"width": 350, "anchor": "w"},
-            "Stock": {"width": 80, "anchor": "center"},
-            "Nivel": {"width": 100, "anchor": "center"}
-        }
-
-        self.stock_tree = ttk.Treeview(tree_frame, columns=list(columns_config.keys()), show="headings", height=15)
-        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.stock_tree.yview)
-        hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.stock_tree.xview)
-        self.stock_tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
-
-        self.stock_tree.grid(row=0, column=0, sticky="nsew")
-        vsb.grid(row=0, column=1, sticky="ns")
-        hsb.grid(row=1, column=0, sticky="ew")
-
-        tree_frame.grid_rowconfigure(0, weight=1)
-        tree_frame.grid_columnconfigure(0, weight=1)
-
-        # Configurar columnas y encabezados
-        for col, config in columns_config.items():
-            self.stock_tree.heading(col, text=col)
-            self.stock_tree.column(col, **config)
-
-        # Estilos de filas
-        self.stock_tree.tag_configure('leve', background='#abebc6')
-        self.stock_tree.tag_configure('media', background='#DAF7A6')
-        self.stock_tree.tag_configure('critica', background='#ff856b')
-        self.stock_tree.tag_configure('favorito', background='#FFFFE0')
-        self.stock_tree.tag_configure('hover', background='#f0f0f0')
-        self.stock_tree.tag_configure('selected', background='#d0d0d0')
-
-        self.stock_tree.bind('<Button-1>', self.on_favorito_click)
-        self.stock_tree.bind('<Enter>', self.hover_row)
-        self.stock_tree.bind('<Leave>', self.leave_row)
-        self.stock_tree.bind('<<TreeviewSelect>>', self.select_row)
-
-
-        # Carga inicial solo si hay conexión
-        self.current_page = 1
-        self.page_size = 250
-        if hasattr(self.db_manager, 'conn') and self.db_manager.conn:
-            self.load_stock_filters()
-            self.aplicar_filtro_stock()
-        else:
-            print("No hay conexión activa a la base de datos para cargar alertas iniciales")
 
     def load_stock_filters(self):
         """Puebla Combobox tras conectar a BD usando descripciones como identificador visible"""
@@ -1380,22 +660,27 @@ class DatabaseApp:
         self.aplicar_filtro_stock()
 
     def on_tra_dept_selected(self, event=None):
-        codigo = self.tra_dept_dict.get(self.tra_dept_var.get())
-        if not codigo:
-            self.tra_group_combo['values'] = ['Todos']
-            self.tra_group_var.set('Todos')
+        """Actualiza grupos cuando se selecciona departamento"""
+        dept = self.tra_dept_var.get() if hasattr(self, 'tra_dept_var') else None
+        dept_cod = self.tra_dept_dict.get(dept) if dept else None
+    
+        # Resetear subgrupos
+        if hasattr(self, 'tra_sub_combo'):
             self.tra_sub_combo['values'] = ['Todos']
             self.tra_sub_var.set('Todos')
-            return
-        grupos = self.db_manager.fetch_data(
-            "SELECT C_CODIGO, C_DESCRIPCIO FROM MA_GRUPOS WHERE C_DEPARTAMENTO = ?",
-            (codigo,)
-        )
-        self.tra_group_dict = {desc: cod for cod, desc in grupos if cod and desc}
-        self.tra_group_combo['values'] = ['Todos'] + list(self.tra_group_dict.keys())
-        self.tra_group_var.set('Todos')
-        self.tra_sub_combo['values'] = ['Todos']
-        self.tra_sub_var.set('Todos')
+    
+        if dept_cod and hasattr(self, 'tra_group_combo'):
+            grupos = list(self.tra_group_dict.get(dept_cod, {}).keys())
+            self.tra_group_combo['values'] = ['Todos'] + grupos
+        elif hasattr(self, 'tra_group_combo'):
+            self.tra_group_combo['values'] = ['Todos']
+    
+        if hasattr(self, 'tra_group_var'):
+            self.tra_group_var.set('Todos')
+        
+        # Resetear página actual y aplicar filtros
+        self.tra_current_page = 1
+        self.aplicar_filtro_tra()
 
     def on_group_selected(self):
         dept_desc = self.dept_var.get()
@@ -1427,19 +712,26 @@ class DatabaseApp:
         esperar_inicio()
 
     def on_tra_group_selected(self, event=None):
-        dept_codigo = self.tra_dept_dict.get(self.tra_dept_var.get())
-        grupo_codigo = self.tra_group_dict.get(self.tra_group_var.get())
-        if not (dept_codigo and grupo_codigo):
-            self.tra_sub_combo['values'] = ['Todos']
+        """Actualiza subgrupos cuando se selecciona grupo"""
+        dept = self.tra_dept_var.get() if hasattr(self, 'tra_dept_var') else None
+        group = self.tra_group_var.get() if hasattr(self, 'tra_group_var') else None
+        dept_cod = self.tra_dept_dict.get(dept) if dept else None
+        group_cod = self.tra_group_dict.get(dept_cod, {}).get(group) if dept_cod else None
+    
+        if hasattr(self, 'tra_sub_combo'):
+            if dept_cod and group_cod:
+                key = (dept_cod, group_cod)
+                subgrupos = list(self.tra_sub_dict.get(key, {}).keys())
+                self.tra_sub_combo['values'] = ['Todos'] + subgrupos
+            else:
+                self.tra_sub_combo['values'] = ['Todos']
+    
+        if hasattr(self, 'tra_sub_var'):
             self.tra_sub_var.set('Todos')
-            return
-        subs = self.db_manager.fetch_data(
-            "SELECT C_CODIGO, C_DESCRIPCIO FROM MA_SUBGRUPOS WHERE C_IN_DEPARTAMENTO = ? AND C_IN_GRUPO = ?",
-            (dept_codigo, grupo_codigo)
-        )
-        self.tra_sub_dict = {desc: cod for cod, desc in subs if cod and desc}
-        self.tra_sub_combo['values'] = ['Todos'] + list(self.tra_sub_dict.keys())
-        self.tra_sub_var.set('Todos')
+        
+        # Resetear página actual y aplicar filtros
+        self.tra_current_page = 1
+        self.aplicar_filtro_tra()
 
         
         
@@ -1494,8 +786,21 @@ class DatabaseApp:
     def _init_jerarquia_async(self):
         """Thread en background para cargar y filtrar jerarquía sin bloquear UI."""
         total_start = time.perf_counter()
-        self._cargar_toda_jerarquia_productos()
-        self.cargar_jerarquia_productos()
+        try:
+            from pal.services.stock import load_all_jerarquia, build_producto_jerarquia
+            # Cargar jerarquía (con caché)
+            all_jerarquia = load_all_jerarquia(
+                self.db_manager,
+                JERARQUIA_CACHE_FILE,
+                int(JERARQUIA_CACHE_TTL.total_seconds())
+            )
+            self.all_jerarquia = all_jerarquia or {}
+            # Filtrar sólo códigos en alerta
+            codigos_en_alerta = {r[0] for r in getattr(self, 'cached_alertas', [])}
+            self.producto_jerarquia = build_producto_jerarquia(self.all_jerarquia, codigos_en_alerta)
+        except Exception as e:
+            self.log(f"Error inicializando jerarquía: {e}", "ERROR")
+            self.producto_jerarquia = {}
         elapsed = time.perf_counter() - total_start
         self.log(f"🏁 Jerarquía inicializada en {elapsed:.2f}s", "INFO")
         # Actualizar UI en hilo principal
@@ -1505,57 +810,69 @@ class DatabaseApp:
             pass
 
     def aplicar_filtro_stock(self):
-        # 1. Cargar datos desde caché (solo se actualiza con force_refresh o primera carga)
+        # Asegurar datos base
         if not hasattr(self, 'cached_alertas') or not self.cached_alertas:
             self.actualizar_alertas_stock(force_refresh=True)
-    
-        # 2. Obtener copia de los datos en caché para trabajar
-        datos_filtrados = list(self.cached_alertas)
-    
-        # 3. Aplicar filtros jerárquicos (departamento/grupo/subgrupo)
+        # Obtener códigos de jerarquía si no existe
+        if not hasattr(self, 'producto_jerarquia'):
+            self.producto_jerarquia = {}
+        # Filtros actuales
         dept_code = self.dept_dict.get(self.dept_var.get())
         group_code = self.group_dict.get(self.group_var.get())
         sub_code = self.sub_dict.get(self.sub_var.get())
-    
-        if any([dept_code, group_code, sub_code]):
-            datos_filtrados = [
-                r for r in datos_filtrados 
-                if self._coincide_jerarquia(r[0], dept_code, group_code, sub_code)
-            ]
-    
-        # 4. Aplicar filtro de texto en descripción y código
-        texto_busqueda = self.search_var.get().strip().lower()
-        if texto_busqueda:
-            datos_filtrados = [
-                r for r in datos_filtrados 
-                if texto_busqueda in (r[1].lower() + r[0].lower())
-            ]
-    
-        # 5. Aplicar filtro de nivel de alerta
-        filtro_nivel = self.filter_var.get().upper()
-        if filtro_nivel != 'TODAS':
-            datos_filtrados = [r for r in datos_filtrados if r[3].upper() == filtro_nivel]
-    
-        # 6. Ordenar por favoritos (sin modificar datos originales)
+        texto_busqueda = (self.search_var.get() or '').strip()
+        filtro_nivel = (self.filter_var.get() or 'TODAS').upper()
         favoritos = self._get_favoritos_local()
-        datos_ordenados = sorted(
-            datos_filtrados,
-            key=lambda x: x[0] not in favoritos  # Favoritos primero
+
+        from pal.services.stock import filter_alertas, paginate
+        # Filtrar y ordenar
+        filtrados = filter_alertas(
+            alertas=self.cached_alertas,
+            producto_jerarquia=self.producto_jerarquia,
+            dept_code=dept_code,
+            group_code=group_code,
+            sub_code=sub_code,
+            search_text=texto_busqueda,
+            filter_level=filtro_nivel,
+            favoritos=favoritos,
         )
-    
-        # 7. Calcular paginación
-        total_items = len(datos_ordenados)
-        total_paginas = max(1, math.ceil(total_items / self.page_size))
-    
-        # Asegurar que la página actual sea válida
-        self.current_page = max(1, min(self.current_page, total_paginas))
-    
-        # 8. Obtener slice de datos para la página actual
-        inicio = (self.current_page - 1) * self.page_size
-        fin = inicio + self.page_size
-        datos_pagina = datos_ordenados[inicio:fin]
-    
-        # 9. Actualizar interfaz
+        # Diagnóstico: distribución tras aplicar filtro seleccionado (solo en modo debug)
+        # Comentado para reducir spam en logs
+        # try:
+        #     leves = medias = criticas = 0
+        #     for _, _, stock_val, _ in filtrados:
+        #         try:
+        #             s = int(stock_val or 0)
+        #         except Exception:
+        #             s = 0
+        #         if s >= 15:
+        #             leves += 1
+        #         elif s >= 8:
+        #             medias += 1
+        #         else:
+        #             criticas += 1
+        #     self.log(
+        #         f"Filtro='{filtro_nivel}', total filtradas={len(filtrados)} | Leves:{leves} Medias:{medias} Críticas:{criticas}",
+        #         "DEBUG"
+        #     )
+        # except Exception:
+        #     pass
+        # Sanitizar filas con longitud incorrecta y tipos esperados
+        filtrados_clean = []
+        for r in filtrados:
+            try:
+                codigo = str(r[0])
+                desc = str(r[1])
+                stock_val = int(r[2]) if r[2] is not None else 0
+                nivel_val = str(r[3]) if len(r) > 3 else ''
+                filtrados_clean.append((codigo, desc, stock_val, nivel_val))
+            except Exception:
+                continue
+        # Paginación
+        datos_pagina, total_paginas, self.current_page = paginate(
+            filtrados_clean, self.current_page, self.page_size
+        )
+        # Actualizar UI
         self.mostrar_alertas_paginadas(datos_pagina)
         self.actualizar_controles_paginacion(total_paginas)
 
@@ -1665,57 +982,7 @@ class DatabaseApp:
         self.aplicar_filtro_stock()
         
 
-    def create_header(self):
-        # Crear canvas para efectos avanzados
-        header_canvas = tk.Canvas(
-            self.root, 
-            bg="#004C97",
-            height=80,
-            highlightthickness=0
-        )
-        header_canvas.pack(fill=tk.X)
-    
-        # Generar degradado
-        for i in range(80):
-            intensity = i / 80
-            r = int(0 * (1 - intensity) + 0 * intensity)
-            g = int(76 * (1 - intensity) + 45 * intensity)
-            b = int(151 * (1 - intensity) + 92 * intensity)
-            color = f"#{r:02x}{g:02x}{b:02x}"
-            header_canvas.create_line(0, i, 2000, i, fill=color)
-    
-        # Añadir texto
-        text_y = 80 // 2
-        header_canvas.create_text(
-            20, 
-            text_y,
-            text="Gestión de Clientes",
-            fill="white",
-            font=("Segoe UI", 14, "bold"),
-            anchor="w"
-        )
-        
-        # Menú de usuario
-        self.user_menu = ttk.Menubutton(header_canvas, text="☰", style="HeaderMenu.TMenubutton")
-        menu = tk.Menu(self.user_menu, tearoff=0)
-        menu.add_command(label="Configuración", command=self.show_settings)
-        menu.add_command(label="Salir", command=self.root.quit)
-        self.user_menu['menu'] = menu
-        self.user_menu.pack(side=tk.RIGHT, padx=20, pady=10)
 
-    def create_sidebar(self):
-        sidebar = ttk.Frame(self.root, width=250, style="Sidebar.TFrame")
-        sidebar.pack(side=tk.LEFT, fill=tk.Y, padx=10, pady=10)
-        
-        nav_items = [
-            ('📋 Registros', self.show_records_view),
-            ('📨 Mensajería', self.show_messaging_view),
-            ('⚙ Configuración', self.show_settings)
-        ]
-        
-        for text, cmd in nav_items:
-            btn = ttk.Button(sidebar, text=text, style="Nav.TButton", command=cmd)
-            btn.pack(fill=tk.X, pady=2)
 
     def create_main_workspace(self):
 
@@ -1725,621 +992,738 @@ class DatabaseApp:
         # Pestaña de Registros
         self.records_tab = ttk.Frame(self.main_notebook)
         self.main_notebook.add(self.records_tab, text="Registros")
-        self.setup_records_tab()
+        from pal.ui.tabs.records import setup_records_tab as setup_records_tab_ui
+        setup_records_tab_ui(self)
 
 
         # Pestaña de Mensajería
         if self.modules_enabled.get("envio_mensajes", False):
             self.messaging_tab = ttk.Frame(self.main_notebook)
             self.main_notebook.add(self.messaging_tab, text="Mensajería")
-            self.setup_messaging_tab()
+            from pal.ui.tabs.messaging import setup_messaging_tab as setup_messaging_tab_ui
+            setup_messaging_tab_ui(self)
 
         # Pestaña de Estadísticas
         if self.modules_enabled.get("estadisticas", False):
             self.stats_tab = ttk.Frame(self.main_notebook)
             self.main_notebook.add(self.stats_tab, text="📊 Estadísticas")
-            self.setup_stats_tab()  
+            from pal.ui.tabs.stats import setup_stats_tab as setup_stats_tab_ui
+            setup_stats_tab_ui(self)  
 
         # Pestaña de Calendario
         if self.modules_enabled.get("calendario", False):
             self.calendar_tab = ttk.Frame(self.main_notebook)
             self.main_notebook.add(self.calendar_tab, text="📅 Calendario")
-            self.setup_calendar_tab()
+            from pal.ui.tabs.calendar import setup_calendar_tab as setup_calendar_tab_ui
+            setup_calendar_tab_ui(self)
 
         # Alerta de stock Supervisores
         if self.modules_enabled.get("stock", False):
             self.stock_tab = ttk.Frame(self.main_notebook)
             self.main_notebook.add(self.stock_tab, text="🚨 Alertas Stock")
-            self.setup_stock_tab()
-
-    def setup_tra_tab(self):
-        self.init_tra_dicts()
-        main_frame = ttk.Frame(self.tra_tab)
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-
-        # ----- Filtro superior -----
-        filter_frame = ttk.Frame(main_frame)
-        filter_frame.pack(fill=tk.X, pady=5)
-
-        # 🔍 Filtro de texto por descripción
-        search_frame = ttk.Frame(main_frame)
-        search_frame.pack(fill=tk.X, pady=5)
-        ttk.Label(search_frame, text="Buscar Descripción:").pack(side=tk.LEFT)
-        self.tra_search_var = tk.StringVar()
-        entry_search = ttk.Entry(search_frame, textvariable=self.tra_search_var)
-        entry_search.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-        self.tra_search_var.trace_add('write', lambda *args: self.on_cargar_ventas())
-
-        # Fecha inicio
-        ttk.Label(filter_frame, text="Desde:").pack(side=tk.LEFT, padx=(10, 5))
-        self.fecha_inicio_entry = DateEntry(filter_frame, width=12, background='darkblue',
-                                        foreground='white', borderwidth=2, date_pattern='yyyy-mm-dd')
-        self.fecha_inicio_entry.set_date(datetime(datetime.now().year, 1, 1))
-        self.fecha_inicio_entry.pack(side=tk.LEFT)
-
-        # Fecha fin
-        ttk.Label(filter_frame, text="Hasta:").pack(side=tk.LEFT, padx=(10, 5))
-        self.fecha_fin_entry = DateEntry(filter_frame, width=12, background='darkblue',
-                                        foreground='white', borderwidth=2, date_pattern='yyyy-mm-dd')
-        self.fecha_fin_entry.set_date(datetime.now())
-        self.fecha_fin_entry.pack(side=tk.LEFT)
-
-        # Sede
-        ttk.Label(filter_frame, text="Sede:").pack(side=tk.LEFT, padx=10)
-        self.sede_var = tk.StringVar()
-        self.sede_combo = ttk.Combobox(filter_frame, textvariable=self.sede_var,
-                                    values=["0301 - Cabudare", "0401 - Guanare", "0101 - Barinas"], state='readonly')
-        self.sede_combo.pack(side=tk.LEFT)
-        self.sede_combo.bind("<<ComboboxSelected>>", lambda e: self.on_cargar_ventas())
-
-        # Botón para cargar
-        self.boton_cargar = ttk.Button(filter_frame, text="Cargar Ventas", command=self.on_cargar_ventas)
-        self.boton_cargar.pack(side=tk.RIGHT, padx=10)
-
-        # ----- Filtro jerárquico -----
-        jerarquia_frame = ttk.Frame(main_frame)
-        jerarquia_frame.pack(fill=tk.X, pady=5)
-
-        # Departamento
-        ttk.Label(jerarquia_frame, text="Departamento:").pack(side=tk.LEFT)
-        self.tra_dept_var = tk.StringVar(value='Todos')
-        self.tra_dept_combo = ttk.Combobox(jerarquia_frame, textvariable=self.tra_dept_var, state='readonly')
-        self.tra_dept_combo.pack(side=tk.LEFT, padx=5)
-
-        # Grupo
-        ttk.Label(jerarquia_frame, text="Grupo:").pack(side=tk.LEFT)
-        self.tra_group_var = tk.StringVar(value='Todos')
-        self.tra_group_combo = ttk.Combobox(jerarquia_frame, textvariable=self.tra_group_var, state='readonly')
-        self.tra_group_combo.pack(side=tk.LEFT, padx=5)
-
-        # Subgrupo
-        ttk.Label(jerarquia_frame, text="Subgrupo:").pack(side=tk.LEFT)
-        self.tra_sub_var = tk.StringVar(value='Todos')
-        self.tra_sub_combo = ttk.Combobox(jerarquia_frame, textvariable=self.tra_sub_var, state='readonly')
-        self.tra_sub_combo.pack(side=tk.LEFT, padx=5)
-
-        # Cargar filtros jerárquicos T.R.A
-        def delayed_tra_init():
-            if getattr(self.db_manager, 'conn', None):
-                self.load_tra_filters()
-                self.tra_dept_combo.bind('<<ComboboxSelected>>', self.on_tra_dept_selected)
-                self.tra_group_combo.bind('<<ComboboxSelected>>', self.on_tra_group_selected)
-            else:
-                self.root.after(1000, delayed_tra_init)
-        delayed_tra_init()
-
-        # ----- Treeview -----
-        columns = ("Código", "Descripción", "Unidades Vendidas", "Promedio Mensual", "Stock Ideal", "Inventario", "Diferencia","Dias Restantes", "Rotación")
-        self.tra_tree = ttk.Treeview(main_frame, columns=columns, show="headings", height=15)
-
-        for col in columns:
-            self.tra_tree.heading(col, text=col)
-            self.tra_tree.column(col, width=140, anchor='center')
-
-        self.tra_tree.tag_configure("alta", background="#ffcccc")
-        self.tra_tree.tag_configure("media", background="#fff7cc")
-        self.tra_tree.tag_configure("baja", background="#ccffcc")
-
-        vsb = ttk.Scrollbar(main_frame, orient="vertical", command=self.tra_tree.yview)
-        self.tra_tree.configure(yscrollcommand=vsb.set)
-
-        self.tra_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        vsb.pack(side=tk.RIGHT, fill=tk.Y)
-
-    def init_tra_dicts(self):
-        self.tra_dept_dict = {}
-        self.tra_group_dict = {}
-        self.tra_sub_dict = {}
-
-    def on_cargar_ventas(self):
-        try:
-            self.boton_cargar.config(state='disabled')  # 🔒
-            fi_date = self.fecha_inicio_entry.get_date()
-            fecha_inicio = datetime.combine(fi_date, datetime.min.time())
-            ff_date = self.fecha_fin_entry.get_date()
-            fecha_fin    = datetime.combine(ff_date, datetime.max.time())
-            sede = self.sede_var.get().split(" - ")[0] if self.sede_var.get() else None
-
-            productos = self.cargar_ventas(fecha_inicio, fecha_fin, sede)
-
-            dept_code  = self.tra_dept_dict.get(self.tra_dept_var.get())
-            group_code = self.tra_group_dict.get(self.tra_group_var.get())
-            sub_code   = self.tra_sub_dict.get(self.tra_sub_var.get())
-
-            # Mostrar resultados en Treeview
-            self.tra_tree.delete(*self.tra_tree.get_children())
-            for p in productos:
-                promedio_diario = p["promedio_mensual"] / 30 if p["promedio_mensual"] else 0
-                dias_restantes = (
-                   p["inventario"] / promedio_diario
-                   if promedio_diario > 0 else float('inf')
-               )
-           
-                if not self._coincide_jerarquia_tra(p["codigo"], dept_code, group_code, sub_code):
-                    continue  # Filtrado por departamento/grupo/subgrupo
-                
-                # ⬇️ Filtro por descripción (texto)
-                filtro = self.tra_search_var.get().lower()
-                if filtro and filtro not in (p["descripcion"] or "").lower():
-                    continue
-
-                tag = "baja"
-                if p["rotacion"] == "Alta":
-                    tag = "alta"
-                elif p["rotacion"] == "Media":
-                    tag = "media"
-
-                self.tra_tree.insert("", tk.END, values=(
-                    p["codigo"],
-                    p["descripcion"],
-                    p["neto"],
-                    p["promedio_mensual"],
-                    p["stock_ideal"],
-                    p["inventario"],
-                    p["diferencia"],
-                    round(dias_restantes, 1),
-                    p["rotacion"]
-                ), tags=(tag,))
-
-        except Exception as e:
-            self.log(f"Error al cargar ventas: {str(e)}", "ERROR")
-            messagebox.showerror("Error", "No se pudo cargar el reporte de ventas.")
-        finally:
-            self.boton_cargar.config(state='normal')  # 🔓
-        
-    def cargar_ventas(self, fecha_inicio, fecha_fin, sede_codigo=None):
-        try:
-            query = """
-                SELECT 
-                    i.c_Codarticulo,
-                    MAX(p.C_DESCRI)          AS Descripcion,
-                    p.C_DEPARTAMENTO         AS departamento,
-                    p.C_GRUPO                AS grupo,
-                    p.C_SUBGRUPO             AS subgrupo,
-                    SUM(
-                        CASE 
-                            WHEN i.c_Concepto = 'VEN' THEN i.n_Cantidad
-                            WHEN i.c_Concepto IN ('DEV', 'DCM', 'NDC') THEN -i.n_Cantidad
-                            ELSE 0
-                        END
-                    ) AS Neto
-                FROM TR_INVENTARIO i
-                JOIN MA_VENTAS v ON i.c_Documento = v.c_Documento
-                LEFT JOIN MA_PRODUCTOS p ON i.c_Codarticulo = p.c_Codigo
-                WHERE 
-                    v.d_FECHA BETWEEN ? AND ?
-                    AND v.c_CONCEPTO = 'VEN'
-                    AND i.c_Concepto IN ('VEN', 'DEV', 'DCM', 'NDC')
-            """
-            params = [fecha_inicio, fecha_fin]
-
-            if sede_codigo:
-                if sede_codigo.startswith("03"):
-                    query += " AND i.c_Deposito LIKE '03%'"
-                elif sede_codigo.startswith("04"):
-                    query += " AND i.c_Deposito LIKE '04%'"
-                elif sede_codigo.startswith("01"):
-                    query += " AND i.c_Deposito LIKE '01%'"
-
-            query += """
-                GROUP BY 
-                    i.c_Codarticulo, 
-                    p.C_DEPARTAMENTO, 
-                    p.C_GRUPO, 
-                    p.C_SUBGRUPO
-            """
-
-            resultados = self.db_manager.fetch_data(query, params)
-
-            productos = []
-            total_global = 0
-            dias = (fecha_fin.date() - fecha_inicio.date()).days
-            meses_reales = dias / 30.0 if dias > 0 else 1
-
-            for cod, desc, dep, grp, subgrp, neto in resultados:
-                if neto <= 0:
-                    continue
-
-                promedio_mensual = round(neto / meses_reales, 2)
-                stock_ideal = round(promedio_mensual * 1.4375)
-
-                productos.append({
-                    "codigo": cod,
-                    "descripcion": desc or "SIN DESCRIPCIÓN",
-                    "departamento": dep,
-                    "grupo": grp,
-                    "subgrupo": subgrp,
-                    "neto": neto,
-                    "promedio_mensual": promedio_mensual,
-                    "stock_ideal": stock_ideal,
-                    "inventario": 0  # se calcula luego
-                })
-                total_global += neto
-
-            # Inventario actual por sede
-            depositos = []
-            if sede_codigo:
-                if sede_codigo.startswith("03"):
-                    depositos = LOCATION_GROUPS.get("Cabudare", [])
-                elif sede_codigo.startswith("04"):
-                    depositos = LOCATION_GROUPS.get("Guanare", [])
-                elif sede_codigo.startswith("01"):
-                    depositos = LOCATION_GROUPS.get("Barinas", [])
-
-            for p in productos:
-                if depositos:
-                    p["inventario"] = self.obtener_existencias_por_ubicacion(p["codigo"], depositos)
-                else:
-                    p["inventario"] = 0
-
-            # Clasificación por rotación y diferencia
-            productos.sort(key=lambda x: x["neto"], reverse=True)
-            acumulado = 0
-            for p in productos:
-                porcentaje = (p["neto"] / total_global) * 100 if total_global > 0 else 0
-                acumulado += porcentaje
-                if acumulado <= 80:
-                    rotacion = "Alta"
-                elif acumulado <= 95:
-                    rotacion = "Media"
-                else:
-                    rotacion = "Baja"
-                p["rotacion"] = rotacion
-                p["acumulado"] = round(acumulado, 2)
-                p["diferencia"] = p["inventario"] - p["stock_ideal"]
-
-            return productos
-
-        except Exception as e:
-            self.log(f"Error en reporte de rotación: {str(e)}", "ERROR")
-            return []
-
-
-    def setup_stats_tab(self):
-        self.stats_frame = ttk.Frame(self.stats_tab)
-        self.stats_frame.pack(fill=tk.BOTH, expand=True)
+            from pal.ui.tabs.stock import setup_stock_tab as setup_stock_tab_ui
+            setup_stock_tab_ui(self)
     
-        # Botón para actualizar gráficos
-        ttk.Button(
-            self.stats_frame, 
-            text="Actualizar Gráficos", 
-            command=self.mostrar_estadisticas
-        ).pack(pady=10)
-    
-        # Contenedor para gráficos
-        self.graph_container = ttk.Frame(self.stats_frame)
-        self.graph_container.pack(fill=tk.BOTH, expand=True)
-
-    def mostrar_estadisticas(self):
-        # Limpiar gráficos anteriores
-        for widget in self.graph_container.winfo_children():
-            widget.destroy()
-    
-        # Gráfico 1: Envíos por estado
-        data = self.db_manager.fetch_data(
-            "SELECT tipo_envio, COUNT(*) FROM envios_programados GROUP BY tipo_envio"
-        )
-        if data:
-            tipos, cantidades = zip(*data)
-            fig, ax = plt.subplots(figsize=(6, 3))
-            ax.pie(cantidades, labels=tipos, autopct='%1.1f%%', colors=['#4CAF50', '#2196F3'])
-            ax.set_title("Distribución de Tipos de Envío")
+    def mostrar_tra_filtrado(self, datos_filtrados):
+        """Muestra datos filtrados TRA en el Treeview con colores, stock actual e ideal, y días restantes"""
+        self.tra_tree.delete(*self.tra_tree.get_children())
         
-            canvas = FigureCanvasTkAgg(fig, self.graph_container)
-            canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-            canvas.draw()
-
-    def setup_calendar_tab(self):
-        frame = ttk.Frame(self.calendar_tab)
-        frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-
-    # Calendario
-        self.cal = Calendar(
-            frame,
-            selectmode='day',
-            year=datetime.now().year,
-            month=datetime.now().month,
-            day=datetime.now().day,
-            date_pattern='y-mm-dd'
-        )
-        self.cal.pack(fill=tk.BOTH, expand=True, pady=10)
-
-        # Botón para actualizar eventos
-        ttk.Button(frame, text="Actualizar Eventos", command=self.cargar_eventos_calendario).pack(pady=5)
-
-        # Área de detalles
-        self.eventos_text = tk.Text(frame, height=10, wrap=tk.WORD)
-        self.eventos_text.pack(fill=tk.BOTH, expand=True)
-
-        # Cargar eventos iniciales
-        self.cargar_eventos_calendario()
-        self.cal.bind("<<CalendarSelected>>", lambda e: self.mostrar_eventos_fecha(e) or 0)
-
-    def mostrar_eventos_fecha(self, event=None):
-        fecha_seleccionada = self.cal.get_date()
-        # Ensure return value for WNDPROC
-        self.eventos_text.delete(1.0, tk.END)
-    
-        try:
-            # Convertir fecha seleccionada a datetime (inicio y fin del día)
-            fecha_inicio = datetime.strptime(fecha_seleccionada, "%Y-%m-%d")
-            fecha_fin = fecha_inicio + timedelta(days=1)
+        # Actualizar variable para paginación
+        self.tra_ventas_datos_filtrados = datos_filtrados
         
-            eventos = self.db_manager.fetch_data(
-                "SELECT numero_cliente, fecha_programada, estado, tipo_envio "
-                "FROM envios_programados "
-                "WHERE fecha_programada >= ? AND fecha_programada < ?",  # <-- Nueva consulta
-                (fecha_inicio, fecha_fin)  # <-- Parámetros como objetos datetime
-            )
+        # Solo mostrar una página de datos
+        items_por_pagina = min(self.tra_page_size, len(datos_filtrados))
+        page_rows = datos_filtrados[:items_por_pagina]
+        codigos = [r[0] for r in page_rows]
+        sede = (self.sede_var.get() or '').split(' - ')[0]
+        stock_map = self.obtener_stock_actual_bulk(codigos, sede)
+        fecha_inicio = self.fecha_inicio_entry.get_date()
+        fecha_fin = self.fecha_fin_entry.get_date()
         
-            if not eventos:
-                self.eventos_text.insert(tk.END, "No hay eventos para esta fecha")
-                return 0  # Return integer for WNDPROC if no events
+        for fila in page_rows:
+            codigo, desc, _, _, _, neto, rotacion = fila
+            stock_actual = int(stock_map.get(codigo, 0) or 0)
             
-            for num_cliente, fecha, estado, tipo in eventos:
-                self.eventos_text.insert(tk.END, 
-                    f"• Cliente: {num_cliente}\n"
-                    f"  Tipo: {tipo}\n"
-                    f"  Estado: {estado}\n"
-                    f"  Hora: {fecha.strftime('%H:%M')}\n"
-                    "------------------------\n")
-                
-        except Exception as e:
-            self.eventos_text.insert(tk.END, f"Error obteniendo eventos: {str(e)}")
+            # Calcular stock ideal y días restantes
+            stock_ideal = self.calcular_stock_ideal_producto(neto)
+            dias_restantes = self.calcular_dias_restantes(stock_actual, neto, fecha_inicio, fecha_fin)
+            
+            # Determinar tag de color según rotación
+            tag_rotacion = rotacion.lower()
+            
+            self.tra_tree.insert(
+                "", tk.END,
+                values=(codigo, desc, rotacion, round(neto, 2), stock_actual, stock_ideal, dias_restantes),
+                tags=(tag_rotacion,)
+            )
+    
+    def cambiar_pagina_tra(self, delta):
+        """Cambia de página en el módulo TRA"""
+        self.tra_current_page += delta
+        self.aplicar_filtro_tra()  # Esto recalculará la paginación y mostrará los datos
+    
+    def mostrar_pagina_tra(self):
+        """Muestra la página actual de resultados"""
+        if not hasattr(self, 'tra_ventas_datos_filtrados'):
+            return
+    
+        total_items = len(self.tra_ventas_datos_filtrados)
+        total_pages = max(1, (total_items + self.tra_page_size - 1) // self.tra_page_size)
+    
+        # Asegurar página válida
+        self.tra_current_page = max(1, min(self.tra_current_page, total_pages))
+    
+        # Calcular rango de items a mostrar
+        start_idx = (self.tra_current_page - 1) * self.tra_page_size
+        end_idx = min(start_idx + self.tra_page_size, total_items)
+        page_data = self.tra_ventas_datos_filtrados[start_idx:end_idx]
+    
+        # Actualizar Treeview con colores, stock actual, stock ideal y días restantes
+        self.tra_tree.delete(*self.tra_tree.get_children())
+        codigos = [r[0] for r in page_data]
+        sede = (self.sede_var.get() or '').split(' - ')[0]
+        stock_map = self.obtener_stock_actual_bulk(codigos, sede)
+        fecha_inicio = self.fecha_inicio_entry.get_date()
+        fecha_fin = self.fecha_fin_entry.get_date()
+        for fila in page_data:
+            codigo, desc, _, _, _, neto, rotacion = fila
+            stock_actual = int(stock_map.get(codigo, 0) or 0)
+            stock_ideal = self.calcular_stock_ideal_producto(neto)
+            dias_restantes = self.calcular_dias_restantes(stock_actual, neto, fecha_inicio, fecha_fin)
+            tag_rotacion = rotacion.lower()
+            self.tra_tree.insert(
+                "", "end", 
+                values=(codigo, desc, rotacion, round(neto, 2), stock_actual, stock_ideal, dias_restantes),
+                tags=(tag_rotacion,)
+            )
+    
+        # Actualizar controles
+        self.tra_pagina_label.config(text=f"Página {self.tra_current_page}/{total_pages}")
+        self.tra_btn_prev['state'] = 'normal' if self.tra_current_page > 1 else 'disabled'
+        self.tra_btn_next['state'] = 'normal' if self.tra_current_page < total_pages else 'disabled'
         
-        return 0  # Return integer for WNDPROC
+    def tra_debug_log(self, message: str):
+        """Log EARLY/DEBUG para módulo TRA si el modo debug está habilitado"""
+        if getattr(self, 'tra_debug', False):
+            try:
+                self.log(f"[TRA DEBUG] {message}", "DEBUG")
+            except Exception:
+                pass
+
+    def aplicar_filtro_tra(self):
+        """Aplica filtros jerárquicos y de texto a los datos TRA usando las nuevas funciones de filtrado"""
+        if not hasattr(self, 'cached_ventas_tra') or not self.cached_ventas_tra:
+            # Solo aviso en warning, no debug
+            self.log("No hay datos TRA cacheados para filtrar", "WARNING")
+            return
+    
+        # Obtener códigos seleccionados  
+        dept_cod = self.tra_dept_dict.get(self.tra_dept_var.get()) if hasattr(self, 'tra_dept_var') else None
+        group_cod = None
+        sub_cod = None
+    
+        if dept_cod and hasattr(self, 'tra_group_var'):
+            group_desc = self.tra_group_var.get()
+            group_cod = self.tra_group_dict.get(dept_cod, {}).get(group_desc)
+        
+            if group_cod and hasattr(self, 'tra_sub_var'):
+                sub_desc = self.tra_sub_var.get()
+                key = (dept_cod, group_cod)
+                sub_cod = self.tra_sub_dict.get(key, {}).get(sub_desc)
+    
+        # Obtener texto de búsqueda
+        texto = self.tra_search_var.get() if hasattr(self, 'tra_search_var') else ''
+        
+        # Obtener favoritos
+        favoritos = self._get_favoritos_local()
+    
+        # Usar las nuevas funciones de filtrado
+        from pal.services.tra import filter_ventas_tra, paginate_tra
+        
+        # Debug: verificar datos antes del filtro
+        self.tra_debug_log(f"Aplicando filtros - Datos disponibles: {len(self.cached_ventas_tra)}")
+        self.tra_debug_log(f"Filtros activos - Dept: {dept_cod}, Group: {group_cod}, Sub: {sub_cod}, Texto: '{texto}'")
+        
+        # Filtrar y ordenar
+        datos_filtrados = filter_ventas_tra(
+            ventas=self.cached_ventas_tra,
+            dept_code=dept_cod,
+            group_code=group_cod,
+            sub_code=sub_cod,
+            search_text=texto,
+            filter_rotacion='TODAS',  # Por ahora no implementamos filtro por rotación en UI
+            favoritos=favoritos
+        )
+        
+        self.tra_debug_log(f"Datos filtrados: {len(datos_filtrados)} registros")
+        
+        # Asegurar que la página actual sea válida
+        if not hasattr(self, 'tra_current_page') or self.tra_current_page < 1:
+            self.tra_current_page = 1
+            
+        # Paginación
+        datos_pagina, total_paginas, self.tra_current_page = paginate_tra(
+            datos_filtrados, self.tra_current_page, self.tra_page_size
+        )
+        
+        self.tra_debug_log(f"Página {self.tra_current_page}/{total_paginas} - Mostrando {len(datos_pagina)} registros")
+        
+        # Actualizar vista
+        self.mostrar_tra_paginado(datos_pagina)
+        self.actualizar_controles_paginacion_tra(total_paginas)
+    
+    def mostrar_tra_paginado(self, datos):
+        """Muestra datos TRA paginados en el Treeview con colores, stock actual e ideal, días restantes y porcentajes"""
+        if not hasattr(self, 'tra_tree'):
+            self.log("[TRA DEBUG] Error: tra_tree no existe", "ERROR")
+            return
+            
+        self.tra_tree.delete(*self.tra_tree.get_children())
+        
+        if not datos:
+            # Evitar spam en warning; mantenemos un debug suave
+            self.tra_debug_log("No hay datos para mostrar en esta página")
+            return
+            
+        self.tra_debug_log(f"Mostrando {len(datos)} registros en TreeView")
+            
+        # Importar funciones auxiliares
+        from pal.services.tra import calcular_porcentajes_representacion, _get_tra_neto
+        
+        # Calcular porcentajes de representación para todos los datos filtrados
+        cached_data = getattr(self, 'cached_ventas_tra', [])
+        porcentajes = calcular_porcentajes_representacion(cached_data)
+        self.tra_porcentajes_map = porcentajes
+        
+        self.tra_debug_log(f"Calculados porcentajes para {len(porcentajes)} productos")
+        
+        # Actualizar tooltip con datos calculados
+        if hasattr(self, 'tra_tooltip'):
+            try:
+                total_ventas = sum(_get_tra_neto(item) for item in cached_data)
+                fecha_inicio = self.tra_fecha_inicio or datetime.now().date()
+                fecha_fin = self.tra_fecha_fin or datetime.now().date()
+                
+                self.tra_tooltip.set_data(
+                    porcentajes, 
+                    total_ventas,
+                    fecha_inicio,
+                    fecha_fin
+                )
+                self.tra_debug_log(f"Tooltip actualizado - Total ventas: {total_ventas}, Porcentajes: {len(porcentajes)}")
+            except Exception as e:
+                self.tra_debug_log(f"Error actualizando tooltip: {e}")
+            
+        # Obtener stock actual para los códigos de esta página
+        codigos = [r[0] for r in datos]
+        sede = self.tra_sede_codigo or '0301'
+        stock_map = self.obtener_stock_actual_bulk(codigos, sede)
+        
+        for fila in datos:
+            try:
+                # Manejo robusto para diferentes longitudes de tupla
+                if len(fila) >= 7:
+                    # Tomar por índice para evitar errores de desempaquetado si vienen campos extra
+                    codigo = fila[0]
+                    desc = fila[1]
+                    neto = fila[5]
+                    rotacion = fila[6]
+                elif len(fila) >= 6:
+                    codigo, desc, _, _, _, neto = fila[:6]
+                    rotacion = "SIN CLASIFICAR"
+                    self.tra_debug_log(f"Fila con 6 campos, asignando rotación SIN CLASIFICAR: {codigo}")
+                else:
+                    self.log(f"[TRA DEBUG] Fila con formato incorrecto ({len(fila)} campos): {fila}", "WARNING")
+                    continue
+
+                stock_actual = int(stock_map.get(codigo, 0) or 0)
+                porcentaje = porcentajes.get(codigo, 0.0)
+
+                # Calcular stock ideal y días restantes
+                stock_ideal = self.calcular_stock_ideal_producto(neto)
+                dias_restantes = self.calcular_dias_restantes(
+                    stock_actual, neto, 
+                    self.tra_fecha_inicio or datetime.now(),
+                    self.tra_fecha_fin or datetime.now()
+                )
+
+                # Determinar tag de color según rotación
+                tag_rotacion = (str(rotacion).lower() if rotacion else "sin_clasificar")
+                
+                # Determinar tag adicional por porcentaje de representación
+                if porcentaje >= 5:
+                    tag_representacion = "high_representation"
+                elif porcentaje >= 1:
+                    tag_representacion = "medium_representation"
+                else:
+                    tag_representacion = "low_representation"
+
+                self.tra_tree.insert(
+                    "", tk.END,
+                    values=(codigo, desc, rotacion, round(float(neto or 0), 2), f"{porcentaje}%", stock_actual, stock_ideal, dias_restantes),
+                    tags=(tag_rotacion, tag_representacion)
+                )
+            except Exception as e:
+                self.log(f"Error procesando fila TRA {fila}: {str(e)}", "ERROR")
+                continue
+    
+    def actualizar_controles_paginacion_tra(self, total_paginas):
+        """Actualiza los controles de paginación TRA"""
+        if hasattr(self, 'tra_pagina_label'):
+            self.tra_pagina_label.config(text=f"Página {self.tra_current_page}/{total_paginas}")
+        
+        if hasattr(self, 'tra_btn_prev'):
+            self.tra_btn_prev['state'] = 'normal' if self.tra_current_page > 1 else 'disabled'
+        
+        if hasattr(self, 'tra_btn_next'):
+            self.tra_btn_next['state'] = 'normal' if self.tra_current_page < total_paginas else 'disabled'
+    
+    def cargar_jerarquia_tra(self):
+        """Carga diccionarios para departamentos, grupos y subgrupos con estructura correcta"""
+        if not getattr(self.db_manager, 'conn', None):
+            return
+        try:
+            # Departamentos
+            deps = self.db_manager.fetch_data(
+                "SELECT C_CODIGO, C_DESCRIPCIO FROM MA_DEPARTAMENTOS"
+            )
+            self.tra_dept_dict = {desc: cod for cod, desc in deps if cod and desc}
+            
+            # Actualizar combo de departamentos si existe
+            if hasattr(self, 'tra_dept_combo'):
+                self.tra_dept_combo['values'] = ['Todos'] + list(self.tra_dept_dict.keys())
+                self.tra_dept_var.set('Todos')
+        
+            # Grupos por departamento
+            grupos = self.db_manager.fetch_data(
+                "SELECT C_DEPARTAMENTO, C_CODIGO, C_DESCRIPCIO FROM MA_GRUPOS"
+            )
+            self.tra_group_dict = {}
+            for dept, cod, desc in grupos:
+                if dept not in self.tra_group_dict:
+                    self.tra_group_dict[dept] = {}
+                if desc and cod:
+                    self.tra_group_dict[dept][desc] = cod
+        
+            # Subgrupos por departamento y grupo
+            subs = self.db_manager.fetch_data(
+                "SELECT C_IN_DEPARTAMENTO, C_IN_GRUPO, C_CODIGO, C_DESCRIPCIO FROM MA_SUBGRUPOS"
+            )
+            self.tra_sub_dict = {}
+            for dept, grp, cod, desc in subs:
+                key = (dept, grp)
+                if key not in self.tra_sub_dict:
+                    self.tra_sub_dict[key] = {}
+                if desc and cod:
+                    self.tra_sub_dict[key][desc] = cod
+            
+            self.log("Jerarquía TRA cargada correctamente", "SUCCESS")
+        
+        except Exception as e:
+            self.log(f"Error cargando jerarquía TRA: {str(e)}", "ERROR")
+            self.tra_dept_dict = {}
+            self.tra_group_dict = {}
+            self.tra_sub_dict = {}
+
+
+    
+    def cargar_tra_base(self):
+        """Carga datos TRA con optimizaciones de rendimiento y soporte para carga paralela"""
+        try:
+            # Validar rango de fechas
+            fecha_inicio = self.fecha_inicio_entry.get_date()
+            fecha_fin = self.fecha_fin_entry.get_date()
+            
+            # Validar que el rango no sea muy amplio (máximo 1 año)
+            dias_diferencia = (fecha_fin - fecha_inicio).days
+            if dias_diferencia > 365:
+                messagebox.showwarning(
+                    "Rango muy amplio", 
+                    "Por favor seleccione un rango menor a 1 año para evitar problemas de rendimiento."
+                )
+                return
+            
+            sede = self.sede_var.get().split(" - ")[0]
+            
+            # Limpiar datos previos y almacenar parámetros para carga paralela
+            self.cached_ventas_tra = []  # Limpiar datos anteriores
+            self.tra_full_loading_started = False  # Resetear estado de carga paralela
+            self.tra_fecha_inicio = fecha_inicio
+            self.tra_fecha_fin = fecha_fin
+            self.tra_sede_codigo = sede
+            
+            # Mostrar progreso
+            try:
+                self.api_status.config(text="Cargando datos TRA...", foreground="#004C97")
+            except Exception:
+                pass
+            # Mostrar barra global en modo indeterminado para indicar trabajo en progreso
+            try:
+                self.global_progress.pack(side=tk.RIGHT, padx=10)
+                self.global_progress.config(mode="indeterminate")
+                self.global_progress.start(10)
+            except Exception:
+                pass
+
+            self.log(f"Cargando ventas TRA desde {fecha_inicio} hasta {fecha_fin} para sede {sede}", "INFO")
+            
+            # Carga rápida inicial (limitada) para no bloquear la UI
+            datos_iniciales = self.db_manager.obtener_ventas_completas_tra(fecha_inicio, fecha_fin, sede, limit=300)
+            
+            if not datos_iniciales:
+                messagebox.showinfo("Sin resultados", "No se encontraron ventas para ese rango y sede.")
+                self.api_status.config(text="API: Lista", foreground="green")
+                return
+
+            # Procesar datos iniciales
+            from pal.services.tra import clasificar_rotacion
+            
+            self.cached_ventas_tra = clasificar_rotacion(datos_iniciales)
+            self.tra_last_refresh = datetime.now()
+            
+            # Debug: verificar formato de datos después de clasificar
+            if self.cached_ventas_tra:
+                primer_dato = self.cached_ventas_tra[0]
+                self.tra_debug_log(f"Formato datos clasificados: {len(primer_dato)} campos -> Rotación: {primer_dato[6] if len(primer_dato) > 6 else 'N/A'}")
+            
+            self.log(f"Carga inicial: {len(self.cached_ventas_tra)} productos procesados", "INFO")
+            
+            # Aplicar filtros y mostrar datos
+            self.aplicar_filtro_tra()
+            
+            # Iniciar carga completa en segundo plano una sola vez
+            try:
+                if not getattr(self, 'tra_full_loading_started', False):
+                    self.tra_full_loading_started = True
+                    threading.Thread(target=self._background_load_ventas_tra, daemon=True).start()
+                    self.tra_debug_log("Carga paralela de ventas TRA iniciada")
+            except Exception as e:
+                self.log(f"No se pudo iniciar carga paralela TRA: {e}", "ERROR")
+            
+        except Exception as e:
+            error_msg = f"Error cargando datos TRA: {str(e)}"
+            self.log(error_msg, "ERROR")
+            messagebox.showerror("Error", error_msg)
+            try:
+                self.api_status.config(text="API: Error", foreground="red")
+            except Exception:
+                pass
+            try:
+                self.global_progress.stop()
+                self.global_progress.pack_forget()
+            except Exception:
+                pass
+    
+    def on_tra_row_selected(self, event=None):
+        """Log detallado al seleccionar una fila del TRA Treeview (solo en modo debug)."""
+        try:
+            if not getattr(self, 'tra_debug', False):
+                return
+            if not hasattr(self, 'tra_tree'):
+                return
+            sel = self.tra_tree.selection()
+            if not sel:
+                return
+            item = self.tra_tree.item(sel[0])
+            vals = item.get('values') or []
+            if len(vals) < 7:
+                return
+            codigo = str(vals[0])
+            desc = str(vals[1])
+            rotacion = str(vals[2])
+            try:
+                neto = float(vals[3])
+            except Exception:
+                neto = 0.0
+            try:
+                stock_actual = int(vals[4])
+            except Exception:
+                stock_actual = 0
+            try:
+                stock_ideal = int(vals[5])
+            except Exception:
+                stock_ideal = 0
+
+            # Intervalo de fechas desde el UI
+            try:
+                fi = self.fecha_inicio_entry.get_date()
+                ff = self.fecha_fin_entry.get_date()
+            except Exception:
+                from datetime import datetime
+                fi = ff = datetime.now().date()
+
+            msg = (
+                f"Selección TRA -> Código: {codigo} | Desc: {desc} | Rotación: {rotacion}\n"
+                f"Intervalo: {fi} a {ff} | Ventas (neto): {neto} | Stock: {stock_actual} | Stock ideal: {stock_ideal}"
+            )
+            self.tra_debug_log(msg)
+        except Exception as e:
+            # No queremos romper selección por logs
+            self.tra_debug_log(f"Error en on_tra_row_selected: {e}")
+    
+    def _on_tra_mouse_motion(self, event):
+        """Maneja el movimiento del mouse para mostrar tooltips TRA"""
+        try:
+            if not hasattr(self, 'tra_tooltip') or not hasattr(self, 'tra_tree'):
+                self.tra_debug_log("Tooltip o tree no disponible")
+                return
+            
+            # Obtener item bajo el cursor
+            item = self.tra_tree.identify_row(event.y)
+            if not item:
+                self.tra_tooltip.hide_tooltip()
+                return
+                
+            # Obtener datos del item
+            values = self.tra_tree.item(item, 'values')
+            if not values:
+                self.tra_debug_log("No hay valores en el item")
+                return
+                
+            self.tra_debug_log(f"Valores del item: {values} (longitud: {len(values)})")
+                
+            # Ajustar índices según la nueva estructura de columnas
+            # Columnas: Código, Descripción, Rotación, Neto, Representación %, Stock Actual, Stock Ideal, Días restantes
+            if len(values) < 8:
+                self.tra_debug_log(f"Item con pocos valores: {len(values)}")
+                return
+                
+            codigo = str(values[0])
+            descripcion = str(values[1])
+            rotacion = str(values[2])
+            
+            try:
+                neto = float(values[3])
+            except (ValueError, IndexError):
+                neto = 0.0
+                
+            # Saltar la columna de Representación % (index 4)
+            try:
+                stock_actual = int(values[5])  # Stock Actual
+            except (ValueError, IndexError):
+                stock_actual = 0
+                
+            try:
+                stock_ideal = int(values[6])  # Stock Ideal
+            except (ValueError, IndexError):
+                stock_ideal = 0
+            
+            self.tra_debug_log(f"Mostrando tooltip para: {codigo} - {descripcion[:20]}...")
+            
+            # Mostrar tooltip con información completa
+            self.tra_tooltip.show_tooltip(
+                event, codigo, descripcion, neto, rotacion, stock_actual, stock_ideal
+            )
+            
+        except Exception as e:
+            self.tra_debug_log(f"Error en tooltip motion: {str(e)}")
+
+    def calcular_stock_ideal_producto(self, neto_ventas):
+        """Calcula el stock ideal para un producto basado en sus ventas netas"""
+        try:
+            fecha_inicio = self.fecha_inicio_entry.get_date()
+            fecha_fin = self.fecha_fin_entry.get_date()
+            dias_periodo = (fecha_fin - fecha_inicio).days or 1
+            promedio_diario = neto_ventas / dias_periodo if dias_periodo else 0
+            ciclo_reposicion_dias = 30
+            factor_seguridad = 1.25
+            factor_crecimiento = 1.15
+            stock_ideal = promedio_diario * ciclo_reposicion_dias * factor_seguridad * factor_crecimiento
+            return max(0, int(round(stock_ideal, 0)))
+        except Exception as e:
+            self.log(f"Error calculando stock ideal: {str(e)}", "ERROR")
+            return 0
+    
+    def recalcular_stock_ideal_tra(self):
+        """Recalcula el stock ideal para todos los productos TRA mostrados"""
+        try:
+            # Verificar tanto tra_ventas_datos (método antiguo) como cached_ventas_tra (nuevo método)
+            if (not hasattr(self, 'tra_ventas_datos') or not self.tra_ventas_datos) and \
+               (not hasattr(self, 'cached_ventas_tra') or not self.cached_ventas_tra):
+                messagebox.showwarning("Sin datos", "Primero debe cargar los datos TRA")
+                return
+            
+            self.log("Recalculando stock ideal para productos TRA...", "INFO")
+            
+            # Usar los datos cacheados y reaplicar los filtros para refrescar la vista
+            if hasattr(self, 'cached_ventas_tra') and self.cached_ventas_tra:
+                self.aplicar_filtro_tra()  # Esto recalculará y mostrará todo
+            elif hasattr(self, 'tra_ventas_datos_filtrados') and self.tra_ventas_datos_filtrados:
+                self.mostrar_pagina_tra()  # Método legacy
+            else:
+                # Si no hay datos filtrados, usar el método legacy
+                datos_a_usar = getattr(self, 'tra_ventas_datos', [])
+                if datos_a_usar:
+                    self.tra_tree.delete(*self.tra_tree.get_children())
+                    for fila in datos_a_usar[:self.tra_page_size]:  # Mostrar solo primera página
+                        try:
+                            if len(fila) >= 7:
+                                codigo, desc, _, _, _, neto, rotacion = fila
+                            elif len(fila) >= 6:
+                                codigo, desc, _, _, _, neto = fila
+                                rotacion = "SIN CLASIFICAR"
+                            else:
+                                continue
+                                
+                            # Calcular stock ideal
+                            stock_ideal = self.calcular_stock_ideal_producto(neto)
+                            
+                            # Determinar tag de color según rotación
+                            tag_rotacion = rotacion.lower() if rotacion else "sin_clasificar"
+                            
+                            self.tra_tree.insert(
+                                "", tk.END,
+                                values=(codigo, desc, rotacion, round(neto, 2), stock_ideal),
+                                tags=(tag_rotacion,)
+                            )
+                        except Exception as e:
+                            self.log(f"Error procesando fila en recalcular: {fila} -> {e}", "ERROR")
+                            continue
+            
+            self.log("Stock ideal recalculado correctamente", "SUCCESS")
+            
+        except Exception as e:
+            self.log(f"Error recalculando stock ideal: {str(e)}", "ERROR")
+            messagebox.showerror("Error", f"Error al recalcular stock ideal: {str(e)}")
+    
+    def calcular_dias_restantes(self, stock_actual: int, neto_ventas: float, fecha_inicio, fecha_fin) -> int:
+        """Calcula los días restantes antes de romper stock según promedio diario de ventas"""
+        try:
+            dias_periodo = (fecha_fin - fecha_inicio).days or 1
+            promedio_diario = neto_ventas / dias_periodo if dias_periodo else 0
+            if promedio_diario <= 0:
+                return 0  # Sin consumo o regresos netos, no decrementa stock
+            return max(0, int(stock_actual // promedio_diario))
+        except Exception as e:
+            self.log(f"Error calculando días restantes: {str(e)}", "ERROR")
+            return 0
+    
+    def obtener_stock_actual_bulk(self, codigos: list, deposito: str) -> dict:
+        """Obtiene stock actual por código en un depósito específico usando una sola consulta"""
+        try:
+            if not codigos:
+                return {}
+            # Evitar IN () muy grande dividiendo en chunks si es necesario
+            MAX_IN = 900  # límite seguro para SQL Server
+            resultado = {}
+            for i in range(0, len(codigos), MAX_IN):
+                chunk = codigos[i:i+MAX_IN]
+                placeholders = ",".join(["?"] * len(chunk))
+                sql = (
+                    f"SELECT c_codarticulo, SUM(n_cantidad) "
+                    f"FROM MA_DEPOPROD WITH (NOLOCK) "
+                    f"WHERE c_coddeposito = ? AND c_codarticulo IN ({placeholders}) "
+                    f"GROUP BY c_codarticulo"
+                )
+                params = [deposito] + chunk
+                rows = self.db_manager.fetch_data(sql, params)
+                for cod, sum_qty in rows:
+                    try:
+                        resultado[str(cod)] = int(sum_qty or 0)
+                    except Exception:
+                        resultado[str(cod)] = 0
+                # asegurar claves para todos los códigos del chunk
+                for cod in chunk:
+                    resultado.setdefault(str(cod), 0)
+            return resultado
+        except Exception as e:
+            self.log(f"Error obteniendo stock actual: {str(e)}", "ERROR")
+            return {}
+    
+    def calcular_stock_ideal(self, fecha_inicio, fecha_fin):
+        """Método legacy para compatibilidad con DataFrames"""
+        if not hasattr(self, 'tra_ventas_df') or self.tra_ventas_df.empty:
+            return
+
+        df = self.tra_ventas_df.copy()
+    
+        dias_periodo = (fecha_fin - fecha_inicio).days or 1  # evitar división por cero
+        promedio_diario = df['neto'] / dias_periodo
+    
+        # Parámetros para el cálculo
+        ciclo_reposicion_dias = 30
+        stock_ideal = promedio_diario * ciclo_reposicion_dias * 1.25 * 1.15
+    
+        df['stock_ideal'] = stock_ideal.round(0).astype(int)
+
+        self.tra_ventas_df = df
+
+
+
+
+
+
     def show_records_view(self):
         self.main_notebook.select(self.records_tab)
 
     def show_messaging_view(self):
         self.main_notebook.select(self.messaging_tab)
 
-    def setup_messaging_tab(self):
-        frame = ttk.Frame(self.messaging_tab)
-        frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
-    
-        # Botones superiores
-        top_frame = ttk.Frame(frame)
-        top_frame.pack(fill=tk.X)
-    
-        btn_masivo = ttk.Button(top_frame, 
-                        text="▶ Iniciar envío masivo", 
-                        command=self.enviar_a_todos)
-        btn_masivo.pack(side=tk.LEFT)
-        self.buttons['btn_envio_masivo'] = btn_masivo  # 
-    
-    
-        ttk.Button(top_frame,
-                text="🔄 Limpiar Logs",
-                command=self.limpiar_logs).pack(side=tk.RIGHT)
-    
-        # Panel de logs con scroll
-        log_frame = ttk.Frame(frame)
-        log_frame.pack(fill=tk.BOTH, expand=True)
-    
-        self.logs_text = tk.Text(log_frame, wrap=tk.WORD, state='normal')
-        vsb = ttk.Scrollbar(log_frame, command=self.logs_text.yview)
-        self.logs_text.configure(yscrollcommand=vsb.set)
-    
-        # Configurar tags para colores
-        self.logs_text.tag_config('DEBUG', foreground='gray')
-        self.logs_text.tag_config('INFO', foreground='black')
-        self.logs_text.tag_config('WARNING', foreground='orange')
-        self.logs_text.tag_config('ERROR', foreground='red')
-        self.logs_text.tag_config('SUCCESS', foreground='green')
-    
-        # Layout
-        self.logs_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        vsb.pack(side=tk.RIGHT, fill=tk.Y)
-    
-        # Contador de mensajes
-        self.log_counter = 0
-        self.max_logs = 200  # Máximo de líneas antes de limpiar
-
-        programar_frame = ttk.Frame(frame)
-        programar_frame.pack(fill=tk.X, pady=10)
-
-        ttk.Button(programar_frame, 
-                    text="⏰ Programar Envío", 
-                    command=self.mostrar_ventana_programacion).pack(side=tk.LEFT)
-
-    def mostrar_ventana_programacion(self):
-        # Ventana para programar envío o disponibilidad
-        ventana = tk.Toplevel(self.root)
-        ventana.title("Programar Envío/Disponibilidad")
-        ventana.geometry("400x470")
-
-        # Selector de tipo de acción
-        tipo_frame = ttk.LabelFrame(ventana, text="Tipo de Acción")
-        tipo_frame.grid(row=0, column=0, padx=10, pady=10, sticky="ew")
-        self.tipo_envio_var = tk.StringVar(value="")
-        ttk.Radiobutton(tipo_frame, text="Entrega", variable=self.tipo_envio_var,
-                        value="ENTREGA", command=self._mostrar_opciones_envio).pack(side=tk.LEFT, padx=10)
-        ttk.Radiobutton(tipo_frame, text="Disponibilidad", variable=self.tipo_envio_var,
-                        value="DISPONIBILIDAD", command=self._mostrar_opciones_envio).pack(side=tk.LEFT, padx=10)
-
-        # Contenedor de opciones oculto hasta seleccionar tipo
-        self.opciones_frame = ttk.Frame(ventana)
-        self.opciones_frame.grid(row=1, column=0, padx=10, pady=10, sticky="nsew")
-        self.opciones_frame.grid_remove()
-
-        # Campo para ingresar uno o más números de teléfono (solo para 'Entrega')
-        self.numeros_frame = ttk.LabelFrame(self.opciones_frame, text="Número(s) de Cliente")
-        self.numeros_frame.grid(row=0, column=0, sticky="ew", pady=5)
-        ttk.Label(self.numeros_frame, text="Teléfono(s) (separar con coma):").grid(row=0, column=0, sticky="w", pady=5)
-        self.entry_numeros = ttk.Entry(self.numeros_frame)
-        self.entry_numeros.grid(row=1, column=0, sticky="ew", pady=5)
-
-        # Frame para seleccionar fecha y hora (ambos tipos)
-        self.calendar_frame = ttk.LabelFrame(self.opciones_frame, text="Fecha y Hora")
-        self.calendar_frame.grid(row=1, column=0, sticky="ew", pady=5)
-        ttk.Label(self.calendar_frame, text="Fecha:").grid(row=0, column=0, sticky="w", pady=5)
-        self.calendario_sched = Calendar(self.calendar_frame, selectmode='day', date_pattern='mm/dd/y')
-        self.calendario_sched.grid(row=0, column=1, sticky="ew", pady=5)
-        ttk.Label(self.calendar_frame, text="Hora:").grid(row=1, column=0, sticky="w", pady=5)
-        self.spin_hora = ttk.Spinbox(self.calendar_frame, from_=0, to=23, width=5)
-        self.spin_hora.grid(row=1, column=1, sticky="w")
-        self.spin_minuto = ttk.Spinbox(self.calendar_frame, from_=0, to=59, width=5)
-        self.spin_minuto.grid(row=1, column=1, sticky="e")
-
-        # Botón para guardar programación
-        ttk.Button(ventana, text="Programar", command=self.guardar_envio_programado) \
-            .grid(row=2, column=0, pady=15)
-
-    def _mostrar_opciones_envio(self):
-        tipo = self.tipo_envio_var.get()
-        if tipo:
-            self.opciones_frame.grid()
-            # Mostrar calendario siempre
-            self.calendar_frame.grid()
-            # Mostrar campo de números solo para envío
-            if tipo == "ENTREGA":
-                self.numeros_frame.grid()
-            else:
-                self.numeros_frame.grid_remove()
-        else:
-            self.opciones_frame.grid_remove()
-
-    def guardar_envio_programado(self):
-        try:
-            tipo = self.tipo_envio_var.get()
-            if not tipo:
-                messagebox.showerror("Error", "Debe seleccionar un tipo de acción.")
-                return
-
-            # Construir fecha y hora
-            fecha_str = self.calendario_sched.get_date()
-            fecha_completa = datetime.strptime(
-                f"{fecha_str} {self.spin_hora.get().zfill(2)}:{self.spin_minuto.get().zfill(2)}:00",
-                "%m/%d/%Y %H:%M:%S"
-            )
-
-            if tipo == "ENTREGA":
-                numeros_texto = self.entry_numeros.get().strip()
-                if not numeros_texto:
-                    messagebox.showerror("Error", "Ingrese al menos un número de teléfono.")
-                    return
-                numeros = [n.strip() for n in numeros_texto.split(',') if n.strip()]
-                if not all(re.match(r"^\d{7,15}$", n) for n in numeros):
-                    messagebox.showerror("Error", "Formato de número inválido. Use solo dígitos (7-15 caracteres).")
-                    return
-            
-                for num in numeros:
-                    self.db_manager.execute_query(
-                        "INSERT INTO envios_programados (numero_cliente, fecha_programada, tipo_envio, estado) VALUES (?, ?, ?, 'PENDIENTE')",
-                        (num, fecha_completa, tipo)
-                    )
-                messagebox.showinfo("Éxito", f"Envíos programados para {len(numeros)} número(s) como 'ENTREGA'.")
-
-            elif tipo == "DISPONIBILIDAD":
 
 
-                clientes = self.db_manager.fetch_data(
-                    """SELECT c.numero_cliente, c.C_CODIGO 
-                    FROM clientes c
-                    WHERE c.C_CODIGO IS NOT NULL 
-                    AND c.numero_cliente IS NOT NULL"""
-                )
-            
-                if not clientes:
-                    messagebox.showwarning("Sin clientes", "No hay clientes válidos con productos asociados")
-                    return
-
-                envios_creados = 0
-                errores = 0
-            
-                for numero_cliente, codigo_producto in clientes:
-                    try:
-                        # Validar número de cliente
-                        if not re.match(r'^58\d{10}$', f"58{numero_cliente.lstrip('0')}"):
-                            raise ValueError(f"Número inválido: {numero_cliente}")
-                    
-                        # Verificar existencia del producto
-                        if not self.db_manager.fetch_data(
-                            "SELECT 1 FROM MA_PRODUCTOS WHERE C_CODIGO = ?",
-                            (codigo_producto,)
-                        ):
-                            raise ValueError(f"Producto {codigo_producto} no existe")
-
-                        # Verificar stock
-                        stock_result = self.db_manager.fetch_data(
-                            """SELECT n_cantidad 
-                            FROM MA_DEPOPROD 
-                            WHERE c_codarticulo = ? 
-                            AND c_coddeposito = '0301'""",
-                            (codigo_producto,)
-                        )  
-                    
-                        if not stock_result or stock_result[0][0] <= 0:
-                            continue  # Saltar clientes sin stock
-                        
-                        # Insertar registro
-                        self.db_manager.execute_query(
-                            """INSERT INTO envios_programados 
-                            (numero_cliente, fecha_programada, tipo_envio, estado, codigo_producto)
-                            VALUES (?, ?, ?, ?, ?)""",
-                            (numero_cliente, fecha_completa, tipo, 'PENDIENTE', codigo_producto)
-                        )
-                        envios_creados += 1
-                    
-                    except Exception as e:
-                        errores += 1
-                        self.log(f"Error cliente {numero_cliente}: {str(e)}", "ERROR")
-
-                messagebox.showinfo("Resumen", 
-                    f"Envíos creados: {envios_creados}\n"
-                    f"Errores: {errores}\n"
-                    f"Clientes sin stock: {len(clientes) - envios_creados - errores}")
-
-            else:
-                messagebox.showerror("Error", "Tipo de envío no reconocido")
-
-        except Exception as e:
-            messagebox.showerror("Error de programación", str(e))
 
 
-    def limpiar_logs(self):
-        self.logs_text.delete('1.0', tk.END)
-        self.logs_counter = 0
+
 
     def log(self, message: str, level: str = 'INFO'):
-        """Registrar mensaje en el panel de debug"""
+        """Registrar mensaje en el panel de debug de forma segura.
+        Si el panel de logs aún no existe (por ejemplo, si el módulo de mensajería está deshabilitado
+        o la UI no ha terminado de inicializarse), simplemente hace un print de respaldo.
+        """
         levels = ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'SUCCESS']
-        if level not in levels  :
+        if level not in levels:
             level = 'INFO'
-    
+
+        # Asegurar contadores por defecto
+        if not hasattr(self, 'log_counter'):
+            self.log_counter = 0
+        if not hasattr(self, 'max_logs'):
+            self.max_logs = 200
+
         timestamp = time.strftime("%H:%M:%S")
         log_entry = f"[{timestamp}] {message}\n"
-    
-    # Rotar logs si excede el máximo
-        if self.log_counter >= self.max_logs:
-            self.limpiar_logs()
-    
-        self.logs_text.configure(state='normal')
-        self.logs_text.insert(tk.END, log_entry, level)
-        self.logs_text.see(tk.END)  # Auto-scroll
-        self.logs_text.configure(state='disabled')
-        self.log_counter += 1
+
+        # Rotar logs si excede el máximo
+        try:
+            if self.log_counter >= self.max_logs:
+                self.limpiar_logs()
+        except Exception:
+            # Si algo falla en la rotación, no bloquear el flujo de la app
+            pass
+
+        # Insertar en panel de logs si existe; de lo contrario, respaldo a consola
+        if hasattr(self, 'logs_text') and self.logs_text:
+            try:
+                self.logs_text.configure(state='normal')
+                self.logs_text.insert(tk.END, log_entry, level)
+                self.logs_text.see(tk.END)  # Auto-scroll
+                self.logs_text.configure(state='disabled')
+                self.log_counter += 1
+                return
+            except Exception:
+                # En caso de error con el widget, hacer respaldo a consola
+                pass
+
+        # Respaldo a consola si no hay UI de logs disponible
+        try:
+            print(log_entry.strip())
+        except Exception:
+            # Último recurso: ignorar
+            pass
+
+    def limpiar_logs(self):
+        """Limpia el panel de logs y reinicia el contador de manera segura."""
+        # Reiniciar contador siempre
+        self.log_counter = 0
+        # Limpiar el widget si existe
+        if hasattr(self, 'logs_text') and self.logs_text:
+            try:
+                self.logs_text.configure(state='normal')
+                self.logs_text.delete('1.0', tk.END)
+                self.logs_text.configure(state='disabled')
+            except Exception:
+                # No bloquear si el widget no está listo
+                pass
 
     
     def load_connection_settings(self):
@@ -2403,6 +1787,12 @@ class DatabaseApp:
 
                         threading.Thread(target=self._init_jerarquia_async, daemon=True).start()
 
+                    if self.modules_enabled.get("tra", False):
+                        try:
+                            self.cargar_jerarquia_tra()
+                        except Exception as e:
+                            self.log(f"Error inicial cargando jerarquía TRA: {e}", "ERROR")
+
                     total_elapsed = time.perf_counter() - total_start
                     self.log(f"🏁 App inicializada en {total_elapsed:.2f}s", "INFO")
 
@@ -2418,126 +1808,9 @@ class DatabaseApp:
             )
             self.show_settings()
 
-    def cargar_eventos_calendario(self):
-        try:
-            if not self.db_manager.conn:
-                return
-            eventos = self.db_manager.fetch_data(
-                "SELECT fecha_programada, estado, tipo_envio FROM envios_programados"
-            )
-        
-            self.cal.calevent_remove('all')
-        
-            for fecha_obj, estado, tipo in eventos:  # Recibir directamente el datetime
-                fecha = fecha_obj.date()  # Convertir datetime a date
-                tags = 'pendiente' if estado == 'PENDIENTE' else 'completado'
-                self.cal.calevent_create(
-                    fecha,
-                    f"{tipo} - {estado}",
-                    tags=tags
-                )
-        
-            self.cal.tag_config('pendiente', background='#FFD700', foreground='black')
-            self.cal.tag_config('completado', background='#90EE90', foreground='black')
-        
-        except Exception as e:
-            self.log(f"Error cargando eventos: {str(e)}", "ERROR")
 
-    def setup_records_tab(self):
-        # Panel principal
-        main_frame = ttk.Frame(self.records_tab)
-        main_frame.pack(fill=tk.BOTH, expand=True)
-        
-        # Panel izquierdo (Formulario)
-        form_frame = ttk.Frame(main_frame, width=300)
-        form_frame.pack(side=tk.LEFT, fill=tk.Y, padx=10, pady=10)
-        
-        # Campos de entrada
-        self.create_input_fields(form_frame)
-        
-        # Panel derecho (Lista)
-        list_frame = ttk.Frame(main_frame)
-        list_frame.pack(side=tk.RIGHT, expand=True, fill=tk.BOTH)
-        
-        # Treeview
-        self.create_records_list(list_frame)
 
-    def create_input_fields(self, parent):
-        # Campo Número Cliente
-        input_frame = ttk.Frame(parent)
-        input_frame.pack(fill=tk.X, pady=5)
-        ttk.Label(input_frame, text="Número Cliente:").pack(side=tk.LEFT)
-        self.num_cliente = ttk.Entry(input_frame)
-        self.num_cliente.pack(side=tk.RIGHT, expand=True, fill=tk.X)
-        
-        # Campo Código Producto
-        input_frame = ttk.Frame(parent)
-        input_frame.pack(fill=tk.X, pady=5)
-        ttk.Label(input_frame, text="Código Producto:").pack(side=tk.LEFT)
-        self.cod_producto = ttk.Entry(input_frame)
-        self.cod_producto.pack(side=tk.RIGHT, expand=True, fill=tk.X)
-        
-        # Descripción
-        self.descripcion = ttk.Entry(parent, state="readonly")
-        self.descripcion.pack(fill=tk.X, pady=5)
-        
-        # Botones de acción
-        btn_frame = ttk.Frame(parent)
-        btn_frame.pack(fill=tk.X, pady=10)
-        
-        actions = [
-        # (Texto, Comando, Clave)
-        ('🔍 Buscar', self.search_records, 'btn_buscar'),
-        ('💾 Guardar', self.save_record, 'btn_guardar'),
-        ('🔄 Actualizar', self.update_record, 'btn_actualizar'),
-        ('🗑 Eliminar', self.delete_record, 'btn_eliminar')
-        ]
-    
-    # Ahora cada iteración recibirá los 3 valores necesarios
-        for text, cmd, key in actions:
-            btn = ttk.Button(btn_frame, text=text, command=cmd)
-            btn.pack(side=tk.LEFT, padx=2, fill=tk.X, expand=True)
-            self.buttons[key] = btn
 
-        # Filtro por fecha
-        fecha_frame = ttk.Frame(parent)
-        fecha_frame.pack(fill=tk.X, pady=5)
-    
-        ttk.Label(fecha_frame, text="Desde:").pack(side=tk.LEFT)
-        self.fecha_inicio = DateEntry(fecha_frame)
-        self.fecha_inicio.pack(side=tk.LEFT, padx=5)
-        
-        ttk.Label(fecha_frame, text="Hasta:").pack(side=tk.LEFT)
-        self.fecha_fin = DateEntry(fecha_frame)
-        self.fecha_fin.pack(side=tk.LEFT, padx=5)
-    
-        ttk.Button(
-            fecha_frame, 
-            text="Filtrar por Fecha", 
-            command=self.buscar_por_fecha
-        ).pack(side=tk.RIGHT)
-
-    def create_records_list(self, parent):
-        # Treeview
-        tree_frame = ttk.Frame(parent)
-        tree_frame.pack(fill=tk.BOTH, expand=True)
-        
-        self.tree = ttk.Treeview(tree_frame, columns=("ID", "Número", "Código"), show="headings")
-        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=vsb.set)
-        
-        # Configurar columnas
-        self.tree.heading("ID", text="ID")
-        self.tree.heading("Número", text="Número Cliente")
-        self.tree.heading("Código", text="Código Producto")
-        
-        self.tree.column("ID", width=80, anchor=tk.CENTER)
-        self.tree.column("Número", width=150)
-        self.tree.column("Código", width=200)
-        
-        # Layout
-        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        vsb.pack(side=tk.RIGHT, fill=tk.Y)
 
     def create_status_panel(self):
         status_frame = ttk.Frame(self.root, style="Status.TFrame")
@@ -2601,7 +1874,8 @@ class DatabaseApp:
             ("estadisticas",   "Estadísticas"),
             ("calendario",     "Calendario"),
             ("stock",          "Alertas Stock"),
-            ("tra",          "T.R.A")
+            ("tra",          "T.R.A"),
+            ("pilot_ui",      "🚀 Piloto UI Moderna")
         ]):
             var = tk.BooleanVar(value=self.modules_enabled.get(key, False))
             cb  = ttk.Checkbutton(modules_frame, text=label, variable=var)
@@ -2732,6 +2006,15 @@ class DatabaseApp:
             self.api_state = "error"
             self.api_status.config(text="API: Error", foreground="red")
 
+        # Habilitar/Deshabilitar UI dependiente de BD
+        try:
+            if status_type == 'connected':
+                self._set_ui_connected(True)
+            elif status_type in ('disconnected', 'error'):
+                self._set_ui_connected(False)
+        except Exception:
+            pass
+
     def show_temp_notification(self, message: str, duration: int = 3000):
         """Mostrar notificación temporal en la esquina inferior derecha"""
         notification = tk.Toplevel(self.root)
@@ -2841,9 +2124,39 @@ class DatabaseApp:
             return  # Prevenir error si no hay botones registrados
     
         for nombre, boton in self.buttons.items():
-            boton.config(state=estado)
-        # Cambiar color para mejor feedback visual
-            boton.config(style="TButton" if estado == 'normal' else "Disabled.TButton")
+            try:
+                boton.config(state=estado)
+                # Cambiar color para mejor feedback visual
+                boton.config(style="TButton" if estado == 'normal' else "Disabled.TButton")
+            except Exception:
+                pass
+
+    def _set_ui_connected(self, connected: bool):
+        """Habilita/deshabilita elementos de UI dependientes de BD y módulos."""
+        if not hasattr(self, 'buttons'):
+            self.buttons = {}
+        # Reglas por módulo requerido
+        required_module = {
+            'btn_envio_masivo': 'envio_mensajes',
+            'btn_programar_envio': 'envio_mensajes',
+            'btn_export_csv': 'stock',
+            'btn_stock_reload': 'stock',
+            'btn_tra_cargar': 'tra',
+            'btn_calendar_refresh': 'calendario',
+            # CRUD registros no dependen de módulo, solo de BD
+            'btn_buscar': None,
+            'btn_guardar': None,
+            'btn_actualizar': None,
+            'btn_eliminar': None,
+        }
+        for key, btn in self.buttons.items():
+            try:
+                mod = required_module.get(key)
+                enable = connected and (mod is None or self.modules_enabled.get(mod, False))
+                btn.config(state='normal' if enable else 'disabled')
+                btn.config(style='TButton' if enable else 'Disabled.TButton')
+            except Exception:
+                continue
 
         
 
@@ -3035,9 +2348,182 @@ class DatabaseApp:
             self.enviando = False
         
         
-
+        
+        
+        
+    def _background_load_alertas_stock(self):
+        """Carga todas las alertas en segundo plano, en bloques, y refresca UI al llegar datos."""
+        try:
+            start = 1
+            chunk = 500
+            # Usar dict para evitar duplicados por código
+            existentes = {r[0]: r for r in (self.cached_alertas or [])}
+            while True:
+                rows = self.db_manager.obtener_alertas_stock_chunk(start_row=start, fetch_size=chunk, deposito='0301')
+                if not rows:
+                    break
+                for r in rows:
+                    existentes[str(r[0])] = r
+                self.cached_alertas = list(existentes.values())
+                # Refrescar vista en hilo principal
+                try:
+                    self.root.after(0, self.aplicar_filtro_stock)
+                except Exception:
+                    pass
+                start += chunk
+                time.sleep(0.2)  # Pequeña pausa para no saturar la BD
+            self.log("Carga paralela de alertas completada", "SUCCESS")
+        except Exception as e:
+            self.log(f"Error en carga paralela de alertas: {e}", "ERROR")
     
+    def _background_load_ventas_tra(self):
+        """Carga todas las ventas TRA en segundo plano, de forma incremental y con chunk adaptativo.
+        Realiza actualizaciones mínimas de UI mediante root.after para mantener la app responsiva.
+        """
+        try:
+            if not hasattr(self, 'tra_fecha_inicio') or not hasattr(self, 'tra_fecha_fin') or not hasattr(self, 'tra_sede_codigo'):
+                self.log("Faltan parámetros para carga TRA, cancelando carga paralela", "WARNING")
+                return
 
+            # Parámetros de chunk adaptativo
+            chunk_size = 1000
+            min_chunk = 200
+            max_chunk = 5000
+            target_ms = 150.0
+
+            start = 1
+            processed = 0
+            ui_last_refreshed_at = 0
+            chunk_index = 0
+            first_refresh_done = False
+
+            # Garantizar contenedor de datos
+            if not hasattr(self, 'cached_ventas_tra') or self.cached_ventas_tra is None:
+                self.cached_ventas_tra = []
+            # Conjunto para evitar duplicados por código
+            try:
+                seen_codes = set(str(r[0]) for r in self.cached_ventas_tra)
+            except Exception:
+                seen_codes = set()
+
+            self.tra_debug_log("Iniciando carga completa de datos TRA en background (adaptativa)...")
+
+            while True:
+                t0 = time.perf_counter()
+                rows = self.db_manager.obtener_ventas_por_producto_chunk(
+                    fecha_inicio=self.tra_fecha_inicio,
+                    fecha_fin=self.tra_fecha_fin,
+                    sede_codigo=self.tra_sede_codigo,
+                    start_row=start,
+                    fetch_size=int(chunk_size)
+                )
+                dt_ms = (time.perf_counter() - t0) * 1000.0
+
+                if not rows:
+                    break
+
+                # Agregar filas sin clasificar (6 campos), evitando duplicados por código
+                try:
+                    nuevos = []
+                    for r in rows:
+                        try:
+                            cod = str(r[0])
+                        except Exception:
+                            cod = None
+                        if not cod or cod in seen_codes:
+                            continue
+                        seen_codes.add(cod)
+                        nuevos.append(r)
+                    if nuevos:
+                        self.cached_ventas_tra.extend(nuevos)
+                except Exception:
+                    # Si falla por concurrencia (raro), recrear lista con filtro de duplicados
+                    cleaned = []
+                    for r in rows:
+                        try:
+                            cod = str(r[0])
+                        except Exception:
+                            cod = None
+                        if not cod or cod in seen_codes:
+                            continue
+                        seen_codes.add(cod)
+                        cleaned.append(r)
+                    self.cached_ventas_tra = list(self.cached_ventas_tra) + cleaned
+
+                processed += len(rows)
+                chunk_index += 1
+                start += int(chunk_size)
+
+                # Ajustar chunk de forma proporcional, limitado a rangos
+                try:
+                    factor = target_ms / max(1.0, dt_ms)
+                    factor = max(0.5, min(2.0, factor))
+                    chunk_size = int(max(min_chunk, min(max_chunk, chunk_size * factor)))
+                except Exception:
+                    pass
+
+                # Actualización mínima de UI: siempre al primer chunk, luego cada ~3000 filas
+                def _ui_update_slim(total=processed, last= len(rows), next_size=int(chunk_size)):
+                    try:
+                        self.tra_debug_log(f"+{last} (total {total}) en {dt_ms:.0f}ms, next_chunk={next_size}")
+                        # Actualizar estado textual
+                        try:
+                            self.api_status.config(text=f"Cargando TRA: {total} filas...", foreground="#004C97")
+                        except Exception:
+                            pass
+                        # Primer chunk: refrescar vistas para feedback temprano
+                        nonlocal first_refresh_done
+                        if not first_refresh_done:
+                            first_refresh_done = True
+                            self.aplicar_filtro_tra()
+                        else:
+                            # Refrescar de forma más espaciada
+                            if total - _ui_update_slim.last_shown >= 3000:
+                                _ui_update_slim.last_shown = total
+                                self.aplicar_filtro_tra()
+                    except Exception:
+                        pass
+                # stateful attr on function
+                if not hasattr(_ui_update_slim, 'last_shown'):
+                    _ui_update_slim.last_shown = 0
+                self.root.after(0, _ui_update_slim)
+
+                # Pequeña pausa cooperativa (evitar saturar BD/CPU)
+                time.sleep(0.05)
+
+            # Clasificación de rotación al finalizar (fuera de UI)
+            if self.cached_ventas_tra:
+                try:
+                    from pal.services.tra import clasificar_rotacion
+                    raw_snapshot = list(self.cached_ventas_tra)
+                    self.tra_debug_log(f"Clasificando rotación para {len(raw_snapshot)} registros...")
+                    classified = clasificar_rotacion(raw_snapshot)
+                    self.cached_ventas_tra = classified
+                except Exception as e:
+                    self.log(f"Error clasificando rotación TRA: {e}", "ERROR")
+
+            def _ui_finish(total=len(self.cached_ventas_tra) if self.cached_ventas_tra else 0):
+                try:
+                    self.aplicar_filtro_tra()
+                    self.log(f"Carga paralela de ventas TRA completada: {total} registros", "SUCCESS")
+                    try:
+                        self.api_status.config(text="API: Lista", foreground="green")
+                    except Exception:
+                        pass
+                    try:
+                        self.global_progress.stop()
+                        self.global_progress.pack_forget()
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+            self.root.after(0, _ui_finish)
+        except Exception as e:
+            self.log(f"Error en carga paralela de ventas TRA: {e}", "ERROR")
+            try:
+                self.root.after(0, lambda: (self.global_progress.stop(), self.global_progress.pack_forget()))
+            except Exception:
+                pass
     def delete_record(self):
         selected = self.tree.selection()
         if not selected:

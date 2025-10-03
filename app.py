@@ -37,7 +37,7 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from win10toast import ToastNotifier
 from PIL import Image, ImageTk
-from threading import Event
+from threading import Event, Timer
 
 
 CONFIG_FILE = 'db_config.ini'
@@ -324,10 +324,18 @@ class DatabaseApp:
                 except Exception:
                     pass
                 self.log("Datos de alertas actualizados desde BD", "INFO")
-                # Iniciar carga completa en segundo plano una sola vez
+            # Iniciar carga completa en segundo plano una sola vez
                 try:
                     if not getattr(self, 'stock_full_loading_started', False):
                         self.stock_full_loading_started = True
+                        
+                        # Debug: verificar total de registros disponibles
+                        try:
+                            total_count = self._get_total_stock_count()
+                            self.log(f"📊 [DEBUG] Registros totales disponibles en BD: {total_count}", "DEBUG")
+                        except Exception as debug_e:
+                            self.log(f"⚠️ [DEBUG] No se pudo obtener total de registros: {debug_e}", "DEBUG")
+                        
                         threading.Thread(target=self._background_load_alertas_stock, daemon=True).start()
                         self.log("Carga paralela de alertas iniciada", "INFO")
                 except Exception as e:
@@ -336,6 +344,89 @@ class DatabaseApp:
         except Exception as e:
             print(f"Error al actualizar alertas: {str(e)}")
             self.log(f"Error crítico al actualizar alertas: {str(e)}", "ERROR")
+    
+    def recargar_stock(self):
+        """Recarga completamente el módulo de stock: filtros, jerarquía y datos"""
+        if not self.modules_enabled.get("stock", False):
+            self.log("Módulo de stock deshabilitado", "WARNING")
+            return
+        
+        # Confirmar acción con el usuario
+        from tkinter import messagebox
+        if not messagebox.askyesno(
+            "Confirmar Recarga", 
+            "¿Está seguro de que desea recargar completamente el módulo de stock?\n\n"
+            "Esto incluirá:\n"
+            "• Recarga de filtros jerárquicos\n"
+            "• Actualización de alertas desde la BD\n"
+            "• Reinicio de la carga paralela\n"
+            "• Limpieza de cachés"
+        ):
+            return
+            
+        try:
+            # Verificar conexión
+            if not hasattr(self.db_manager, 'conn') or not self.db_manager.conn:
+                self.log("No hay conexión activa a la base de datos", "ERROR")
+                return
+            
+            # Mostrar progreso
+            try:
+                self.api_status.config(text="Recargando stock...", foreground="#004C97")
+                self.global_progress.pack(side=tk.RIGHT, padx=10)
+                self.global_progress.config(mode="indeterminate")
+                self.global_progress.start(10)
+            except Exception:
+                pass
+            
+            self.log("🔄 Iniciando recarga completa del módulo de stock...", "INFO")
+            
+            # 1. Resetear estado de carga paralela
+            self.stock_full_loading_started = False
+            
+            # 2. Limpiar caches
+            self.cached_alertas = []
+            self.last_refresh = None
+            if hasattr(self, 'all_jerarquia'):
+                self.all_jerarquia = {}
+            if hasattr(self, 'producto_jerarquia'):
+                self.producto_jerarquia = {}
+            
+            # 3. Recargar filtros jerárquicos
+            self.load_stock_filters()
+            self.log("✅ Filtros jerárquicos recargados", "SUCCESS")
+            
+            # 4. Forzar actualización de alertas
+            self.actualizar_alertas_stock(force_refresh=True)
+            self.log("✅ Alertas de stock actualizadas", "SUCCESS")
+            
+            # 5. Recargar jerarquía en hilo paralelo
+            threading.Thread(target=self._init_jerarquia_async, daemon=True).start()
+            self.log("✅ Recarga de jerarquía iniciada", "SUCCESS")
+            
+            # 6. Resetear página actual
+            self.current_page = 1
+            
+            # 7. Aplicar filtros actuales
+            self.aplicar_filtro_stock()
+            
+            self.log("🎉 Recarga del módulo de stock completada exitosamente", "SUCCESS")
+            
+        except Exception as e:
+            error_msg = f"Error recargando módulo de stock: {str(e)}"
+            self.log(error_msg, "ERROR")
+            try:
+                self.api_status.config(text="API: Error", foreground="red")
+            except Exception:
+                pass
+        finally:
+            # Ocultar progreso
+            try:
+                self.global_progress.stop()
+                self.global_progress.pack_forget()
+                self.api_status.config(text="API: Lista", foreground="green")
+            except Exception:
+                pass
 
     def mostrar_alertas_paginadas(self, datos):
         """Mostrar datos con estado de favoritos"""
@@ -2353,28 +2444,199 @@ class DatabaseApp:
         
     def _background_load_alertas_stock(self):
         """Carga todas las alertas en segundo plano, en bloques, y refresca UI al llegar datos."""
+        total_loaded = 0
+        chunk_count = 0
+        load_start_time = time.perf_counter()
+        
         try:
             start = 1
             chunk = 500
             # Usar dict para evitar duplicados por código
             existentes = {r[0]: r for r in (self.cached_alertas or [])}
+            initial_count = len(existentes)
+            
+            self.log(f"🔄 [DEBUG] Iniciando carga paralela de stock con {initial_count} registros existentes", "DEBUG")
+            
+            consecutive_failures = 0
+            max_consecutive_failures = 3
+            
             while True:
+                chunk_start_time = time.perf_counter()
                 rows = self.db_manager.obtener_alertas_stock_chunk(start_row=start, fetch_size=chunk, deposito='0301')
+                chunk_query_time = time.perf_counter() - chunk_start_time
+                
                 if not rows:
-                    break
+                    consecutive_failures += 1
+                    self.log(f"⚠️ [DEBUG] Chunk {chunk_count + 1}: Sin datos (fallo {consecutive_failures}/{max_consecutive_failures}) - consulta en {chunk_query_time:.2f}s", "DEBUG")
+                    
+                    if consecutive_failures >= max_consecutive_failures:
+                        self.log(f"🛑 [DEBUG] Deteniendo carga tras {consecutive_failures} fallos consecutivos", "DEBUG")
+                        break
+                    
+                    # Incrementar start para saltar posibles huecos
+                    start += chunk
+                    time.sleep(1)  # Pausa más larga tras error
+                    continue
+                else:
+                    consecutive_failures = 0  # Reset counter on success
+                
+                chunk_count += 1
+                new_records = 0
+                duplicates = 0
+                
                 for r in rows:
-                    existentes[str(r[0])] = r
+                    codigo_str = str(r[0])
+                    if codigo_str in existentes:
+                        duplicates += 1
+                    else:
+                        new_records += 1
+                    existentes[codigo_str] = r
+                
                 self.cached_alertas = list(existentes.values())
-                # Refrescar vista en hilo principal
-                try:
-                    self.root.after(0, self.aplicar_filtro_stock)
-                except Exception:
-                    pass
+                total_loaded += len(rows)
+                
+                # Log detallado del chunk
+                chunk_time = time.perf_counter() - chunk_start_time
+                total_time = time.perf_counter() - load_start_time
+                records_per_sec = total_loaded / total_time if total_time > 0 else 0
+                
+                self.log(
+                    f"📦 [DEBUG] Chunk {chunk_count}: {len(rows)} filas | "
+                    f"Nuevos: {new_records} | Duplicados: {duplicates} | "
+                    f"Total acum: {len(existentes)} | "
+                    f"Tiempo: {chunk_time:.2f}s | "
+                    f"Velocidad: {records_per_sec:.1f} reg/s", 
+                    "DEBUG"
+                )
+                
+                # Refrescar vista en hilo principal cada 3 chunks o al final
+                if chunk_count % 3 == 0 or len(rows) < chunk:
+                    try:
+                        self.root.after(0, self._update_ui_after_chunk, len(existentes), chunk_count)
+                    except Exception as e:
+                        self.log(f"⚠️ [DEBUG] Error actualizando UI: {e}", "DEBUG")
+                
                 start += chunk
-                time.sleep(0.2)  # Pequeña pausa para no saturar la BD
-            self.log("Carga paralela de alertas completada", "SUCCESS")
+                time.sleep(0.5)  # Pausa más larga para estabilidad
+                
+                # Si el chunk es menor que el tamaño esperado, probablemente sea el último
+                if len(rows) < chunk:
+                    self.log(f"🏁 [DEBUG] Último chunk detectado ({len(rows)} < {chunk})", "DEBUG")
+                    break
+            
+            # Estadísticas finales
+            total_time = time.perf_counter() - load_start_time
+            avg_time_per_chunk = total_time / chunk_count if chunk_count > 0 else 0
+            final_count = len(existentes)
+            net_new = final_count - initial_count
+            
+            # Verificar si la carga fue exitosa
+            if final_count < 1000:  # Menos de 1000 registros indica problema
+                self.log(
+                    f"⚠️ [DEBUG] Carga incompleta detectada: solo {final_count} registros. "
+                    f"Reintentando en 30 segundos...", 
+                    "WARNING"
+                )
+                # Programar reintento automático
+                threading.Timer(30.0, self._retry_stock_loading).start()
+            else:
+                self.log(
+                    f"✅ [DEBUG] Carga paralela completada: "
+                    f"{chunk_count} chunks | "
+                    f"{final_count} registros totales | "
+                    f"{net_new} nuevos | "
+                    f"Tiempo total: {total_time:.2f}s | "
+                    f"Promedio/chunk: {avg_time_per_chunk:.2f}s", 
+                    "SUCCESS"
+                )
+            
+            # Actualización final de UI
+            try:
+                self.root.after(0, self._finalize_stock_loading, final_count)
+            except Exception as e:
+                self.log(f"Error en actualización final: {e}", "ERROR")
+            
         except Exception as e:
-            self.log(f"Error en carga paralela de alertas: {e}", "ERROR")
+            self.log(f"❌ [DEBUG] Error en carga paralela de alertas: {e}", "ERROR")
+            # Log adicional para debugging
+            import traceback
+            self.log(f"❌ [DEBUG] Traceback: {traceback.format_exc()}", "ERROR")
+    
+    def _update_ui_after_chunk(self, total_records, chunk_number):
+        """Actualiza la UI después de cargar un chunk de datos"""
+        try:
+            # Actualizar filtros si es necesario
+            self.aplicar_filtro_stock()
+            
+            # Log de progreso en UI
+            estimated_pages = math.ceil(total_records / self.page_size)
+            self.log(f"📈 [UI] Chunk {chunk_number}: {total_records} registros | ~{estimated_pages} páginas estimadas", "DEBUG")
+            
+        except Exception as e:
+            self.log(f"Error actualizando UI después del chunk: {e}", "ERROR")
+    
+    def _finalize_stock_loading(self, final_count):
+        """Finaliza el proceso de carga de stock y actualiza estadísticas finales"""
+        try:
+            # Aplicar filtros finales
+            self.aplicar_filtro_stock()
+            
+            # Calcular páginas totales
+            total_pages = math.ceil(final_count / self.page_size)
+            
+            # Log final con estadísticas
+            self.log(
+                f"🏆 [FINAL] Carga completa: {final_count} registros | "
+                f"{total_pages} páginas totales | "
+                f"Tamaño de página: {self.page_size}", 
+                "SUCCESS"
+            )
+            
+            # Actualizar controles de paginación si existen
+            if hasattr(self, 'pagination_label'):
+                current_total_pages = math.ceil(len(self.cached_alertas) / self.page_size)
+                self.pagination_label.config(text=f"Página {self.current_page}/{current_total_pages}")
+            
+        except Exception as e:
+            self.log(f"Error finalizando carga de stock: {e}", "ERROR")
+    
+    def _get_total_stock_count(self):
+        """Obtiene el total de registros de alertas disponibles en la BD para debug"""
+        try:
+            query = """
+                SELECT COUNT(*) as total
+                FROM (
+                    SELECT c_codarticulo
+                    FROM MA_DEPOPROD d
+                        INNER JOIN MA_PRODUCTOS p ON d.c_codarticulo = p.C_CODIGO
+                        WHERE c_coddeposito = '0301'
+                        GROUP BY c_codarticulo
+                        HAVING SUM(n_cantidad) < 21
+                ) as subquery
+            """
+            result = self.db_manager.fetch_data(query)
+            return result[0][0] if result and result[0] else 0
+        except Exception as e:
+            self.log(f"Error obteniendo total de registros: {e}", "ERROR")
+            return 0
+    
+    def _retry_stock_loading(self):
+        """Reintenta la carga de stock automáticamente tras un fallo"""
+        try:
+            self.log("🔄 [AUTO-RETRY] Reintentando carga de stock automáticamente...", "INFO")
+            
+            # Resetear estado para permitir nueva carga
+            self.stock_full_loading_started = False
+            
+            # Limpiar datos parciales
+            if len(self.cached_alertas) < 1000:
+                self.cached_alertas = []
+            
+            # Forzar recarga
+            self.actualizar_alertas_stock(force_refresh=True)
+            
+        except Exception as e:
+            self.log(f"❌ [AUTO-RETRY] Error en reintento automático: {e}", "ERROR")
     
     def _background_load_ventas_tra(self):
         """Carga todas las ventas TRA en segundo plano, de forma incremental y con chunk adaptativo.

@@ -87,6 +87,9 @@ def setup_stock_tab(app):
 
     ttk.Button(action_frame, text="📥 Exportar CSV", 
                command=lambda: getattr(app, 'exportar_csv', lambda: None)()).pack(side=tk.LEFT, padx=5)
+    
+    ttk.Button(action_frame, text="🔄 Recargar", 
+               command=lambda: getattr(app, 'recargar_stock', lambda: None)()).pack(side=tk.LEFT, padx=5)
 
     pagination_frame = ttk.Frame(action_frame)
     pagination_frame.pack(side=tk.RIGHT)

@@ -35,10 +35,11 @@ class ProgramadorEnvios:
                     continue
 
                 ahora = datetime.now()
-                pendientes = self.db_manager.fetch_data(
+                pendientes = self.db_manager.fetch_data_threadsafe(
                     "SELECT id, numero_cliente FROM envios_programados "
                     "WHERE fecha_programada <= ? AND estado = 'PENDIENTE'",
-                    (ahora,)
+                    (ahora,),
+                    thread_name="envios"
                 )
                 self.app.log(f"Envíos pendientes encontrados: {len(pendientes)}", "DEBUG")
 
@@ -57,10 +58,11 @@ class ProgramadorEnvios:
         from datetime import timedelta
         
         ahora = datetime.now()
-        recordatorios = self.db_manager.fetch_data(
+        recordatorios = self.db_manager.fetch_data_threadsafe(
         "SELECT id, numero_cliente, tipo_envio FROM envios_programados "
         "WHERE fecha_programada BETWEEN ? AND ? AND estado = 'PENDIENTE'",
-        (ahora, ahora + timedelta(hours=24)))
+        (ahora, ahora + timedelta(hours=24)),
+        thread_name="envios")
     
         for id_envio, numero_cliente, tipo_envio in recordatorios:
             self.log(f"Enviando recordatorio ({tipo_envio}) a {numero_cliente}", "INFO")

@@ -164,7 +164,8 @@ def _get_tra_neto(item):
 
 def clasificar_rotacion_tra(ventas_data, total_ventas=None):
     """
-    Clasifica productos según su rotación basado en ventas
+    Clasifica productos según su rotación basado en porcentaje acumulado de ventas
+    Implementación optimizada con cache y manejo eficiente de memoria
     
     Args:
         ventas_data: Lista de datos de ventas
@@ -172,44 +173,70 @@ def clasificar_rotacion_tra(ventas_data, total_ventas=None):
         
     Returns:
         list: Lista de ventas con clasificación de rotación añadida
+        
+    Criterios de clasificación (Curva ABC optimizada):
+        - ALTA: productos en el primer 80% del neto acumulado
+        - MEDIA: productos entre 80% y 95% del neto acumulado  
+        - BAJA: productos desde 95% hasta 100% del neto acumulado
     """
     if not ventas_data:
         return []
         
     try:
-        # Calcular total si no se proporciona
+        # Validación rápida de entrada
+        if not isinstance(ventas_data, (list, tuple)):
+            return list(ventas_data) if ventas_data else []
+        
+        # Calcular total si no se proporciona (optimizado con generator)
         if total_ventas is None:
-            total_ventas = sum(_get_tra_neto(item) for item in ventas_data)
+            total_ventas = sum(_get_tra_neto(item) for item in ventas_data if item)
         
         if total_ventas <= 0:
             # Si no hay ventas, clasificar todo como SIN CLASIFICAR
             return [
                 list(item) + ['SIN CLASIFICAR'] if len(item) == 6 else list(item)
-                for item in ventas_data
+                for item in ventas_data if item
             ]
         
-        # Clasificar según porcentaje de participación
+        # Pre-calcular netos para evitar múltiples llamadas a _get_tra_neto
+        items_con_neto = [(item, _get_tra_neto(item)) for item in ventas_data if item]
+        
+        # Ordenar por neto descendente (más eficiente)
+        items_con_neto.sort(key=lambda x: x[1], reverse=True)
+        
+        # Calcular porcentajes acumulados y clasificar (optimizado)
+        neto_acumulado = 0.0
         ventas_clasificadas = []
-        for item in ventas_data:
-            item_list = list(item)
-            neto = _get_tra_neto(item)
-            porcentaje = (neto / total_ventas) * 100
+        total_ventas_inv = 1.0 / total_ventas  # Pre-calcular inverso para evitar divisiones
+        
+        for item, neto in items_con_neto:
+            neto_acumulado += neto
+            porcentaje_acumulado = neto_acumulado * total_ventas_inv * 100
             
-            # Clasificación según rangos de porcentaje
-            if porcentaje >= 5.0:
+            # Clasificación según porcentaje acumulado (optimizada con elif)
+            if porcentaje_acumulado <= 80.0:
                 rotacion = "ALTA"
-            elif porcentaje >= 1.0:
-                rotacion = "MEDIA" 
-            elif porcentaje > 0:
-                rotacion = "BAJA"
+            elif porcentaje_acumulado <= 95.0:
+                rotacion = "MEDIA"
             else:
-                rotacion = "SIN MOVIMIENTO"
+                rotacion = "BAJA"
             
-            # Añadir rotación si no existe
+            # Convertir a lista mutable para permitir mutaciones (pyodbc.Row no soporta append)
+            try:
+                item_list = list(item)
+            except Exception:
+                # Fallback: intentar copiar por slicing y convertir
+                item_list = list(item[:]) if hasattr(item, '__getitem__') else [item]
+            
             if len(item_list) == 6:
                 item_list.append(rotacion)
             elif len(item_list) > 6:
                 item_list[6] = rotacion
+            else:
+                # Completar con valores por defecto si es necesario
+                while len(item_list) < 6:
+                    item_list.append(None)
+                item_list.append(rotacion)
                 
             ventas_clasificadas.append(tuple(item_list))
         
@@ -217,7 +244,7 @@ def clasificar_rotacion_tra(ventas_data, total_ventas=None):
         
     except Exception as e:
         print(f"Error clasificando rotación: {e}")
-        return list(ventas_data)
+        return list(ventas_data) if ventas_data else []
 
 
 def obtener_stock_ideal_tra(neto_ventas, dias_periodo=365, dias_buffer=30):

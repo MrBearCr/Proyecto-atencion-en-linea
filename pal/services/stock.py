@@ -6,27 +6,74 @@ import os
 import math
 from datetime import datetime, timedelta
 
-def get_existencias_por_ubicacion(codigo, depositos, db_manager):
+def get_existencias_por_ubicacion(db_manager, codigo, depositos, use_cache=True):
     """
-    Obtiene existencias de un producto en ubicaciones específicas
+    Obtiene existencias de un producto en ubicaciones específicas con cache y optimizaciones
     
     Args:
+        db_manager: Instancia de DatabaseManager
         codigo: Código del producto
         depositos: Lista de códigos de depósito
-        db_manager: Instancia de DatabaseManager
+        use_cache: Si usar cache local (default True)
         
     Returns:
         int: Total de existencias
     """
-    placeholders = ','.join('?' for _ in depositos)
-    sql = (
-        f"SELECT SUM(n_cantidad) "
-        f"FROM MA_DEPOPROD "
-        f"WHERE c_codarticulo = ? AND c_coddeposito IN ({placeholders})"
-    )
-    params = [codigo] + depositos
-    result = db_manager.fetch_data(sql, params)
-    return int(result[0][0] or 0)
+    import hashlib
+    import time
+    
+    # Cache con TTL de 5 minutos para existencias
+    cache_key = hashlib.md5(f"{codigo}_{','.join(sorted(depositos))}".encode()).hexdigest()
+    cache_ttl = 300  # 5 minutos
+    
+    if use_cache and hasattr(get_existencias_por_ubicacion, '_cache'):
+        cached_data = get_existencias_por_ubicacion._cache.get(cache_key)
+        if cached_data and time.time() - cached_data['timestamp'] < cache_ttl:
+            return cached_data['value']
+    
+    # Consulta optimizada con índices
+    try:
+        placeholders = ','.join('?' for _ in depositos)
+        sql = (
+            f"SELECT ISNULL(SUM(n_cantidad), 0) "
+            f"FROM MA_DEPOPROD WITH (NOLOCK) "
+            f"WHERE c_codarticulo = ? AND c_coddeposito IN ({placeholders}) "
+            f"AND n_cantidad > 0"
+        )
+        params = [codigo] + depositos
+        
+        # Usar conexión thread-safe si está disponible
+        if hasattr(db_manager, 'fetch_data_threadsafe'):
+            result = db_manager.fetch_data_threadsafe(sql, params, thread_name="stock_existencias")
+        else:
+            result = db_manager.fetch_data(sql, params)
+        
+        existencias = int(result[0][0] or 0) if result else 0
+        
+        # Guardar en cache
+        if use_cache:
+            if not hasattr(get_existencias_por_ubicacion, '_cache'):
+                get_existencias_por_ubicacion._cache = {}
+            get_existencias_por_ubicacion._cache[cache_key] = {
+                'value': existencias,
+                'timestamp': time.time()
+            }
+            
+            # Limpiar cache antiguo (máximo 100 entradas)
+            if len(get_existencias_por_ubicacion._cache) > 100:
+                current_time = time.time()
+                keys_to_remove = [
+                    k for k, v in get_existencias_por_ubicacion._cache.items()
+                    if current_time - v['timestamp'] > cache_ttl
+                ]
+                for k in keys_to_remove:
+                    del get_existencias_por_ubicacion._cache[k]
+        
+        return existencias
+        
+    except Exception as e:
+        print(f"Error obteniendo existencias: {e}")
+        return 0
 
 def filter_alertas(alertas, producto_jerarquia, dept_code=None, group_code=None, 
                    sub_code=None, search_text="", filter_level="TODAS", favoritos=None):
@@ -170,3 +217,168 @@ def build_producto_jerarquia(all_jerarquia, codigos_en_alerta):
         return {}
         
     return {cod: all_jerarquia[cod] for cod in codigos_en_alerta if cod in all_jerarquia}
+
+
+def fetch_stock_alerts_optimized(db_manager, limit=None, offset=0, use_indices=True):
+    """
+    Obtiene alertas de stock usando consulta optimizada con índices y paginación
+    
+    Args:
+        db_manager: Instancia de DatabaseManager
+        limit: Límite de registros (None para todos)
+        offset: Desplazamiento para paginación
+        use_indices: Si usar hints de índices para optimización
+        
+    Returns:
+        list: Lista de tuplas (codigo, descripcion, stock, nivel)
+    """
+    try:
+        # Consulta optimizada con índices y filtros eficientes
+        base_query = """
+        SELECT 
+            p.C_CODIGO as codigo,
+            p.C_DESCRI as descripcion,
+            ISNULL(d.n_cantidad, 0) as stock,
+            CASE 
+                WHEN ISNULL(d.n_cantidad, 0) <= 7 THEN 'CRÍTICA'
+                WHEN ISNULL(d.n_cantidad, 0) <= 15 THEN 'MEDIA'
+                ELSE 'LEVE'
+            END as nivel
+        FROM MA_PRODUCTOS p {index_hint}
+        LEFT JOIN MA_DEPOPROD d ON p.C_CODIGO = d.c_codarticulo AND d.c_coddeposito = '0301'
+        WHERE p.C_ESTADO = 'A'
+            AND (d.n_cantidad IS NULL OR d.n_cantidad <= 50)
+            AND p.C_CODIGO IS NOT NULL
+            AND p.C_DESCRI IS NOT NULL
+        """
+        
+        # Aplicar hints de índices si están habilitados
+        index_hint = "WITH (NOLOCK)" if use_indices else ""
+        query = base_query.format(index_hint=index_hint)
+        
+        # Agregar ORDER BY y paginación
+        query += "\nORDER BY ISNULL(d.n_cantidad, 0) ASC, p.C_CODIGO"
+        
+        if limit is not None:
+            if offset > 0:
+                query += f"\nOFFSET {offset} ROWS FETCH NEXT {limit} ROWS ONLY"
+            else:
+                query = f"SELECT TOP ({limit}) * FROM ({query}) AS subquery"
+        
+        result = db_manager.fetch_data(query)
+        return result if result else []
+        
+    except Exception as e:
+        print(f"Error en consulta optimizada de stock: {e}")
+        return []
+
+
+def get_stock_alerts_chunked(db_manager, chunk_size=500, max_chunks=None, progress_callback=None):
+    """
+    Obtiene alertas de stock en chunks para evitar bloquear la UI
+    
+    Args:
+        db_manager: Instancia de DatabaseManager
+        chunk_size: Tamaño de cada chunk
+        max_chunks: Máximo número de chunks (None para todos)
+        progress_callback: Función callback para reportar progreso
+        
+    Yields:
+        list: Chunks de alertas de stock
+    """
+    try:
+        chunk_count = 0
+        offset = 0
+        
+        while max_chunks is None or chunk_count < max_chunks:
+            chunk_data = fetch_stock_alerts_optimized(
+                db_manager, limit=chunk_size, offset=offset
+            )
+            
+            if not chunk_data:
+                break
+            
+            chunk_count += 1
+            offset += chunk_size
+            
+            if progress_callback:
+                progress_callback(chunk_count, len(chunk_data), offset)
+            
+            yield chunk_data
+            
+            # Si el chunk es menor que el tamaño esperado, probablemente sea el último
+            if len(chunk_data) < chunk_size:
+                break
+                
+    except Exception as e:
+        print(f"Error en carga chunked de stock: {e}")
+        return
+
+
+def cache_stock_data(cache_key, data, ttl_hours=1):
+    """
+    Guarda datos de stock en cache local con TTL
+    
+    Args:
+        cache_key: Clave única para el cache
+        data: Datos a cachear
+        ttl_hours: TTL en horas
+    """
+    try:
+        import json
+        from datetime import datetime, timedelta
+        
+        cache_file = f"stock_cache_{cache_key}.json"
+        cache_data = {
+            'data': data,
+            'timestamp': datetime.now().isoformat(),
+            'ttl_hours': ttl_hours
+        }
+        
+        with open(cache_file, 'w', encoding='utf-8') as f:
+            json.dump(cache_data, f, ensure_ascii=False, default=str)
+            
+    except Exception as e:
+        print(f"Error guardando cache de stock: {e}")
+
+
+def load_cached_stock_data(cache_key):
+    """
+    Carga datos de stock desde cache si están válidos
+    
+    Args:
+        cache_key: Clave única del cache
+        
+    Returns:
+        list or None: Datos cacheados o None si no existen/expiraron
+    """
+    try:
+        import json
+        from datetime import datetime, timedelta
+        import os
+        
+        cache_file = f"stock_cache_{cache_key}.json"
+        
+        if not os.path.exists(cache_file):
+            return None
+        
+        with open(cache_file, 'r', encoding='utf-8') as f:
+            cache_data = json.load(f)
+        
+        # Verificar TTL
+        cached_time = datetime.fromisoformat(cache_data['timestamp'])
+        ttl = timedelta(hours=cache_data.get('ttl_hours', 1))
+        
+        if datetime.now() - cached_time > ttl:
+            # Cache expirado
+            try:
+                os.remove(cache_file)
+            except Exception:
+                pass
+            return None
+        
+        return cache_data['data']
+        
+    except Exception as e:
+        print(f"Error cargando cache de stock: {e}")
+        return None

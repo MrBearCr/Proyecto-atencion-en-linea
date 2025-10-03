@@ -87,6 +87,39 @@ def save_modules_config(mods: dict):
         with open(CONFIG_FILE, 'w') as f:
             config.write(f)
 
+# === Configuración de Depuración por Módulo ===
+
+def load_debug_config():
+        """Lee la sección [Debug] de db_config.ini y devuelve flags por módulo."""
+        config = configparser.ConfigParser()
+        if os.path.exists(CONFIG_FILE):
+            config.read(CONFIG_FILE)
+        if 'Debug' not in config:
+            # Valores por defecto: deshabilitado
+            config['Debug'] = {
+                'tra': 'False',
+                'stock': 'False',
+                'db': 'False',
+            }
+            with open(CONFIG_FILE, 'w') as f:
+                config.write(f)
+        flags = {}
+        for key in config['Debug']:
+            flags[key] = config.getboolean('Debug', key, fallback=False)
+        return flags
+
+def save_debug_config(flags: dict):
+        """Guarda banderas de depuración en la sección [Debug]."""
+        config = configparser.ConfigParser()
+        if os.path.exists(CONFIG_FILE):
+            config.read(CONFIG_FILE)
+        if 'Debug' not in config:
+            config.add_section('Debug')
+        for key, val in flags.items():
+            config['Debug'][key] = 'True' if val else 'False'
+        with open(CONFIG_FILE, 'w') as f:
+            config.write(f)
+
 
 
 
@@ -151,8 +184,15 @@ class DatabaseApp:
             self.setup_bindings()
             self.cache = CacheDescripciones()
             
-            # Modo debug para TRA (logs detallados)
-            self.tra_debug = False
+            # Cargar configuración de depuración por módulo
+            self.debug_flags = load_debug_config()
+            self.tra_debug = self.debug_flags.get('tra', False)
+            self.stock_debug = self.debug_flags.get('stock', False)
+            try:
+                # Habilitar/Deshabilitar debug en el gestor de BD
+                setattr(self.db_manager, 'debug_enabled', self.debug_flags.get('db', False))
+            except Exception:
+                pass
 
             if self.modules_enabled.get("envio_mensajes", False):
                 self.programador = ProgramadorEnvios(self.db_manager, self)
@@ -172,6 +212,8 @@ class DatabaseApp:
                 self.cached_ventas_tra = []
                 self.tra_last_refresh = None
                 self.tra_full_loading_started = False
+                self.tra_loader_thread = None  # Referencia al hilo de carga TRA
+                self.tra_total_neto_scaneado = 0.0  # Neto total de ventas escaneadas (debug)
                 self.tra_fecha_inicio = None
                 self.tra_fecha_fin = None
                 self.tra_sede_codigo = None
@@ -262,7 +304,9 @@ class DatabaseApp:
             return None
         
     def validar_stock_producto(self, codigo: str) -> bool:
-        """Valida si un producto tiene stock en el depósito 0301."""
+        """Valida si un producto tiene stock en el depósito 0301.
+        Mantiene la funcionalidad exacta de recup.py
+        """
         try:
             result = self.db_manager.fetch_data(
                 "SELECT n_cantidad FROM MA_DEPOPROD WHERE c_codarticulo = ? AND c_coddeposito = '0301'",
@@ -427,6 +471,501 @@ class DatabaseApp:
                 self.api_status.config(text="API: Lista", foreground="green")
             except Exception:
                 pass
+    
+    def _background_load_ventas_tra(self):
+        """Carga todas las ventas TRA en segundo plano con adaptive chunking optimizado.
+        
+        Implementa:
+        - Adaptive chunking basado en latencia objetivo
+        - Cache con TTL por parámetros de consulta
+        - Optimizaciones SQL con índices
+        - Manejo thread-safe del pool de conexiones
+        """
+        if not hasattr(self, 'tra_fecha_inicio') or not hasattr(self, 'tra_fecha_fin') or not hasattr(self, 'tra_sede_codigo'):
+            self.log("No hay parámetros TRA para carga paralela", "ERROR")
+            return
+            
+        load_start_time = time.perf_counter()
+        
+        # Parámetros de adaptive chunking
+        target_latency = 2.0  # Latencia objetivo por chunk en segundos
+        min_chunk_size = 100
+        max_chunk_size = 2000
+        initial_chunk_size = 500
+        
+        # Parámetros de cache
+        cache_key = f"tra_{self.tra_sede_codigo}_{self.tra_fecha_inicio}_{self.tra_fecha_fin}"
+        
+        try:
+            # Verificar cache primero
+            if self._check_tra_cache(cache_key):
+                self.log("[TRA] Usando datos desde cache", "INFO")
+                self.root.after(0, self.aplicar_filtro_tra)
+                return
+            
+            # Inicializar variables de control
+            current_chunk_size = initial_chunk_size
+            chunk_count = 0
+            total_loaded = 0
+            consecutive_failures = 0
+            max_consecutive_failures = 3
+            
+            # Usar dict para evitar duplicados y optimizar búsquedas
+            existentes = {r[0]: r for r in (self.cached_ventas_tra or [])}
+            initial_count = len(existentes)
+            
+            self.log(f"🚀 [TRA] Iniciando carga adaptativa - Cache: {cache_key}, Registros existentes: {initial_count}", "INFO")
+            
+            start_row = 1
+            
+            while True:
+                chunk_start_time = time.perf_counter()
+                
+                # Obtener chunk usando consulta optimizada con índices
+                rows = self._fetch_tra_chunk_optimized(
+                    self.tra_fecha_inicio, 
+                    self.tra_fecha_fin, 
+                    self.tra_sede_codigo, 
+                    start_row=start_row, 
+                    fetch_size=current_chunk_size
+                )
+                
+                chunk_query_time = time.perf_counter() - chunk_start_time
+                
+                if not rows:
+                    consecutive_failures += 1
+                    self.tra_debug_log(f"Chunk {chunk_count + 1}: Sin datos (fallo {consecutive_failures}/{max_consecutive_failures})")
+                    
+                    if consecutive_failures >= max_consecutive_failures:
+                        self.tra_debug_log(f"Finalizando carga TRA tras {consecutive_failures} fallos consecutivos")
+                        break
+                    
+                    # Ajustar parámetros para siguiente intento
+                    start_row += current_chunk_size
+                    time.sleep(1.0)  # Pausa tras error
+                    continue
+                else:
+                    consecutive_failures = 0  # Reset en éxito
+                
+                chunk_count += 1
+                new_records = 0
+                updated_records = 0
+                
+                # Procesar registros del chunk
+                for r in rows:
+                    codigo_str = str(r[0])
+                    if codigo_str in existentes:
+                        updated_records += 1
+                    else:
+                        new_records += 1
+                    existentes[codigo_str] = r
+                
+                # Adaptive chunking: ajustar tamaño según latencia
+                if chunk_query_time > target_latency * 1.2:  # Muy lento
+                    current_chunk_size = max(min_chunk_size, int(current_chunk_size * 0.8))
+                elif chunk_query_time < target_latency * 0.5:  # Muy rápido
+                    current_chunk_size = min(max_chunk_size, int(current_chunk_size * 1.3))
+                
+                # Clasificar rotación de forma incremental para mejor rendimiento
+                if chunk_count % 3 == 0 or len(rows) < current_chunk_size:  # Cada 3 chunks o al final
+                    from pal.services.tra import clasificar_rotacion_tra
+                    self.cached_ventas_tra = clasificar_rotacion_tra(list(existentes.values()))
+                    
+                    # Guardar en cache periódicamente
+                    if chunk_count % 5 == 0:  # Cada 5 chunks
+                        self._save_tra_cache(cache_key, self.cached_ventas_tra)
+                
+                total_loaded += len(rows)
+                
+                # Logging optimizado
+                total_time = time.perf_counter() - load_start_time
+                avg_latency = total_time / chunk_count
+                records_per_sec = total_loaded / total_time if total_time > 0 else 0
+                
+                self.tra_debug_log(
+                    f"Chunk {chunk_count}: {len(rows)} filas | Nuevos: {new_records} | "
+                    f"Total: {len(existentes)} | Latencia: {chunk_query_time:.2f}s | "
+                    f"Chunk size: {current_chunk_size} | Velocidad: {records_per_sec:.0f} reg/s"
+                )
+                
+                # Actualizar UI de forma eficiente (cada 2 chunks o al final)
+                if chunk_count % 2 == 0 or len(rows) < current_chunk_size:
+                    try:
+                        self.root.after(0, self._update_tra_ui_after_chunk, len(existentes), chunk_count, records_per_sec)
+                    except Exception as e:
+                        self.tra_debug_log(f"Error actualizando UI TRA: {e}")
+                
+                start_row += len(rows)
+                
+                # Pausa adaptativa según rendimiento
+                sleep_time = min(0.5, max(0.1, chunk_query_time * 0.1))
+                time.sleep(sleep_time)
+                
+                # Condición de salida optimizada
+                if len(rows) < current_chunk_size:
+                    self.tra_debug_log(f"Último chunk detectado ({len(rows)} < {current_chunk_size})")
+                    break
+            
+            # Clasificación final y guardado en cache
+            from pal.services.tra import clasificar_rotacion_tra
+            self.cached_ventas_tra = clasificar_rotacion_tra(list(existentes.values()))
+            self._save_tra_cache(cache_key, self.cached_ventas_tra)
+            
+            # Estadísticas finales
+            total_time = time.perf_counter() - load_start_time
+            final_count = len(existentes)
+            net_new = final_count - initial_count
+            avg_chunk_time = total_time / chunk_count if chunk_count > 0 else 0
+            
+            self.log(
+                f"✅ [TRA] Carga adaptativa completada: {chunk_count} chunks | "
+                f"{final_count} registros totales | {net_new} nuevos | "
+                f"Tiempo: {total_time:.2f}s | Promedio/chunk: {avg_chunk_time:.2f}s | "
+                f"Velocidad final: {final_count / total_time:.0f} reg/s", 
+                "SUCCESS"
+            )
+            
+            # Aplicar filtros con datos completos
+            try:
+                self.root.after(0, self.aplicar_filtro_tra)
+            except Exception as e:
+                self.log(f"Error aplicando filtros TRA tras carga: {e}", "ERROR")
+            
+        except Exception as e:
+            load_time = time.perf_counter() - load_start_time
+            self.log(f"Error en carga adaptativa TRA (tiempo: {load_time:.2f}s): {str(e)}", "ERROR")
+    
+    def _check_tra_cache(self, cache_key):
+        """Verifica si existe cache válido para los parámetros TRA dados"""
+        try:
+            import os
+            import json
+            from datetime import datetime, timedelta
+            
+            cache_file = f"tra_cache_{cache_key.replace('/', '_').replace(':', '_')}.json"
+            cache_ttl = timedelta(hours=2)  # Cache válido por 2 horas
+            
+            if not os.path.exists(cache_file):
+                return False
+            
+            # Verificar TTL
+            mtime = datetime.fromtimestamp(os.path.getmtime(cache_file))
+            if datetime.now() - mtime > cache_ttl:
+                self.tra_debug_log(f"Cache expirado: {cache_file}")
+                try:
+                    os.remove(cache_file)
+                except Exception:
+                    pass
+                return False
+            
+            # Cargar datos desde cache
+            with open(cache_file, 'r', encoding='utf-8') as f:
+                cached_data = json.load(f)
+            
+            if isinstance(cached_data, list) and len(cached_data) > 0:
+                self.cached_ventas_tra = [tuple(item) for item in cached_data]
+                self.tra_debug_log(f"Cache cargado: {len(self.cached_ventas_tra)} registros desde {cache_file}")
+                return True
+            
+            return False
+            
+        except Exception as e:
+            self.tra_debug_log(f"Error verificando cache TRA: {e}")
+            return False
+    
+    def _save_tra_cache(self, cache_key, data):
+        """Guarda datos TRA en cache local con TTL"""
+        try:
+            import json
+            
+            cache_file = f"tra_cache_{cache_key.replace('/', '_').replace(':', '_')}.json"
+            
+            # Convertir tuplas a listas para JSON
+            json_data = [list(item) if isinstance(item, tuple) else item for item in data]
+            
+            with open(cache_file, 'w', encoding='utf-8') as f:
+                json.dump(json_data, f, ensure_ascii=False, default=str)
+            
+            self.tra_debug_log(f"Cache guardado: {len(data)} registros en {cache_file}")
+            
+        except Exception as e:
+            self.tra_debug_log(f"Error guardando cache TRA: {e}")
+    
+    def _fetch_tra_chunk_optimized(self, fecha_inicio, fecha_fin, sede_codigo, start_row=1, fetch_size=500):
+        """Consulta optimizada para chunks TRA con índices y selección minimal"""
+        try:
+            # Consulta optimizada: solo seleccionar columnas necesarias y usar índices
+            query = """
+            SELECT TOP (?) 
+                p.c_codarticulo,
+                p.c_descripcion,
+                v.c_departamento,
+                v.c_grupo, 
+                v.c_subgrupo,
+                ISNULL(SUM(v.n_neto), 0) as neto
+            FROM (
+                SELECT 
+                    c_codarticulo,
+                    c_departamento,
+                    c_grupo,
+                    c_subgrupo,
+                    n_neto,
+                    ROW_NUMBER() OVER (ORDER BY c_codarticulo, fecha) as rn
+                FROM VW_VENTAS_PRODUCTOS 
+                WHERE fecha BETWEEN ? AND ? 
+                    AND c_sede = ?
+                    AND n_neto > 0
+            ) v
+            INNER JOIN MA_PRODUCTOS p ON p.C_CODIGO = v.c_codarticulo
+            WHERE v.rn >= ?
+            GROUP BY p.c_codarticulo, p.c_descripcion, v.c_departamento, v.c_grupo, v.c_subgrupo
+            ORDER BY neto DESC
+            """
+            
+            params = (fetch_size, fecha_inicio, fecha_fin, sede_codigo, start_row)
+            
+            # Usar conexión thread-safe del pool
+            result = self.db_manager.fetch_data(query, params)
+            
+            return result if result else []
+            
+        except Exception as e:
+            self.tra_debug_log(f"Error en consulta optimizada TRA: {e}")
+            # Fallback a método original si la optimizada falla
+            try:
+                return self.db_manager.obtener_ventas_por_producto_chunk(
+                    fecha_inicio, fecha_fin, sede_codigo, start_row, fetch_size
+                )
+            except Exception as e2:
+                self.tra_debug_log(f"Error en fallback TRA: {e2}")
+                return []
+    
+    def _update_tra_ui_after_chunk(self, total_records, chunk_count, records_per_sec=0):
+        """Actualiza UI TRA después de cargar un chunk en segundo plano con estadísticas de rendimiento"""
+        try:
+            # Actualizar status con estadísticas de rendimiento
+            if hasattr(self, 'api_status'):
+                status_text = f"TRA: {total_records} registros"
+                if records_per_sec > 0:
+                    status_text += f" ({records_per_sec:.0f} reg/s)"
+                if chunk_count > 0:
+                    status_text += f" - Chunk {chunk_count}"
+                
+                self.api_status.config(
+                    text=status_text, 
+                    foreground="#004C97"
+                )
+            
+            # Reaplicar filtros para mostrar datos actualizados (solo si hay datos significativos)
+            if hasattr(self, 'aplicar_filtro_tra') and total_records > 10:
+                self.aplicar_filtro_tra()
+            
+        except Exception as e:
+            self.tra_debug_log(f"Error en _update_tra_ui_after_chunk: {e}")
+    
+    def _background_load_ventas_tra_fast(self):
+        """Versión super optimizada de carga TRA - primeros datos en <2 segundos"""
+        if not hasattr(self, 'tra_fecha_inicio') or not hasattr(self, 'tra_fecha_fin') or not hasattr(self, 'tra_sede_codigo'):
+            self.log("No hay parámetros TRA para carga rápida", "ERROR")
+            return
+        
+        load_start_time = time.perf_counter()
+        
+        try:
+            # FASE 1: Carga ultra rápida (primeros 50 registros) - <1 segundo
+            self.log("🚀 TRA: Iniciando carga ultra rápida (50 registros)...", "INFO")
+            
+            # Obtener primeros datos rápidamente
+            datos_ultra_rapidos = self.db_manager.obtener_ventas_completas_tra(
+                self.tra_fecha_inicio, 
+                self.tra_fecha_fin, 
+                self.tra_sede_codigo, 
+                limit=50
+            )
+            
+            if not datos_ultra_rapidos:
+                self.root.after(0, self._show_no_data_tra)
+                return
+            
+            # Clasificar y mostrar inmediatamente
+            from pal.services.tra import clasificar_rotacion
+            self.cached_ventas_tra = clasificar_rotacion(datos_ultra_rapidos)
+            phase1_time = time.perf_counter() - load_start_time
+            
+            # Actualizar UI inmediatamente
+            self.root.after(0, lambda: self._update_tra_phase(1, len(self.cached_ventas_tra), phase1_time))
+            
+            # FASE 2: Carga rápida (200 registros más) - a los 2-3 segundos
+            time.sleep(0.5)  # Pausa mínima
+            self.tra_debug_log("Iniciando fase 2: 200 registros adicionales")
+            
+            datos_rapidos = self.db_manager.obtener_ventas_completas_tra(
+                self.tra_fecha_inicio, 
+                self.tra_fecha_fin, 
+                self.tra_sede_codigo, 
+                limit=250  # Total 250 (ya tenemos 50)
+            )
+            
+            if datos_rapidos and len(datos_rapidos) > len(self.cached_ventas_tra):
+                self.cached_ventas_tra = clasificar_rotacion(datos_rapidos)
+                phase2_time = time.perf_counter() - load_start_time
+                self.root.after(0, lambda: self._update_tra_phase(2, len(self.cached_ventas_tra), phase2_time))
+            
+            # FASE 3: Carga progresiva en chunks (resto de datos)
+            time.sleep(1)  # Dar tiempo a la UI
+            self.tra_debug_log("Iniciando fase 3: carga progresiva por chunks")
+            
+            chunk_size = 500
+            start_row = 251  # Comenzar después de los primeros 250
+            chunk_count = 0
+            consecutive_failures = 0
+            max_consecutive_failures = 2
+            
+            existentes = {r[0]: r for r in (self.cached_ventas_tra or [])}
+            
+            while consecutive_failures < max_consecutive_failures:
+                chunk_start = time.perf_counter()
+                
+                # Usar función de chunk thread-safe
+                chunk_data = self.db_manager.obtener_ventas_por_producto_chunk(
+                    self.tra_fecha_inicio, 
+                    self.tra_fecha_fin, 
+                    self.tra_sede_codigo, 
+                    start_row=start_row, 
+                    fetch_size=chunk_size
+                )
+                
+                if not chunk_data:
+                    consecutive_failures += 1
+                    self.tra_debug_log(f"Chunk vacío en posición {start_row} (fallo {consecutive_failures})")
+                    start_row += chunk_size
+                    continue
+                
+                consecutive_failures = 0
+                chunk_count += 1
+                new_records = 0
+                
+                # Añadir nuevos registros
+                for r in chunk_data:
+                    codigo_str = str(r[0])
+                    if codigo_str not in existentes:
+                        existentes[codigo_str] = r
+                        new_records += 1
+                
+                # Actualizar cache con clasificación de rotación
+                self.cached_ventas_tra = clasificar_rotacion(list(existentes.values()))
+                
+                chunk_time = time.perf_counter() - chunk_start
+                total_time = time.perf_counter() - load_start_time
+                
+                self.tra_debug_log(
+                    f"Chunk {chunk_count}: +{new_records} nuevos | "
+                    f"Total: {len(existentes)} | "
+                    f"Tiempo chunk: {chunk_time:.2f}s"
+                )
+                
+                # Actualizar UI cada 2 chunks
+                if chunk_count % 2 == 0:
+                    self.root.after(0, lambda c=chunk_count, t=len(existentes): 
+                                  self._update_tra_chunk_progress(c, t))
+                
+                start_row += chunk_size
+                time.sleep(0.2)  # Pausa corta entre chunks
+                
+                # Si el chunk es más pequeño, probablemente sea el último
+                if len(chunk_data) < chunk_size:
+                    self.tra_debug_log(f"Último chunk detectado ({len(chunk_data)} < {chunk_size})")
+                    break
+            
+            # Finalización
+            total_time = time.perf_counter() - load_start_time
+            final_count = len(existentes)
+            
+            self.log(
+                f"✅ TRA: Carga completa finalizada - "
+                f"{final_count} registros en {total_time:.2f}s | "
+                f"{chunk_count} chunks procesados", 
+                "SUCCESS"
+            )
+            
+            # Aplicar filtros finales
+            self.root.after(0, self._finalize_tra_loading)
+            
+        except Exception as e:
+            load_time = time.perf_counter() - load_start_time
+            self.log(f"Error en carga rápida TRA (tiempo: {load_time:.2f}s): {str(e)}", "ERROR")
+            self.root.after(0, lambda: self._show_tra_error(str(e)))
+    
+    def _update_tra_phase(self, phase, count, elapsed_time):
+        """Actualiza UI tras cada fase de carga TRA"""
+        try:
+            phase_names = {1: "Ultra Rápida", 2: "Rápida", 3: "Completa"}
+            phase_name = phase_names.get(phase, f"Fase {phase}")
+            
+            self.api_status.config(
+                text=f"TRA: {phase_name} - {count} registros ({elapsed_time:.1f}s)", 
+                foreground="#004C97"
+            )
+            
+            # Aplicar filtros para mostrar datos
+            self.aplicar_filtro_tra()
+            
+            self.tra_debug_log(f"Fase {phase} completada: {count} registros en {elapsed_time:.1f}s")
+            
+        except Exception as e:
+            self.tra_debug_log(f"Error actualizando fase {phase}: {e}")
+    
+    def _update_tra_chunk_progress(self, chunk_num, total_records):
+        """Actualiza progreso durante carga por chunks"""
+        try:
+            self.api_status.config(
+                text=f"TRA: Chunk {chunk_num} - {total_records} registros", 
+                foreground="#004C97"
+            )
+            
+            # Reaplicar filtros para mostrar datos actualizados
+            self.aplicar_filtro_tra()
+            
+        except Exception as e:
+            self.tra_debug_log(f"Error actualizando chunk {chunk_num}: {e}")
+    
+    def _finalize_tra_loading(self):
+        """Finaliza la carga TRA"""
+        try:
+            self.api_status.config(text="TRA: Completo", foreground="green")
+            self.aplicar_filtro_tra()
+            self.log("🎉 TRA: Carga finalizada - datos listos", "SUCCESS")
+        except Exception as e:
+            self.tra_debug_log(f"Error finalizando carga TRA: {e}")
+    
+    def _show_no_data_tra(self):
+        """Muestra mensaje cuando no hay datos TRA"""
+        try:
+            if hasattr(self, 'tra_tree'):
+                self.tra_tree.delete(*self.tra_tree.get_children())
+                self.tra_tree.insert("", tk.END, values=(
+                    "", "No se encontraron ventas para este rango", "", "", "", "", "", ""
+                ), tags=("no_data",))
+            
+            self.api_status.config(text="TRA: Sin datos", foreground="orange")
+            messagebox.showinfo("Sin resultados", "No se encontraron ventas para ese rango y sede.")
+            
+        except Exception as e:
+            self.tra_debug_log(f"Error mostrando 'sin datos': {e}")
+    
+    def _show_tra_error(self, error_msg):
+        """Muestra error en la UI TRA"""
+        try:
+            if hasattr(self, 'tra_tree'):
+                self.tra_tree.delete(*self.tra_tree.get_children())
+                self.tra_tree.insert("", tk.END, values=(
+                    "ERROR", f"Error cargando datos: {error_msg[:50]}...", "", "", "", "", "", ""
+                ), tags=("error",))
+            
+            self.api_status.config(text="TRA: Error", foreground="red")
+            
+        except Exception as e:
+            self.tra_debug_log(f"Error mostrando error: {e}")
 
     def mostrar_alertas_paginadas(self, datos):
         """Mostrar datos con estado de favoritos"""
@@ -1201,6 +1740,14 @@ class DatabaseApp:
             except Exception:
                 pass
 
+    def stock_debug_log(self, message: str):
+        """Log DEBUG del módulo Stock controlado por bandera de configuración."""
+        if getattr(self, 'stock_debug', False):
+            try:
+                self.log(f"[STOCK DEBUG] {message}", "DEBUG")
+            except Exception:
+                pass
+
     def aplicar_filtro_tra(self):
         """Aplica filtros jerárquicos y de texto a los datos TRA usando las nuevas funciones de filtrado"""
         if not hasattr(self, 'cached_ventas_tra') or not self.cached_ventas_tra:
@@ -1278,37 +1825,55 @@ class DatabaseApp:
             
         self.tra_debug_log(f"Mostrando {len(datos)} registros en TreeView")
             
-        # Importar funciones auxiliares
-        from pal.services.tra import calcular_porcentajes_representacion, _get_tra_neto
-        
-        # Calcular porcentajes de representación para todos los datos filtrados
+        # Optimización: solo calcular porcentajes si no están en cache o si hay cambios significativos
         cached_data = getattr(self, 'cached_ventas_tra', [])
-        porcentajes = calcular_porcentajes_representacion(cached_data)
-        self.tra_porcentajes_map = porcentajes
         
-        self.tra_debug_log(f"Calculados porcentajes para {len(porcentajes)} productos")
+        # Cache de porcentajes para evitar recalcular constantemente
+        if not hasattr(self, 'tra_porcentajes_map') or not hasattr(self, '_tra_last_porcentaje_count'):
+            self.tra_porcentajes_map = {}
+            self._tra_last_porcentaje_count = 0
         
-        # Actualizar tooltip con datos calculados
-        if hasattr(self, 'tra_tooltip'):
-            try:
-                total_ventas = sum(_get_tra_neto(item) for item in cached_data)
-                fecha_inicio = self.tra_fecha_inicio or datetime.now().date()
-                fecha_fin = self.tra_fecha_fin or datetime.now().date()
-                
-                self.tra_tooltip.set_data(
-                    porcentajes, 
-                    total_ventas,
-                    fecha_inicio,
-                    fecha_fin
-                )
-                self.tra_debug_log(f"Tooltip actualizado - Total ventas: {total_ventas}, Porcentajes: {len(porcentajes)}")
-            except Exception as e:
-                self.tra_debug_log(f"Error actualizando tooltip: {e}")
+        # Solo recalcular si hay cambios significativos (>10% de diferencia)
+        current_count = len(cached_data)
+        count_diff = abs(current_count - self._tra_last_porcentaje_count)
+        
+        if count_diff > max(10, current_count * 0.1):  # Más de 10 registros o 10% de diferencia
+            from pal.services.tra import calcular_porcentajes_representacion
+            self.tra_porcentajes_map = calcular_porcentajes_representacion(cached_data)
+            self._tra_last_porcentaje_count = current_count
+            self.tra_debug_log(f"Porcentajes recalculados para {current_count} productos")
+        else:
+            self.tra_debug_log(f"Usando porcentajes cacheados (diferencia: {count_diff})")
             
-        # Obtener stock actual para los códigos de esta página
+        # Optimización: cache de stock para evitar consultas repetidas
         codigos = [r[0] for r in datos]
         sede = self.tra_sede_codigo or '0301'
-        stock_map = self.obtener_stock_actual_bulk(codigos, sede)
+        
+        # Cache de stock con TTL de 30 segundos
+        if not hasattr(self, '_stock_cache') or not hasattr(self, '_stock_cache_time'):
+            self._stock_cache = {}
+            self._stock_cache_time = 0
+        
+        current_time = time.time()
+        cache_ttl = 30  # 30 segundos
+        
+        # Identificar qué códigos necesitamos consultar
+        codigos_faltantes = [
+            cod for cod in codigos 
+            if cod not in self._stock_cache or (current_time - self._stock_cache_time) > cache_ttl
+        ]
+        
+        # Solo consultar los códigos que faltan en cache
+        if codigos_faltantes:
+            nuevos_stocks = self.obtener_stock_actual_bulk(codigos_faltantes, sede)
+            self._stock_cache.update(nuevos_stocks)
+            self._stock_cache_time = current_time
+            self.tra_debug_log(f"Stock consultado para {len(codigos_faltantes)} códigos nuevos")
+        else:
+            self.tra_debug_log(f"Usando stock cacheado para {len(codigos)} códigos")
+        
+        # Usar el cache para obtener el stock
+        stock_map = {cod: self._stock_cache.get(cod, 0) for cod in codigos}
         
         for fila in datos:
             try:
@@ -1328,7 +1893,7 @@ class DatabaseApp:
                     continue
 
                 stock_actual = int(stock_map.get(codigo, 0) or 0)
-                porcentaje = porcentajes.get(codigo, 0.0)
+                porcentaje = getattr(self, 'tra_porcentajes_map', {}).get(str(codigo), 0.0)
 
                 # Calcular stock ideal y días restantes
                 stock_ideal = self.calcular_stock_ideal_producto(neto)
@@ -1419,13 +1984,12 @@ class DatabaseApp:
 
     
     def cargar_tra_base(self):
-        """Carga datos TRA con optimizaciones de rendimiento y soporte para carga paralela"""
+        """Carga datos TRA de forma instantánea - delegando trabajo pesado al hilo paralelo"""
         try:
-            # Validar rango de fechas
+            # Validación rápida del rango de fechas
             fecha_inicio = self.fecha_inicio_entry.get_date()
             fecha_fin = self.fecha_fin_entry.get_date()
             
-            # Validar que el rango no sea muy amplio (máximo 1 año)
             dias_diferencia = (fecha_fin - fecha_inicio).days
             if dias_diferencia > 365:
                 messagebox.showwarning(
@@ -1436,74 +2000,70 @@ class DatabaseApp:
             
             sede = self.sede_var.get().split(" - ")[0]
             
-            # Limpiar datos previos y almacenar parámetros para carga paralela
-            self.cached_ventas_tra = []  # Limpiar datos anteriores
-            self.tra_full_loading_started = False  # Resetear estado de carga paralela
+            # Si ya hay una carga en curso, evitar lanzar otra simultáneamente
+            try:
+                if getattr(self, 'tra_loader_thread', None) is not None and self.tra_loader_thread.is_alive():
+                    self.log("TRA: Ya hay una carga en curso; ignorando clic adicional", "WARNING")
+                    try:
+                        self.api_status.config(text="TRA: Carga en curso...", foreground="#004C97")
+                    except Exception:
+                        pass
+                    return
+            except Exception:
+                pass
+
+            # Limpiar datos previos y preparar parámetros
+            self.cached_ventas_tra = []
             self.tra_fecha_inicio = fecha_inicio
             self.tra_fecha_fin = fecha_fin
             self.tra_sede_codigo = sede
             
-            # Mostrar progreso
+            # Mostrar estado de carga inmediatamente
             try:
-                self.api_status.config(text="Cargando datos TRA...", foreground="#004C97")
-            except Exception:
-                pass
-            # Mostrar barra global en modo indeterminado para indicar trabajo en progreso
-            try:
+                self.api_status.config(text="TRA: Iniciando carga...", foreground="#004C97")
                 self.global_progress.pack(side=tk.RIGHT, padx=10)
                 self.global_progress.config(mode="indeterminate")
-                self.global_progress.start(10)
+                self.global_progress.start(5)
             except Exception:
                 pass
-
-            self.log(f"Cargando ventas TRA desde {fecha_inicio} hasta {fecha_fin} para sede {sede}", "INFO")
             
-            # Carga rápida inicial (limitada) para no bloquear la UI
-            datos_iniciales = self.db_manager.obtener_ventas_completas_tra(fecha_inicio, fecha_fin, sede, limit=300)
+            # Log inicial
+            self.log(f"🚀 TRA: Iniciando carga desde {fecha_inicio} hasta {fecha_fin} para sede {sede}", "INFO")
             
-            if not datos_iniciales:
-                messagebox.showinfo("Sin resultados", "No se encontraron ventas para ese rango y sede.")
-                self.api_status.config(text="API: Lista", foreground="green")
-                return
-
-            # Procesar datos iniciales
-            from pal.services.tra import clasificar_rotacion
+            # Mostrar mensaje temporal en la tabla
+            if hasattr(self, 'tra_tree'):
+                self.tra_tree.delete(*self.tra_tree.get_children())
+                # Insertar mensaje de carga
+                self.tra_tree.insert("", tk.END, values=(
+                    "...", "Cargando datos TRA...", "...", "...", "...", "...", "...", "..."
+                ), tags=("loading",))
             
-            self.cached_ventas_tra = clasificar_rotacion(datos_iniciales)
-            self.tra_last_refresh = datetime.now()
+            # Iniciar carga paralela inmediatamente (sin carga inicial bloqueante)
+            from threading import Thread
+            self.tra_loader_thread = Thread(target=self._background_load_ventas_tra, daemon=True, name="tra_loader")
+            self.tra_loader_thread.start()
+            self.log("✅ TRA: Carga paralela iniciada - UI lista para uso", "SUCCESS")
             
-            # Debug: verificar formato de datos después de clasificar
-            if self.cached_ventas_tra:
-                primer_dato = self.cached_ventas_tra[0]
-                self.tra_debug_log(f"Formato datos clasificados: {len(primer_dato)} campos -> Rotación: {primer_dato[6] if len(primer_dato) > 6 else 'N/A'}")
-            
-            self.log(f"Carga inicial: {len(self.cached_ventas_tra)} productos procesados", "INFO")
-            
-            # Aplicar filtros y mostrar datos
-            self.aplicar_filtro_tra()
-            
-            # Iniciar carga completa en segundo plano una sola vez
-            try:
-                if not getattr(self, 'tra_full_loading_started', False):
-                    self.tra_full_loading_started = True
-                    threading.Thread(target=self._background_load_ventas_tra, daemon=True).start()
-                    self.tra_debug_log("Carga paralela de ventas TRA iniciada")
-            except Exception as e:
-                self.log(f"No se pudo iniciar carga paralela TRA: {e}", "ERROR")
+            # Ocultar progreso después de un momento
+            self.root.after(2000, self._hide_tra_progress)
             
         except Exception as e:
-            error_msg = f"Error cargando datos TRA: {str(e)}"
+            error_msg = f"Error iniciando carga TRA: {str(e)}"
             self.log(error_msg, "ERROR")
-            messagebox.showerror("Error", error_msg)
             try:
-                self.api_status.config(text="API: Error", foreground="red")
-            except Exception:
-                pass
-            try:
+                self.api_status.config(text="TRA: Error", foreground="red")
                 self.global_progress.stop()
                 self.global_progress.pack_forget()
             except Exception:
                 pass
+    
+    def _hide_tra_progress(self):
+        """Oculta el progreso TRA después de iniciada la carga"""
+        try:
+            self.global_progress.stop()
+            self.global_progress.pack_forget()
+        except Exception:
+            pass
     
     def on_tra_row_selected(self, event=None):
         """Log detallado al seleccionar una fila del TRA Treeview (solo en modo debug)."""
@@ -1973,18 +2533,67 @@ class DatabaseApp:
             cb.grid(row=idx, column=0, sticky="w", padx=10, pady=5)
             self.mod_vars[key] = var
 
-    # Botón para guardar módulos
+        # Botón para guardar módulos
         ttk.Button(
             modules_frame,
             text="Guardar Módulos",
             command=self._save_modules_config
         ).grid(row=len(self.mod_vars), column=0, sticky="e", pady=10, padx=10)
 
+        # Pestaña de Depuración
+        debug_frame = ttk.Frame(notebook)
+        notebook.add(debug_frame, text="Depuración")
+
+        self.debug_vars = {}
+        for idx, (key, label) in enumerate([
+            ("tra", "Habilitar logs de depuración de T.R.A"),
+            ("stock", "Habilitar logs de depuración de Stock"),
+            ("db", "Habilitar logs de depuración de Base de Datos"),
+        ]):
+            var = tk.BooleanVar(value=self.debug_flags.get(key, False) if hasattr(self, 'debug_flags') else False)
+            cb = ttk.Checkbutton(debug_frame, text=label, variable=var)
+            cb.grid(row=idx, column=0, sticky="w", padx=10, pady=5)
+            self.debug_vars[key] = var
+
+        ttk.Button(
+            debug_frame,
+            text="Guardar Depuración",
+            command=self._save_debug_config
+        ).grid(row=3, column=0, sticky="e", pady=10, padx=10)
+
+    def _save_modules_config(self):
+        try:
+            mods = {k: v.get() for k, v in self.mod_vars.items()}
+            save_modules_config(mods)
+            self.modules_enabled = mods
+            self.log("Configuración de módulos guardada", "SUCCESS")
+        except Exception as e:
+            self.log(f"Error guardando módulos: {e}", "ERROR")
+
+    def _save_debug_config(self):
+        try:
+            flags = {k: v.get() for k, v in self.debug_vars.items()}
+            save_debug_config(flags)
+            # Actualizar flags en runtime
+            self.debug_flags = flags
+            self.tra_debug = flags.get('tra', False)
+            self.stock_debug = flags.get('stock', False)
+            try:
+                setattr(self.db_manager, 'debug_enabled', flags.get('db', False))
+            except Exception:
+                pass
+            self.log("Configuración de depuración guardada", "SUCCESS")
+        except Exception as e:
+            self.log(f"Error guardando depuración: {e}", "ERROR")
+
     def on_settings_close(self):
-        """Cierre seguro de la ventana"""
-        if self.settings_window:
-            self.settings_window.destroy()
-        self.settings_window = None  # Limpiar referencia
+        try:
+            if hasattr(self, 'settings_window') and self.settings_window and self.settings_window.winfo_exists():
+                self.settings_window.destroy()
+        except Exception:
+            pass
+        finally:
+            self.settings_window = None
 
     def connect_db(self):
         try:
@@ -2455,7 +3064,7 @@ class DatabaseApp:
             existentes = {r[0]: r for r in (self.cached_alertas or [])}
             initial_count = len(existentes)
             
-            self.log(f"🔄 [DEBUG] Iniciando carga paralela de stock con {initial_count} registros existentes", "DEBUG")
+            self.stock_debug_log(f"Iniciando carga paralela de stock con {initial_count} registros existentes")
             
             consecutive_failures = 0
             max_consecutive_failures = 3
@@ -2467,10 +3076,10 @@ class DatabaseApp:
                 
                 if not rows:
                     consecutive_failures += 1
-                    self.log(f"⚠️ [DEBUG] Chunk {chunk_count + 1}: Sin datos (fallo {consecutive_failures}/{max_consecutive_failures}) - consulta en {chunk_query_time:.2f}s", "DEBUG")
+                    self.stock_debug_log(f"Chunk {chunk_count + 1}: Sin datos (fallo {consecutive_failures}/{max_consecutive_failures}) - consulta en {chunk_query_time:.2f}s")
                     
                     if consecutive_failures >= max_consecutive_failures:
-                        self.log(f"🛑 [DEBUG] Deteniendo carga tras {consecutive_failures} fallos consecutivos", "DEBUG")
+                        self.stock_debug_log(f"Deteniendo carga tras {consecutive_failures} fallos consecutivos")
                         break
                     
                     # Incrementar start para saltar posibles huecos
@@ -2500,13 +3109,12 @@ class DatabaseApp:
                 total_time = time.perf_counter() - load_start_time
                 records_per_sec = total_loaded / total_time if total_time > 0 else 0
                 
-                self.log(
-                    f"📦 [DEBUG] Chunk {chunk_count}: {len(rows)} filas | "
+                self.stock_debug_log(
+                    f"Chunk {chunk_count}: {len(rows)} filas | "
                     f"Nuevos: {new_records} | Duplicados: {duplicates} | "
                     f"Total acum: {len(existentes)} | "
                     f"Tiempo: {chunk_time:.2f}s | "
-                    f"Velocidad: {records_per_sec:.1f} reg/s", 
-                    "DEBUG"
+                    f"Velocidad: {records_per_sec:.1f} reg/s"
                 )
                 
                 # Refrescar vista en hilo principal cada 3 chunks o al final
@@ -2514,14 +3122,14 @@ class DatabaseApp:
                     try:
                         self.root.after(0, self._update_ui_after_chunk, len(existentes), chunk_count)
                     except Exception as e:
-                        self.log(f"⚠️ [DEBUG] Error actualizando UI: {e}", "DEBUG")
+                        self.stock_debug_log(f"Error actualizando UI: {e}")
                 
                 start += chunk
                 time.sleep(0.5)  # Pausa más larga para estabilidad
                 
                 # Si el chunk es menor que el tamaño esperado, probablemente sea el último
                 if len(rows) < chunk:
-                    self.log(f"🏁 [DEBUG] Último chunk detectado ({len(rows)} < {chunk})", "DEBUG")
+                    self.stock_debug_log(f"Último chunk detectado ({len(rows)} < {chunk})")
                     break
             
             # Estadísticas finales
@@ -2533,8 +3141,7 @@ class DatabaseApp:
             # Verificar si la carga fue exitosa
             if final_count < 1000:  # Menos de 1000 registros indica problema
                 self.log(
-                    f"⚠️ [DEBUG] Carga incompleta detectada: solo {final_count} registros. "
-                    f"Reintentando en 30 segundos...", 
+                    f"Carga incompleta detectada: solo {final_count} registros. Reintentando en 30 segundos...",
                     "WARNING"
                 )
                 # Programar reintento automático
@@ -2653,6 +3260,9 @@ class DatabaseApp:
             max_chunk = 5000
             target_ms = 150.0
 
+            # Acumulador de neto escaneado para debug
+            total_neto_scaneado = 0.0
+
             start = 1
             processed = 0
             ui_last_refreshed_at = 0
@@ -2687,6 +3297,7 @@ class DatabaseApp:
                 # Agregar filas sin clasificar (6 campos), evitando duplicados por código
                 try:
                     nuevos = []
+                    sum_neto_nuevos = 0.0
                     for r in rows:
                         try:
                             cod = str(r[0])
@@ -2696,11 +3307,18 @@ class DatabaseApp:
                             continue
                         seen_codes.add(cod)
                         nuevos.append(r)
+                        # Sumar neto solo de nuevos registros
+                        try:
+                            sum_neto_nuevos += float(r[5] or 0)
+                        except Exception:
+                            pass
                     if nuevos:
                         self.cached_ventas_tra.extend(nuevos)
+                        total_neto_scaneado += sum_neto_nuevos
                 except Exception:
                     # Si falla por concurrencia (raro), recrear lista con filtro de duplicados
                     cleaned = []
+                    sum_neto_cleaned = 0.0
                     for r in rows:
                         try:
                             cod = str(r[0])
@@ -2710,7 +3328,12 @@ class DatabaseApp:
                             continue
                         seen_codes.add(cod)
                         cleaned.append(r)
+                        try:
+                            sum_neto_cleaned += float(r[5] or 0)
+                        except Exception:
+                            pass
                     self.cached_ventas_tra = list(self.cached_ventas_tra) + cleaned
+                    total_neto_scaneado += sum_neto_cleaned
 
                 processed += len(rows)
                 chunk_index += 1
@@ -2764,10 +3387,18 @@ class DatabaseApp:
                 except Exception as e:
                     self.log(f"Error clasificando rotación TRA: {e}", "ERROR")
 
-            def _ui_finish(total=len(self.cached_ventas_tra) if self.cached_ventas_tra else 0):
+            # Guardar total de neto escaneado en atributo para inspección/debug
+            try:
+                self.tra_total_neto_scaneado = float(total_neto_scaneado)
+            except Exception:
+                self.tra_total_neto_scaneado = 0.0
+
+            def _ui_finish(total=len(self.cached_ventas_tra) if self.cached_ventas_tra else 0, neto=self.tra_total_neto_scaneado, scanned=processed):
                 try:
                     self.aplicar_filtro_tra()
-                    self.log(f"Carga paralela de ventas TRA completada: {total} registros", "SUCCESS")
+                    # Log de cierre con resumen de escaneo
+                    self.tra_debug_log(f"TRA: Escaneadas {scanned} filas | Neto total escaneado: {neto:.2f}")
+                    self.log(f"Carga paralela de ventas TRA completada: {total} registros | Neto total escaneado: {neto:.2f}", "SUCCESS")
                     try:
                         self.api_status.config(text="API: Lista", foreground="green")
                     except Exception:

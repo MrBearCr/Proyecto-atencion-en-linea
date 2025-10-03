@@ -37,11 +37,8 @@ def setup_tra_tab(app):
     app.sede_combo.current(0)  # Seleccionar primer elemento por defecto
     app.sede_combo.pack(side=tk.LEFT)
 
-    # Botón de cargar (función básica por ahora)
-    def cargar_tra_basico():
-        messagebox.showinfo("TRA", "Funcionalidad TRA cargada (versión básica)")
-    
-    ttk.Button(top_controls, text="Cargar", command=cargar_tra_basico).pack(side=tk.RIGHT, padx=10)
+    # Botón de cargar - conectado al método principal
+    ttk.Button(top_controls, text="Cargar", command=app.cargar_tra_base).pack(side=tk.RIGHT, padx=10)
 
     # Frame para filtros jerárquicos
     filter_frame = ttk.Frame(app.tra_tab_frame)
@@ -76,6 +73,12 @@ def setup_tra_tab(app):
     app.tra_search_var = tk.StringVar()
     search_entry = ttk.Entry(search_frame, textvariable=app.tra_search_var)
     search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+    
+    # Conectar eventos de búsqueda y filtros
+    app.tra_search_var.trace_add('write', lambda *args: app.aplicar_filtro_tra())
+    app.tra_dept_combo.bind('<<ComboboxSelected>>', app.on_tra_dept_selected)
+    app.tra_group_combo.bind('<<ComboboxSelected>>', app.on_tra_group_selected)
+    app.tra_sub_combo.bind('<<ComboboxSelected>>', lambda e: app.aplicar_filtro_tra())
 
     # Controles de paginación
     pag_frame = ttk.Frame(app.tra_tab_frame)
@@ -85,6 +88,7 @@ def setup_tra_tab(app):
         pag_frame, 
         text="◄ Anterior", 
         width=10, 
+        command=lambda: app.cambiar_pagina_tra(-1),
         state='disabled'
     )
     app.tra_btn_prev.pack(side=tk.LEFT)
@@ -95,7 +99,8 @@ def setup_tra_tab(app):
     app.tra_btn_next = ttk.Button(
         pag_frame, 
         text="Siguiente ►", 
-        width=10
+        width=10, 
+        command=lambda: app.cambiar_pagina_tra(1)
     )
     app.tra_btn_next.pack(side=tk.LEFT)
 
@@ -103,7 +108,7 @@ def setup_tra_tab(app):
     tree_frame = ttk.Frame(app.tra_tab_frame)
     tree_frame.pack(fill=tk.BOTH, expand=True)
 
-    columns = ("Código", "Descripción", "Rotación", "Neto", "Stock Ideal")
+    columns = ("Código", "Descripción", "Rotación", "Neto", "Representación %", "Stock Actual", "Stock Ideal", "Días Restantes")
     app.tra_tree = ttk.Treeview(tree_frame, columns=columns, show='headings', height=15)
 
     # Configurar scrollbars
@@ -111,10 +116,39 @@ def setup_tra_tab(app):
     hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=app.tra_tree.xview)
     app.tra_tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
 
-    # Configurar columnas
+    # Configurar columnas con anchos específicos
+    column_config = {
+        "Código": {"width": 80, "anchor": "center"},
+        "Descripción": {"width": 250, "anchor": "w"},
+        "Rotación": {"width": 80, "anchor": "center"},
+        "Neto": {"width": 100, "anchor": "e"},
+        "Representación %": {"width": 100, "anchor": "center"},
+        "Stock Actual": {"width": 80, "anchor": "center"},
+        "Stock Ideal": {"width": 80, "anchor": "center"},
+        "Días Restantes": {"width": 100, "anchor": "center"}
+    }
+    
     for col in columns:
         app.tra_tree.heading(col, text=col)
-        app.tra_tree.column(col, width=120, anchor='center')
+        config = column_config.get(col, {"width": 120, "anchor": "center"})
+        app.tra_tree.column(col, **config)
+    
+    # Configurar estilos de colores para rotación (fondos suaves + texto negro)
+    app.tra_tree.tag_configure('alta', background='#E6F4EA', foreground='#000000')
+    app.tra_tree.tag_configure('media', background='#FFF8E1', foreground='#000000')
+    app.tra_tree.tag_configure('baja', background='#FFEBEE', foreground='#000000')
+    app.tra_tree.tag_configure('sin_movimiento', background='#F5F5F5', foreground='#000000')
+    app.tra_tree.tag_configure('sin_clasificar', background='#EDE7F6', foreground='#000000')
+    
+    # Estilos por representación (mantener texto negro y fuente normal)
+    app.tra_tree.tag_configure('high_representation', foreground='#000000', font=('', 9))
+    app.tra_tree.tag_configure('medium_representation', foreground='#000000', font=('', 9))
+    app.tra_tree.tag_configure('low_representation', foreground='#000000', font=('', 9))
+    
+    # Estilos para mensajes de estado
+    app.tra_tree.tag_configure('loading', background='#E6F3FF', foreground='#0066CC', font=('', 10, 'italic'))
+    app.tra_tree.tag_configure('no_data', background='#FFF3E0', foreground='#FF8C00', font=('', 10, 'italic'))
+    app.tra_tree.tag_configure('error', background='#FFEBEE', foreground='#D32F2F', font=('', 10, 'italic'))
 
     # Layout
     app.tra_tree.grid(row=0, column=0, sticky="nsew")

@@ -18,6 +18,8 @@ class DatabaseManager:
         self.password = None
         # Pool de conexiones para hilos paralelos
         self._connection_pool = {}
+        # Flag de depuración para controlar prints [DB DEBUG]
+        self.debug_enabled = False
 
     def table_exists(self, table_name: str) -> bool:
         """Verifica si una tabla existe en la base de datos con manejo de errores mejorado"""
@@ -194,11 +196,12 @@ class DatabaseManager:
             try:
                 # Verificar conexión
                 if not self.conn:
-                    print(f"[DB DEBUG] Reconectando en obtener_alertas_stock (intento {attempt + 1})...")
+                    # print(f"[DB DEBUG] Reconectando en obtener_alertas_stock (intento {attempt + 1})...")  # DEBUG COMENTADO
                     self.connect(self.server, self.database, self.user, self.password)
                     if not self.conn:
                         continue
                 
+                # Mantener la consulta exacta de recup.py - solo depósito 0301
                 query = """
                     SELECT 
                         c_codarticulo AS codigo,
@@ -220,18 +223,19 @@ class DatabaseManager:
                 if limit:
                     query += f" OFFSET 0 ROWS FETCH NEXT {limit} ROWS ONLY"
             
-                # Usar cursor fresco para evitar errores de secuencia
-                cursor = self.conn.cursor()
-                cursor.execute(query)
+                # Usar conexión y cursor específicos del hilo para evitar errores de secuencia
+                thread_conn = self.get_thread_connection("alertas_full")
+                cursor = thread_conn.cursor()
+                cursor.execute(query)  # Sin parámetros - hardcodeado como recup.py
                 result = cursor.fetchall()
                 cursor.close()
                 
-                print(f"[DB DEBUG] obtener_alertas_stock exitoso: {len(result)} registros (limit: {limit})")
+                # print(f"[DB DEBUG] obtener_alertas_stock exitoso: {len(result)} registros (limit: {limit})")  # DEBUG COMENTADO
                 return result
                 
             except Exception as e:
                 error_msg = str(e)
-                print(f"[DB DEBUG] Error en obtener_alertas_stock (intento {attempt + 1}): {error_msg}")
+                # print(f"[DB DEBUG] Error en obtener_alertas_stock (intento {attempt + 1}): {error_msg}")  # DEBUG COMENTADO
                 
                 # Manejar errores ODBC
                 if "HY010" in error_msg or "HY000" in error_msg:
@@ -252,7 +256,7 @@ class DatabaseManager:
                 
                 return []  # Return empty on final failure
         
-        print(f"[DB DEBUG] obtener_alertas_stock fallido después de {max_retries} intentos")
+        # print(f"[DB DEBUG] obtener_alertas_stock fallido después de {max_retries} intentos")  # DEBUG COMENTADO
         return []
     
     def get_thread_connection(self, thread_name="default"):
@@ -300,11 +304,13 @@ class DatabaseManager:
             new_conn = pyodbc.connect(conn_str)
             self._connection_pool[thread_key] = new_conn
             
-            print(f"[DB DEBUG] Nueva conexión creada para hilo: {thread_key}")
+            if getattr(self, 'debug_enabled', False):
+                print(f"[DB DEBUG] Nueva conexión creada para hilo: {thread_key}")
             return new_conn
             
         except Exception as e:
-            print(f"[DB DEBUG] Error creando conexión para hilo {thread_key}: {e}")
+            if getattr(self, 'debug_enabled', False):
+                print(f"[DB DEBUG] Error creando conexión para hilo {thread_key}: {e}")
             return None
     
     def close_thread_connections(self):
@@ -312,7 +318,8 @@ class DatabaseManager:
         for thread_key, conn in list(self._connection_pool.items()):
             try:
                 conn.close()
-                print(f"[DB DEBUG] Conexión cerrada: {thread_key}")
+                if getattr(self, 'debug_enabled', False):
+                    print(f"[DB DEBUG] Conexión cerrada: {thread_key}")
             except:
                 pass
         self._connection_pool.clear()
@@ -374,6 +381,43 @@ class DatabaseManager:
             """
             print(error_msg, "ERROR")
             raise
+
+    def fetch_data_threadsafe(self, query, params=None, thread_name="generic"):
+        """Ejecuta una SELECT usando una conexión dedicada para el hilo actual."""
+        try:
+            thread_conn = self.get_thread_connection(thread_name)
+            if not thread_conn:
+                return []
+            cursor = thread_conn.cursor()
+            cursor.execute(query, params or ())
+            rows = cursor.fetchall()
+            cursor.close()
+            return rows
+        except Exception as e:
+            # print(f"[DB DEBUG] Error en fetch_data_threadsafe('{thread_name}'): {e}")  # DEBUG COMENTADO
+            return []
+
+    def execute_query_threadsafe(self, query, params=None, thread_name="generic"):
+        """Ejecuta DML/DDL usando una conexión dedicada para el hilo actual."""
+        try:
+            thread_conn = self.get_thread_connection(thread_name)
+            if not thread_conn:
+                return False
+            cursor = thread_conn.cursor()
+            if params:
+                cursor.execute(query, params)
+            else:
+                cursor.execute(query)
+            thread_conn.commit()
+            cursor.close()
+            return True
+        except Exception as e:
+            try:
+                thread_conn.rollback()
+            except Exception:
+                pass
+            # print(f"[DB DEBUG] Error en execute_query_threadsafe('{thread_name}'): {e}")  # DEBUG COMENTADO
+            return False
     
     def obtener_alertas_stock_chunk(self, start_row=1, fetch_size=500, deposito='0301'):
         """Obtiene alertas de stock en chunks para carga paralela con manejo robusto de errores ODBC
@@ -381,7 +425,7 @@ class DatabaseManager:
         Args:
             start_row: Fila inicial (1-indexed)
             fetch_size: Cantidad de filas a obtener
-            deposito: Código de depósito
+            deposito: Código de depósito (por defecto 0301 como recup.py)
             
         Returns:
             list: Lista de alertas en el chunk especificado
@@ -395,9 +439,10 @@ class DatabaseManager:
                 # Usar conexión independiente para este hilo
                 thread_conn = self.get_thread_connection("stock_chunk")
                 if not thread_conn:
-                    print(f"[DB DEBUG] No se pudo obtener conexión para hilo en intento {attempt + 1}")
+                    # print(f"[DB DEBUG] No se pudo obtener conexión para hilo en intento {attempt + 1}")  # DEBUG COMENTADO
                     continue
                 
+                # Mantener consulta exacta de recup.py con un solo depósito
                 query = """
                     SELECT 
                         c_codarticulo AS codigo,
@@ -419,8 +464,8 @@ class DatabaseManager:
                 
                 offset = start_row - 1  # Convert to 0-indexed
                 
-                # Usar conexión fresca para evitar errores de secuencia
-                cursor = self.conn.cursor()
+                # Usar conexión y cursor específicos del hilo para evitar errores de secuencia
+                cursor = thread_conn.cursor()
                 cursor.execute(query, (deposito, offset, fetch_size))
                 result = cursor.fetchall()
                 cursor.close()
@@ -428,13 +473,13 @@ class DatabaseManager:
                 # Debug logging solo en primer intento exitoso
                 if attempt == 0:
                     query_time = time.perf_counter() - query_start
-                    print(f"[DB DEBUG] Chunk query: offset={offset}, fetch_size={fetch_size}, deposito={deposito}")
-                    print(f"[DB DEBUG] Returned {len(result)} rows in {query_time:.3f}s")
+                    # print(f"[DB DEBUG] Chunk query: offset={offset}, fetch_size={fetch_size}, deposito={deposito}")  # DEBUG COMENTADO
+                    # print(f"[DB DEBUG] Returned {len(result)} rows in {query_time:.3f}s")  # DEBUG COMENTADO
                     
                     if result and len(result) > 0:
                         first_stock = result[0][2] if len(result[0]) > 2 else "N/A"
                         last_stock = result[-1][2] if len(result[-1]) > 2 else "N/A"
-                        print(f"[DB DEBUG] Stock range: {first_stock} to {last_stock}")
+                        # print(f"[DB DEBUG] Stock range: {first_stock} to {last_stock}")  # DEBUG COMENTADO
                 
                 return result
                 
@@ -444,7 +489,7 @@ class DatabaseManager:
                 
                 # Manejar errores ODBC específicos
                 if "HY010" in error_msg or "HY000" in error_msg:
-                    print(f"[DB DEBUG] Error ODBC en intento {attempt + 1}: {error_msg}")
+                    # print(f"[DB DEBUG] Error ODBC en intento {attempt + 1}: {error_msg}")  # DEBUG COMENTADO
                     
                     # Cerrar y recrear conexión para errores de secuencia
                     try:
@@ -462,11 +507,11 @@ class DatabaseManager:
                     continue
                 else:
                     # Error no recuperable
-                    print(f"[DB DEBUG] Error no recuperable (tiempo: {query_time:.3f}s): {error_msg}")
+                    # print(f"[DB DEBUG] Error no recuperable (tiempo: {query_time:.3f}s): {error_msg}")  # DEBUG COMENTADO
                     return []
         
         # Si llegamos aquí, todos los intentos fallaron
-        print(f"[DB DEBUG] Chunk fallido después de {max_retries} intentos")
+        # print(f"[DB DEBUG] Chunk fallido después de {max_retries} intentos")  # DEBUG COMENTADO
         return []
     
     def obtener_ventas_completas_tra(self, fecha_inicio, fecha_fin, sede_codigo, limit=None):
@@ -565,7 +610,15 @@ class DatabaseManager:
             fecha_fin_str = fecha_fin.strftime("%d-%m-%Y")
             offset = start_row - 1  # Convert to 0-indexed
             
-            return self.fetch_data(query, (fecha_inicio_str, fecha_fin_str, sede_codigo, offset, fetch_size))
+            # Ejecutar usando conexión específica del hilo para evitar colisiones
+            thread_conn = self.get_thread_connection("tra_chunk")
+            if not thread_conn:
+                return []
+            cursor = thread_conn.cursor()
+            cursor.execute(query, (fecha_inicio_str, fecha_fin_str, sede_codigo, offset, fetch_size))
+            rows = cursor.fetchall()
+            cursor.close()
+            return rows
         except Exception as e:
             print(f"Error obteniendo chunk de ventas TRA: {str(e)}")
             return []

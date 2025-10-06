@@ -5,6 +5,9 @@ Enfocado en productos con baja rotación e índices de movilidad cercanos a 0%
 import math
 from datetime import datetime, timedelta
 from typing import List, Dict, Tuple, Optional
+from pal.core.log import get_logger
+
+logger = get_logger("MBRP")
 
 
 def calcular_indice_movilidad(ventas_data: List, total_ventas_periodo: float = None) -> Dict[str, float]:
@@ -58,7 +61,7 @@ def calcular_indice_movilidad(ventas_data: List, total_ventas_periodo: float = N
         return indices_movilidad
         
     except Exception as e:
-        print(f"Error calculando índices de movilidad: {e}")
+        logger.error(f"Error calculando índices de movilidad: {e}")
         return {}
 
 
@@ -98,7 +101,7 @@ def obtener_fecha_ultima_venta(db_manager, codigo_producto: str, sede_codigo: st
         return None
         
     except Exception as e:
-        print(f"Error obteniendo última venta para {codigo_producto}: {e}")
+        logger.error(f"Error obteniendo última venta para {codigo_producto}: {e}")
         return None
 
 
@@ -148,7 +151,7 @@ def obtener_ultimas_ventas_bulk(db_manager, codigos_productos: List[str], sede_c
         return ultimas_ventas
         
     except Exception as e:
-        print(f"Error obteniendo últimas ventas bulk: {e}")
+        logger.error(f"Error obteniendo últimas ventas bulk: {e}")
         return {}
 
 
@@ -173,7 +176,7 @@ def calcular_dias_sin_venta(fecha_ultima_venta: Optional[datetime]) -> int:
         return diferencia.days
         
     except Exception as e:
-        print(f"Error calculando días sin venta: {e}")
+        logger.error(f"Error calculando días sin venta: {e}")
         return -1
 
 
@@ -211,7 +214,7 @@ def filtrar_productos_baja_rotacion(ventas_data: List, umbral_im: float = 20.0) 
         return productos_baja_rotacion
         
     except Exception as e:
-        print(f"Error filtrando productos de baja rotación: {e}")
+        logger.error(f"Error filtrando productos de baja rotación: {e}")
         return ventas_data
 
 
@@ -278,7 +281,7 @@ def clasificar_rotacion_mbrp(ventas_data: List) -> List:
         return ventas_clasificadas
         
     except Exception as e:
-        print(f"Error clasificando rotación MBRP: {e}")
+        logger.error(f"Error clasificando rotación MBRP: {e}")
         return list(ventas_data) if ventas_data else []
 
 
@@ -338,4 +341,5 @@ def generar_reporte_baja_rotacion(ventas_data: List, db_manager, sede_codigo: st
         }
         
     except Exception as e:
+        logger.error(f"Error generando reporte: {str(e)}")
         return {"error": f"Error generando reporte: {str(e)}"}

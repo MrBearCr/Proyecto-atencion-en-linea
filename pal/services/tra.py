@@ -3,6 +3,10 @@ Módulo de gestión TRA (Tiempo de Reposición de Artículos) para la aplicació
 """
 import math
 from datetime import datetime
+from .filters import filter_by_hierarchy
+from pal.core.log import get_logger
+
+logger = get_logger("TRA")
 
 
 def filter_ventas_tra(ventas, dept_code=None, group_code=None, sub_code=None, 
@@ -28,24 +32,17 @@ def filter_ventas_tra(ventas, dept_code=None, group_code=None, sub_code=None,
     datos_filtrados = list(ventas)
     favoritos = favoritos or set()
     
-    # Filtro jerárquico por departamento, grupo y subgrupo
-    if dept_code:
-        datos_filtrados = [
-            r for r in datos_filtrados 
-            if len(r) > 2 and str(r[2]) == str(dept_code)
-        ]
-    
-    if group_code:
-        datos_filtrados = [
-            r for r in datos_filtrados 
-            if len(r) > 3 and str(r[3]) == str(group_code)
-        ]
-        
-    if sub_code:
-        datos_filtrados = [
-            r for r in datos_filtrados 
-            if len(r) > 4 and str(r[4]) == str(sub_code)
-        ]
+    # Filtro jerárquico unificado (lee jerarquía desde el propio registro: idx 2,3,4)
+    datos_filtrados = filter_by_hierarchy(
+        datos_filtrados,
+        dept_code=dept_code,
+        group_code=group_code,
+        sub_code=sub_code,
+        get_dept=lambda r: r[2] if len(r) > 2 else None,
+        get_group=lambda r: r[3] if len(r) > 3 else None,
+        get_sub=lambda r: r[4] if len(r) > 4 else None,
+        missing_strategy="exclude",
+    )
     
     # Filtro de texto en descripción y código
     texto_busqueda = search_text.strip().lower()
@@ -137,7 +134,7 @@ def calcular_porcentajes_representacion(ventas_data):
         return porcentajes
         
     except Exception as e:
-        print(f"Error calculando porcentajes: {e}")
+        logger.error(f"Error calculando porcentajes: {e}")
         return {}
 
 
@@ -243,7 +240,7 @@ def clasificar_rotacion_tra(ventas_data, total_ventas=None):
         return ventas_clasificadas
         
     except Exception as e:
-        print(f"Error clasificando rotación: {e}")
+        logger.error(f"Error clasificando rotación: {e}")
         return list(ventas_data) if ventas_data else []
 
 

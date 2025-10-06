@@ -153,4 +153,4 @@ def setup_stock_tab(app):
         if hasattr(app, 'aplicar_filtro_stock'):
             app.aplicar_filtro_stock()
     else:
-        print("No hay conexión activa a la base de datos para cargar alertas iniciales")
+        (getattr(app, 'log', print))("No hay conexión activa a la base de datos para cargar alertas iniciales", "DEBUG")

@@ -4,6 +4,9 @@ Módulo de envíos programados para la aplicación PAL
 import threading
 import time
 from datetime import datetime
+from pal.core.log import get_logger
+
+logger = get_logger("ENVIOS")
 
 class EnvioProgramado:
     def __init__(self, db_manager):
@@ -17,7 +20,7 @@ class EnvioProgramado:
             )
             return True
         except Exception as e:
-            print(f"Error programando envío: {str(e)}")
+            logger.error(f"Error programando envío: {str(e)}")
             return False
 
 class ProgramadorEnvios:
@@ -65,5 +68,9 @@ class ProgramadorEnvios:
         thread_name="envios")
     
         for id_envio, numero_cliente, tipo_envio in recordatorios:
-            self.log(f"Enviando recordatorio ({tipo_envio}) a {numero_cliente}", "INFO")
+            # Log via app to keep UI console consistent
+            if hasattr(self, 'app') and hasattr(self.app, 'log'):
+                self.app.log(f"Enviando recordatorio ({tipo_envio}) a {numero_cliente}", "INFO")
+            else:
+                logger.info(f"Enviando recordatorio ({tipo_envio}) a {numero_cliente}")
             self.enviar_mensaje_whatsapp(numero_cliente, tipo_envio=tipo_envio)

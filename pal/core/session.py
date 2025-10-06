@@ -6,6 +6,9 @@ import time
 import keyring
 from tkinter import messagebox
 from typing import Optional
+from pal.core.log import get_logger
+
+logger = get_logger("CORE")
 
 class SessionManager:
     def __init__(self, root: tk.Tk)-> None:
@@ -46,7 +49,7 @@ class SessionManager:
             if keyring.get_password("DBClientApp", "temp_pass"):
                 keyring.delete_password("DBClientApp", "temp_pass")
         except Exception as e:
-            print(f"Error eliminando contraseña temporal: {str(e)}")
+            logger.error(f"Error eliminando contraseña temporal: {str(e)}")
         
         messagebox.showinfo("Sesión Expirada", "La sesión ha expirado por inactividad")
         self.root.destroy()

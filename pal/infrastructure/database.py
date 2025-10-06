@@ -4,6 +4,7 @@ Gestor de base de datos para la aplicación PAL
 import pyodbc
 import configparser
 import time
+import threading
 from ..core.errors import ErrorCode
 
 class DatabaseManager:
@@ -18,8 +19,23 @@ class DatabaseManager:
         self.password = None
         # Pool de conexiones para hilos paralelos
         self._connection_pool = {}
+        # Lock para acceso thread-safe al pool
+        import threading
+        self._pool_lock = threading.Lock()
         # Flag de depuración para controlar prints [DB DEBUG]
         self.debug_enabled = False
+
+    def _log(self, message: str, level: str = 'INFO'):
+        """Logger interno con prefijo para identificar origen en consola"""
+        try:
+            thread_name = threading.current_thread().name
+            prefix = f"[PAL][DB][{level}][{thread_name}]"
+            print(f"{prefix} {message}")
+        except Exception:
+            try:
+                print(message)
+            except Exception:
+                pass
 
     def table_exists(self, table_name: str) -> bool:
         """Verifica si una tabla existe en la base de datos con manejo de errores mejorado"""
@@ -32,7 +48,7 @@ class DatabaseManager:
             result = self.fetch_data(query, (table_name.lower(),))
             return result[0][0] > 0 if result else False
         except Exception as e:
-            print(f"Error verificando tabla {table_name}: {str(e)}")
+            self._log(f"Error verificando tabla {table_name}: {str(e)}", "ERROR")
             return False
 
     def connect(self, server, database, user, password, retry_attempts=2):
@@ -53,7 +69,7 @@ class DatabaseManager:
             Exception: If connection fails after all retries
         """
         # Log connection attempt with sanitized info
-        print(f"Attempting to connect to server: {server}, database: {database}, user: {user if user else 'Windows Auth'}")
+        self._log(f"Attempting to connect to server: {server}, database: {database}, user: {user if user else 'Windows Auth'}", "INFO")
         
         # Cadena inicial sin database para crear la BD si no existe
         initial_conn_str = (
@@ -62,6 +78,7 @@ class DatabaseManager:
             "Encrypt=no;"          
             "TrustServerCertificate=yes;"  # Changed to yes for better compatibility
             "Connection Timeout=30;"       # Increased timeout
+            "MARS_Connection=yes;"         # Enable Multiple Active Result Sets
         )
     
         if user:
@@ -75,7 +92,7 @@ class DatabaseManager:
         
         while attempt <= retry_attempts:
             if attempt > 0:
-                print(f"Retry attempt {attempt} of {retry_attempts}...")
+                self._log(f"Retry attempt {attempt} of {retry_attempts}...", "WARNING")
                 time.sleep(2)  # Add delay between retries
                 
             # Intentar crear la base de datos si no existe
@@ -99,7 +116,7 @@ class DatabaseManager:
             except pyodbc.Error as e:
                 last_error = e
                 error_details = str(e).replace('\n', ' ')
-                print(f"Connection attempt {attempt+1} failed: {error_details}")
+                self._log(f"Connection attempt {attempt+1} failed: {error_details}", "ERROR")
                 attempt += 1
                 
                 # Only raise exception if we've exhausted all retries
@@ -190,16 +207,21 @@ class DatabaseManager:
             raise Exception(error_msg) from e
         
     def obtener_alertas_stock(self, limit=None):
-        max_retries = 2
+        max_retries = 3
         
         for attempt in range(max_retries):
+            cursor = None
+            thread_conn = None
             try:
-                # Verificar conexión
-                if not self.conn:
-                    # print(f"[DB DEBUG] Reconectando en obtener_alertas_stock (intento {attempt + 1})...")  # DEBUG COMENTADO
-                    self.connect(self.server, self.database, self.user, self.password)
-                    if not self.conn:
+                # Obtener conexión thread-safe
+                thread_conn = self.get_thread_connection("alertas_stock")
+                if not thread_conn:
+                    if getattr(self, 'debug_enabled', False):
+                        self._log(f"[DB DEBUG] No se pudo obtener conexión para alertas (intento {attempt + 1})", "DEBUG")
+                    if attempt < max_retries - 1:
+                        time.sleep(1)
                         continue
+                    return []
                 
                 # Mantener la consulta exacta de recup.py - solo depósito 0301
                 query = """
@@ -223,164 +245,278 @@ class DatabaseManager:
                 if limit:
                     query += f" OFFSET 0 ROWS FETCH NEXT {limit} ROWS ONLY"
             
-                # Usar conexión y cursor específicos del hilo para evitar errores de secuencia
-                thread_conn = self.get_thread_connection("alertas_full")
+                # Crear cursor para esta operación
                 cursor = thread_conn.cursor()
                 cursor.execute(query)  # Sin parámetros - hardcodeado como recup.py
                 result = cursor.fetchall()
-                cursor.close()
                 
-                # print(f"[DB DEBUG] obtener_alertas_stock exitoso: {len(result)} registros (limit: {limit})")  # DEBUG COMENTADO
+                if getattr(self, 'debug_enabled', False):
+                    self._log(f"[DB DEBUG] Query executed successfully: {len(result)} rows returned", "DEBUG")
+                
                 return result
                 
             except Exception as e:
                 error_msg = str(e)
-                # print(f"[DB DEBUG] Error en obtener_alertas_stock (intento {attempt + 1}): {error_msg}")  # DEBUG COMENTADO
+                if getattr(self, 'debug_enabled', False):
+                    self._log(f"[DB DEBUG] Error en obtener_alertas_stock (intento {attempt + 1}): {error_msg}", "DEBUG")
                 
-                # Manejar errores ODBC
-                if "HY010" in error_msg or "HY000" in error_msg:
-                    # Resetear conexión
-                    try:
-                        if hasattr(self, 'cursor') and self.cursor:
-                            self.cursor.close()
-                        if self.conn:
-                            self.conn.close()
-                        self.conn = None
-                        self.cursor = None
-                    except:
-                        pass
+                # Manejar errores ODBC específicos
+                if any(code in error_msg for code in ["HY010", "HY000", "07005", "08S01", "08003"]):
+                    # Error de conexión - limpiar pool para este hilo
+                    thread_key = f"alertas_stock_{threading.current_thread().name}"
+                    with self._pool_lock:
+                        if thread_key in self._connection_pool:
+                            try:
+                                self._connection_pool[thread_key].close()
+                            except:
+                                pass
+                            del self._connection_pool[thread_key]
                     
                     if attempt < max_retries - 1:
-                        time.sleep(1)
+                        time.sleep(2 ** attempt)  # Exponential backoff
                         continue
                 
-                return []  # Return empty on final failure
+                # Si es el último intento, devolver lista vacía
+                if attempt == max_retries - 1:
+                    return []
+                    
+            finally:
+                # Siempre cerrar el cursor
+                if cursor:
+                    try:
+                        cursor.close()
+                    except:
+                        pass
         
-        # print(f"[DB DEBUG] obtener_alertas_stock fallido después de {max_retries} intentos")  # DEBUG COMENTADO
         return []
     
     def get_thread_connection(self, thread_name="default"):
-        """Obtiene una conexión independiente para un hilo específico"""
+        """Obtiene una conexión independiente para un hilo específico con thread-safety"""
         import threading
         
         current_thread = threading.current_thread().name
         thread_key = f"{thread_name}_{current_thread}"
         
-        # Si ya existe una conexión para este hilo, verificar que esté activa
-        if thread_key in self._connection_pool:
-            try:
-                conn = self._connection_pool[thread_key]
-                # Verificar si la conexión está activa
-                cursor = conn.cursor()
-                cursor.execute("SELECT 1")
-                cursor.close()
-                return conn
-            except:
-                # Conexión inválida, remover del pool
+        # Thread-safe access to connection pool
+        with self._pool_lock:
+            # Si ya existe una conexión para este hilo, verificar que esté activa
+            if thread_key in self._connection_pool:
                 try:
-                    self._connection_pool[thread_key].close()
+                    conn = self._connection_pool[thread_key]
+                    # Verificar si la conexión está activa
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT 1")
+                    cursor.close()
+                    return conn
                 except:
-                    pass
-                del self._connection_pool[thread_key]
-        
-        # Crear nueva conexión para este hilo
-        try:
-            import pyodbc
+                    # Conexión inválida, remover del pool
+                    try:
+                        self._connection_pool[thread_key].close()
+                    except:
+                        pass
+                    del self._connection_pool[thread_key]
             
-            conn_str = (
-                f"DRIVER={{SQL Server}};"
-                f"SERVER={self.server};"
-                f"DATABASE={self.database};"
-                "Encrypt=no;"
-                "TrustServerCertificate=yes;"
-                "Connection Timeout=30;"
-            )
-            
-            if self.user:
-                conn_str += f"UID={self.user};PWD={self.password or ''};"
-            else:
-                conn_str += "Trusted_Connection=yes;"
-            
-            new_conn = pyodbc.connect(conn_str)
-            self._connection_pool[thread_key] = new_conn
-            
-            if getattr(self, 'debug_enabled', False):
-                print(f"[DB DEBUG] Nueva conexión creada para hilo: {thread_key}")
-            return new_conn
-            
-        except Exception as e:
-            if getattr(self, 'debug_enabled', False):
-                print(f"[DB DEBUG] Error creando conexión para hilo {thread_key}: {e}")
-            return None
+            # Crear nueva conexión para este hilo
+            try:
+                import pyodbc
+                
+                conn_str = (
+                    f"DRIVER={{SQL Server}};"
+                    f"SERVER={self.server};"
+                    f"DATABASE={self.database};"
+                    "Encrypt=no;"
+                    "TrustServerCertificate=yes;"
+                    "Connection Timeout=30;"
+                    "MARS_Connection=yes;"  # Enable Multiple Active Result Sets
+                )
+                
+                if self.user:
+                    conn_str += f"UID={self.user};PWD={self.password or ''};"
+                else:
+                    conn_str += "Trusted_Connection=yes;"
+                
+                new_conn = pyodbc.connect(conn_str)
+                self._connection_pool[thread_key] = new_conn
+                if getattr(self, 'debug_enabled', False):
+                    self._log(f"[DB DEBUG] Nueva conexión creada para hilo: {thread_key}", "DEBUG")
+                return new_conn
+
+            except Exception as e:
+                if getattr(self, 'debug_enabled', False):
+                    self._log(f"[DB DEBUG] Error creando conexión para hilo {thread_key}: {e}", "DEBUG")
+                return None
     
     def close_thread_connections(self):
-        """Cierra todas las conexiones del pool de hilos"""
-        for thread_key, conn in list(self._connection_pool.items()):
-            try:
-                conn.close()
-                if getattr(self, 'debug_enabled', False):
-                    print(f"[DB DEBUG] Conexión cerrada: {thread_key}")
-            except:
-                pass
-        self._connection_pool.clear()
+        """Cierra todas las conexiones del pool de hilos de forma thread-safe"""
+        with self._pool_lock:
+            for thread_key, conn in list(self._connection_pool.items()):
+                try:
+                    conn.close()
+                    if getattr(self, 'debug_enabled', False):
+                        self._log(f"[DB DEBUG] Conexión cerrada: {thread_key}", "DEBUG")
+                except:
+                    pass
+            self._connection_pool.clear()
         
-    def toggle_favorito(self, codigo_producto):
-        try:
-            self.execute_query(
-                """MERGE INTO favoritos_productos AS target
-                USING (VALUES (?)) AS source(codigo)
-                ON target.codigo = source.codigo
-                WHEN MATCHED THEN
-                    UPDATE SET favorito = ~favorito
-                WHEN NOT MATCHED THEN
-                    INSERT (codigo, favorito) VALUES (source.codigo, 1);""",
-                (codigo_producto,)
-            )
-            return True
-        except Exception as e:
-            print(f"Error actualizando favorito: {str(e)}")
-            return False
 
     def execute_query(self, query, params=None):
+        cursor = None
         try:
+            # Ensure connection is valid
+            if not self.ensure_connection():
+                raise Exception("Unable to establish database connection")
+            
+            # Create new cursor for this operation
+            cursor = self.conn.cursor()
             if params:
-                self.cursor.execute(query, params)
+                cursor.execute(query, params)
             else:
-                self.cursor.execute(query)
+                cursor.execute(query)
             self.conn.commit()
             return True
         except pyodbc.Error as e:
-            self.conn.rollback()
+            if self.conn:
+                try:
+                    self.conn.rollback()
+                except:
+                    pass
             error_msg = f"{ErrorCode.DB_QUERY_EXECUTION}: {str(e)}"
             raise Exception(error_msg) from e
+        finally:
+            if cursor:
+                try:
+                    cursor.close()
+                except:
+                    pass
 
-    def fetch_data(self, query, params=None):
+    def is_connection_valid(self):
+        """Validates if the current database connection is active and functional"""
         try:
             if not self.conn:
-                self.connect(self.server, self.database, self.user, self.password)
+                return False
             
-            # Añadir reintentos para errores transitorios
-            max_retries = 3
-            for attempt in range(max_retries):
-                try:
-                    self.cursor.execute(query, params or ())
-                    return self.cursor.fetchall()
-                except pyodbc.OperationalError as e:
-                    if attempt < max_retries - 1:
-                        time.sleep(2)
-                        self.connect(self.server, self.database, self.user, self.password)
-                        continue
-                    raise
+            # Test connection with a simple query
+            test_cursor = self.conn.cursor()
+            test_cursor.execute("SELECT 1")
+            test_cursor.fetchone()
+            test_cursor.close()
+            return True
+        except Exception:
+            return False
+    
+    def ensure_connection(self):
+        """Ensures we have a valid database connection, reconnecting if necessary"""
+        if not self.is_connection_valid():
+            try:
+                # Close any existing connection
+                if self.conn:
+                    try:
+                        self.conn.close()
+                    except Exception:
+                        pass
+                    self.conn = None
+                    self.cursor = None
                 
-        except pyodbc.Error as e:
-            error_msg = f"""
+                # Reconnect
+                if self.server and self.database:
+                    self.connect(self.server, self.database, self.user, self.password)
+                    return True
+                else:
+                    self._log("Cannot reconnect: missing server or database configuration", "WARNING")
+                    return False
+            except Exception as e:
+                self._log(f"Failed to ensure database connection: {str(e)}", "ERROR")
+                return False
+        return True
+
+    def fetch_data(self, query, params=None):
+        """Executes a SELECT query with improved error handling and connection validation"""
+        max_retries = 3
+        
+        for attempt in range(max_retries):
+            cursor = None
+            try:
+                # Ensure we have a valid connection
+                if not self.ensure_connection():
+                    if attempt == max_retries - 1:
+                        raise Exception("Unable to establish database connection")
+                    time.sleep(2)
+                    continue
+                
+                # Create a new cursor for this query to avoid state conflicts
+                cursor = self.conn.cursor()
+                cursor.execute(query, params or ())
+                result = cursor.fetchall()
+                
+                # Log successful execution in debug mode
+                if getattr(self, 'debug_enabled', False):
+                    self._log(f"[DB DEBUG] Query executed successfully: {len(result) if result else 0} rows returned", "DEBUG")
+                
+                return result
+                
+            except pyodbc.Error as e:
+                error_code = getattr(e, 'args', [''])[0] if hasattr(e, 'args') else str(e)
+                error_msg = str(e)
+                
+                # Handle specific ODBC errors
+                if error_code in ['HY000', 'HY010', '08S01', '08003', '07005']:
+                    # Connection-related errors - try to reconnect
+                    if getattr(self, 'debug_enabled', False):
+                        self._log(f"[DB DEBUG] Connection error detected on attempt {attempt + 1}: {error_code}", "DEBUG")
+                    
+                    # Force reconnection
+                    if cursor:
+                        try:
+                            cursor.close()
+                        except:
+                            pass
+                    self.conn = None
+                    self.cursor = None
+                    
+                    if attempt < max_retries - 1:
+                        time.sleep(2 ** attempt)  # Exponential backoff
+                        continue
+                
+                # Log the error details
+                detailed_error = f"""
             Error en consulta SQL:
             Query: {query}
             Params: {params}
-            Error: {str(e)}
+            Error Code: {error_code}
+            Error: {error_msg}
+            Attempt: {attempt + 1}/{max_retries}
             """
-            print(error_msg, "ERROR")
-            raise
+                self._log(detailed_error, "ERROR")
+                
+                # If this is the last attempt, raise the exception
+                if attempt == max_retries - 1:
+                    raise Exception(f"Database query failed after {max_retries} attempts: {error_msg}")
+                    
+            except Exception as e:
+                # Handle non-ODBC exceptions
+                error_msg = f"""
+            Unexpected error in database query:
+            Query: {query}
+            Params: {params}
+            Error: {str(e)}
+            Attempt: {attempt + 1}/{max_retries}
+            """
+                self._log(error_msg, "ERROR")
+                
+                if attempt == max_retries - 1:
+                    raise
+                
+                time.sleep(1)
+            finally:
+                # Always close cursor after use
+                if cursor:
+                    try:
+                        cursor.close()
+                    except:
+                        pass
+        
+        # Should not reach here, but just in case
+        return []
 
     def fetch_data_threadsafe(self, query, params=None, thread_name="generic"):
         """Ejecuta una SELECT usando una conexión dedicada para el hilo actual."""
@@ -442,31 +578,44 @@ class DatabaseManager:
                     # print(f"[DB DEBUG] No se pudo obtener conexión para hilo en intento {attempt + 1}")  # DEBUG COMENTADO
                     continue
                 
-                # Mantener consulta exacta de recup.py con un solo depósito
+                # Consulta optimizada con CTE para mejor performance
                 query = """
-                    SELECT 
-                        c_codarticulo AS codigo,
-                        MAX(p.C_DESCRI) AS descripcion,
-                        CAST(SUM(n_cantidad) AS INT) AS stock,  
-                    CASE
-                        WHEN SUM(n_cantidad) BETWEEN 15 AND 20 THEN 'Leve'  
-                        WHEN SUM(n_cantidad) BETWEEN 8 AND 14 THEN 'Media'
-                        ELSE 'Crítica'
-                    END AS nivel
-                    FROM MA_DEPOPROD d
+                    WITH stock_summary AS (
+                        SELECT 
+                            d.c_codarticulo,
+                            SUM(d.n_cantidad) as stock_total,
+                            p.C_DESCRI
+                        FROM MA_DEPOPROD d
                         INNER JOIN MA_PRODUCTOS p ON d.c_codarticulo = p.C_CODIGO
-                        WHERE c_coddeposito = ?
-                        GROUP BY c_codarticulo
-                        HAVING SUM(n_cantidad) < 21  
-                        ORDER BY stock ASC
-                        OFFSET ? ROWS FETCH NEXT ? ROWS ONLY
+                        WHERE d.c_coddeposito = ?
+                        GROUP BY d.c_codarticulo, p.C_DESCRI
+                        HAVING SUM(d.n_cantidad) < 21
+                    ),
+                    stock_ranked AS (
+                        SELECT 
+                            c_codarticulo AS codigo,
+                            C_DESCRI AS descripcion,
+                            CAST(stock_total AS INT) AS stock,
+                            CASE
+                                WHEN stock_total BETWEEN 15 AND 20 THEN 'Leve'  
+                                WHEN stock_total BETWEEN 8 AND 14 THEN 'Media'
+                                ELSE 'Crítica'
+                            END AS nivel,
+                            ROW_NUMBER() OVER (ORDER BY stock_total ASC) as rn
+                        FROM stock_summary
+                    )
+                    SELECT codigo, descripcion, stock, nivel
+                    FROM stock_ranked
+                    WHERE rn BETWEEN ? AND ?
                     """
                 
-                offset = start_row - 1  # Convert to 0-indexed
+                # Parámetros para consulta CTE: rango BETWEEN
+                start_rn = start_row
+                end_rn = start_row + fetch_size - 1
                 
                 # Usar conexión y cursor específicos del hilo para evitar errores de secuencia
                 cursor = thread_conn.cursor()
-                cursor.execute(query, (deposito, offset, fetch_size))
+                cursor.execute(query, (deposito, start_rn, end_rn))
                 result = cursor.fetchall()
                 cursor.close()
                 

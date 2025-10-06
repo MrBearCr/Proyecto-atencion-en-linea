@@ -20,14 +20,29 @@ def setup_tra_tab(app):
     fecha_frame = ttk.Frame(top_controls)
     fecha_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-    ttk.Label(fecha_frame, text="Desde:").pack(side=tk.LEFT)
-    app.fecha_inicio_entry = DateEntry(fecha_frame, width=12, date_pattern='yyyy-mm-dd')
-    app.fecha_inicio_entry.set_date(datetime(datetime.now().year, 1, 1))
+    # Rango rápido
+    ttk.Label(fecha_frame, text="Rango:").pack(side=tk.LEFT)
+    app.tra_rango_var = tk.StringVar(value="30 días")
+    rango_combo = ttk.Combobox(fecha_frame, textvariable=app.tra_rango_var, state='readonly', width=10)
+    rango_combo['values'] = ["7 días", "15 días", "30 días", "60 días", "90 días", "180 días", "365 días", "Personalizado"]
+    rango_combo.pack(side=tk.LEFT, padx=5)
+    
+    ttk.Label(fecha_frame, text="Desde:").pack(side=tk.LEFT, padx=(10,0))
+    # Configurar fecha máxima: ayer (las ventas no se cargan hasta el cierre)
+    from datetime import timedelta
+    ayer = datetime.now() - timedelta(days=1)
+    # Ampliar rango para permitir análisis histórico hasta 2 años
+    hace_2_anos = ayer - timedelta(days=730)
+    
+    app.fecha_inicio_entry = DateEntry(fecha_frame, width=12, date_pattern='yyyy-mm-dd',
+                                      mindate=hace_2_anos, maxdate=ayer)
+    app.fecha_inicio_entry.set_date(ayer - timedelta(days=30))  # Default: últimos 30 días
     app.fecha_inicio_entry.pack(side=tk.LEFT, padx=5)
 
     ttk.Label(fecha_frame, text="Hasta:").pack(side=tk.LEFT)
-    app.fecha_fin_entry = DateEntry(fecha_frame, width=12, date_pattern='yyyy-mm-dd')
-    app.fecha_fin_entry.set_date(datetime.now())
+    app.fecha_fin_entry = DateEntry(fecha_frame, width=12, date_pattern='yyyy-mm-dd',
+                                   mindate=hace_2_anos, maxdate=ayer)
+    app.fecha_fin_entry.set_date(ayer)  # Default: hasta ayer
     app.fecha_fin_entry.pack(side=tk.LEFT, padx=5)
 
     ttk.Label(fecha_frame, text="Sede:").pack(side=tk.LEFT, padx=10)
@@ -74,7 +89,37 @@ def setup_tra_tab(app):
     search_entry = ttk.Entry(search_frame, textvariable=app.tra_search_var)
     search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
     
+    # Funcionalidad del combobox de rango
+    def _on_tra_rango_selected(event=None):
+        rango = app.tra_rango_var.get()
+        ayer = datetime.now() - timedelta(days=1)
+        hace_2_anos = ayer - timedelta(days=730)
+        
+        if rango == "Personalizado":
+            # Mostrar mensaje informativo sobre el rango permitido
+            try:
+                app.log(f"Rango personalizado seleccionado. Fechas permitidas: {hace_2_anos.strftime('%Y-%m-%d')} a {ayer.strftime('%Y-%m-%d')}", "INFO")
+            except Exception:
+                pass
+            return
+        
+        # Extraer número de días
+        dias = int(rango.split()[0])
+        fecha_inicio = ayer - timedelta(days=dias-1)  # -1 porque incluimos el día actual
+        
+        # Asegurar que la fecha no exceda el límite mínimo
+        if fecha_inicio < hace_2_anos:
+            fecha_inicio = hace_2_anos
+            try:
+                app.log(f"Fecha inicio ajustada al límite mínimo: {hace_2_anos.strftime('%Y-%m-%d')}", "WARNING")
+            except Exception:
+                pass
+        
+        app.fecha_inicio_entry.set_date(fecha_inicio)
+        app.fecha_fin_entry.set_date(ayer)
+    
     # Conectar eventos de búsqueda y filtros
+    rango_combo.bind('<<ComboboxSelected>>', _on_tra_rango_selected)
     app.tra_search_var.trace_add('write', lambda *args: app.aplicar_filtro_tra())
     app.tra_dept_combo.bind('<<ComboboxSelected>>', app.on_tra_dept_selected)
     app.tra_group_combo.bind('<<ComboboxSelected>>', app.on_tra_group_selected)
@@ -165,3 +210,11 @@ def setup_tra_tab(app):
         app.tra_group_dict = {}
     if not hasattr(app, 'tra_sub_dict'):
         app.tra_sub_dict = {}
+
+    # Si hay conexión y los combos están vacíos, disparar carga unificada de jerarquías
+    try:
+        if hasattr(app, 'db_manager') and getattr(app.db_manager, 'ensure_connection', lambda: False)():
+            if not app.tra_dept_dict:
+                app.cargar_jerarquia_unificada()
+    except Exception:
+        pass

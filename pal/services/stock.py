@@ -5,6 +5,10 @@ import json
 import os
 import math
 from datetime import datetime, timedelta
+from .filters import filter_by_hierarchy
+from pal.core.log import get_logger
+
+logger = get_logger("STOCK")
 
 def get_existencias_por_ubicacion(db_manager, codigo, depositos, use_cache=True):
     """
@@ -72,7 +76,7 @@ def get_existencias_por_ubicacion(db_manager, codigo, depositos, use_cache=True)
         return existencias
         
     except Exception as e:
-        print(f"Error obteniendo existencias: {e}")
+        logger.error(f"Error obteniendo existencias: {e}")
         return 0
 
 def filter_alertas(alertas, producto_jerarquia, dept_code=None, group_code=None, 
@@ -99,12 +103,18 @@ def filter_alertas(alertas, producto_jerarquia, dept_code=None, group_code=None,
     datos_filtrados = list(alertas)
     favoritos = favoritos or set()
     
-    # Filtro jerárquico
+    # Filtro jerárquico unificado (estricto): si hay filtros activos y el producto no está en la jerarquía, se excluye
+    datos_filtrados = filter_by_hierarchy(
+        datos_filtrados,
+        dept_code=dept_code,
+        group_code=group_code,
+        sub_code=sub_code,
+        get_code=lambda r: r[0],
+        jerarquia_map=producto_jerarquia or {},
+        missing_strategy="exclude",
+    )
     if any([dept_code, group_code, sub_code]):
-        datos_filtrados = [
-            r for r in datos_filtrados 
-            if _coincide_jerarquia(r[0], producto_jerarquia, dept_code, group_code, sub_code)
-        ]
+        logger.debug(f"Filtro jerárquico aplicado - de {len(alertas)} a {len(datos_filtrados)} productos")
     
     # Filtro de texto en descripción y código
     texto_busqueda = search_text.strip().lower()
@@ -127,16 +137,6 @@ def filter_alertas(alertas, producto_jerarquia, dept_code=None, group_code=None,
     
     return datos_ordenados
 
-def _coincide_jerarquia(codigo, producto_jerarquia, dept_code, group_code, sub_code):
-    """Helper function para filtro jerárquico optimizado"""
-    jerarquia = producto_jerarquia.get(codigo)
-    if not jerarquia:
-        return False
-    
-    dep, grp, sub = jerarquia
-    return (not dept_code or dep == dept_code) and \
-           (not group_code or grp == group_code) and \
-           (not sub_code or sub == sub_code)
 
 def paginate(datos, current_page, page_size):
     """
@@ -183,28 +183,103 @@ def load_all_jerarquia(db_manager, cache_file, cache_ttl_seconds):
         if os.path.exists(cache_file):
             mtime = datetime.fromtimestamp(os.path.getmtime(cache_file))
             if datetime.now() - mtime < timedelta(seconds=cache_ttl_seconds):
-                with open(cache_file, 'r', encoding='utf-8') as f:
-                    return json.load(f)
+                try:
+                    with open(cache_file, 'r', encoding='utf-8') as f:
+                        cache_data = json.load(f)
+                    # Validar que el cache tenga estructura correcta
+                    if isinstance(cache_data, dict) and len(cache_data) > 0:
+                        logger.success(f"Cache de jerarquía cargado: {len(cache_data)} productos")
+                        return cache_data
+                    else:
+                        logger.warning("Cache vacío o inválido, se reconstruirá")
+                except json.JSONDecodeError as e:
+                    # Caché corrupto: eliminar y reconstruir
+                    logger.warning(f"Cache corrupto detectado, eliminando: {e}")
+                    try:
+                        os.remove(cache_file)
+                        logger.success("Cache corrupto eliminado")
+                    except Exception:
+                        pass
+                except Exception as e:
+                    logger.warning(f"Error leyendo cache: {e}")
         
         # Cargar desde BD
         filas = db_manager.fetch_data(
             "SELECT C_CODIGO, C_DEPARTAMENTO, C_GRUPO, C_SUBGRUPO FROM MA_PRODUCTOS"
         )
-        jerarquia = {fila[0]: (fila[1], fila[2], fila[3]) for fila in filas if all(fila)}
+        # Incluir productos con código válido aunque algunos campos sean None, normalizando strings
+        def _s(x):
+            try:
+                s = str(x).strip()
+                return s if s and s.lower() != 'none' else ""
+            except Exception:
+                return ""
+        jerarquia = {}
+        sin_dept = 0
+        sin_grupo = 0
+        sin_sub = 0
+        completos = 0
+        for fila in filas or []:
+            try:
+                if not fila:
+                    continue
+                cod = _s(fila[0])
+                if not cod:
+                    continue
+                dep = _s(fila[1]) if len(fila) > 1 else ""
+                grp = _s(fila[2]) if len(fila) > 2 else ""
+                sub = _s(fila[3]) if len(fila) > 3 else ""
+                jerarquia[cod] = (dep, grp, sub)
+                # Diagnóstico
+                if not dep:
+                    sin_dept += 1
+                if not grp:
+                    sin_grupo += 1
+                if not sub:
+                    sin_sub += 1
+                if dep and grp and sub:
+                    completos += 1
+            except Exception:
+                continue
+        logger.info(f"Jerarquía cargada: {len(jerarquia)} productos | Completos: {completos} | Sin dept: {sin_dept} | Sin grupo: {sin_grupo} | Sin sub: {sin_sub}")
         
-        # Guardar en caché
-        with open(cache_file, 'w', encoding='utf-8') as f:
-            json.dump(jerarquia, f, ensure_ascii=False)
+        # Guardar en caché con escritura atómica (evitar corrupción)
+        try:
+            # Escribir en archivo temporal primero
+            temp_cache_file = cache_file + ".tmp"
+            with open(temp_cache_file, 'w', encoding='utf-8') as f:
+                json.dump(jerarquia, f, ensure_ascii=False, indent=2)
+            
+            # Validar que el archivo temporal sea válido
+            with open(temp_cache_file, 'r', encoding='utf-8') as f:
+                test_load = json.load(f)
+                if not isinstance(test_load, dict):
+                    raise ValueError("Cache inválido generado")
+            
+            # Si es válido, reemplazar el cache original
+            if os.path.exists(cache_file):
+                os.remove(cache_file)
+            os.rename(temp_cache_file, cache_file)
+            logger.success(f"Cache guardado exitosamente: {cache_file}")
+            
+        except Exception as e:
+            logger.warning(f"Error guardando cache: {e}")
+            # Limpiar archivo temporal si existe
+            try:
+                if os.path.exists(temp_cache_file):
+                    os.remove(temp_cache_file)
+            except Exception:
+                pass
             
         return jerarquia
         
     except Exception as e:
-        print(f"Error cargando jerarquía: {e}")
+        logger.error(f"Error cargando jerarquía: {e}")
         return {}
 
 def build_producto_jerarquia(all_jerarquia, codigos_en_alerta):
     """
-    Filtra la jerarquía usando solo los códigos actualmente en alerta
+    Filtra la jerarquía usando solo los códigos actualmente en alerta, normalizando códigos.
     
     Args:
         all_jerarquia: Dict completo de jerarquía
@@ -216,7 +291,15 @@ def build_producto_jerarquia(all_jerarquia, codigos_en_alerta):
     if not all_jerarquia or not codigos_en_alerta:
         return {}
         
-    return {cod: all_jerarquia[cod] for cod in codigos_en_alerta if cod in all_jerarquia}
+    # Normalizar claves
+    def _s(x):
+        try:
+            return str(x).strip()
+        except Exception:
+            return ""
+    norm_map = { _s(k): v for k, v in (all_jerarquia or {}).items() }
+    norm_codes = { _s(c) for c in (codigos_en_alerta or set()) }
+    return {cod: norm_map[cod] for cod in norm_codes if cod in norm_map}
 
 
 def fetch_stock_alerts_optimized(db_manager, limit=None, offset=0, use_indices=True):
@@ -269,7 +352,7 @@ def fetch_stock_alerts_optimized(db_manager, limit=None, offset=0, use_indices=T
         return result if result else []
         
     except Exception as e:
-        print(f"Error en consulta optimizada de stock: {e}")
+        logger.error(f"Error en consulta optimizada de stock: {e}")
         return []
 
 
@@ -311,7 +394,7 @@ def get_stock_alerts_chunked(db_manager, chunk_size=500, max_chunks=None, progre
                 break
                 
     except Exception as e:
-        print(f"Error en carga chunked de stock: {e}")
+        logger.error(f"Error en carga chunked de stock: {e}")
         return
 
 
@@ -339,7 +422,7 @@ def cache_stock_data(cache_key, data, ttl_hours=1):
             json.dump(cache_data, f, ensure_ascii=False, default=str)
             
     except Exception as e:
-        print(f"Error guardando cache de stock: {e}")
+        logger.error(f"Error guardando cache de stock: {e}")
 
 
 def load_cached_stock_data(cache_key):
@@ -380,5 +463,5 @@ def load_cached_stock_data(cache_key):
         return cache_data['data']
         
     except Exception as e:
-        print(f"Error cargando cache de stock: {e}")
+        logger.error(f"Error cargando cache de stock: {e}")
         return None

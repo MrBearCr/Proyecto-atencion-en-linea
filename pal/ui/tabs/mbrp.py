@@ -149,6 +149,14 @@ def setup_mbrp_tab(app):
     app.mbrp_dept_combo['values'] = ['Todos']
     app.mbrp_dept_var.set('Todos')
 
+    # Si hay conexión y combos vacíos, disparar carga unificada (reutiliza misma jerarquía que TRA)
+    try:
+        if hasattr(app, 'db_manager') and getattr(app.db_manager, 'ensure_connection', lambda: False)():
+            if not app.mbrp_dept_dict:
+                app.cargar_jerarquia_unificada()
+    except Exception:
+        pass
+
     # Bindings de filtros (idénticos a TRA, pero con prefijo mbrp_)
     def _on_mbrp_dept_selected(event=None):
         desc = app.mbrp_dept_var.get()

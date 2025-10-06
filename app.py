@@ -18,6 +18,7 @@ import http.server
 import socketserver
 import threading 
 import json
+import inspect
 import math
 from tkcalendar import Calendar, DateEntry
 from datetime import datetime, timedelta
@@ -184,6 +185,9 @@ class DatabaseApp:
                 pass
             self.setup_bindings()
             self.cache = CacheDescripciones()
+            
+            # Flags de carga para evitar duplicados
+            self.jerarquias_unificadas_cargadas = False
             
             # Cargar configuración de depuración por módulo
             self.debug_flags = load_debug_config()
@@ -356,9 +360,9 @@ class DatabaseApp:
             return
         """Actualiza las alertas con paginación y caché"""
         try:
-            # Check for active database connection
-            if not hasattr(self.db_manager, 'conn') or not self.db_manager.conn:
-                print("No hay conexión activa a la base de datos para actualizar alertas")
+            # Ensure database connection is valid before proceeding
+            if not self.db_manager.ensure_connection():
+                print("No hay conexión activa a la base de datos para cargar alertas iniciales")
                 return
             # Forzar refresco si han pasado más de 30 minutos
             refresh_needed = (
@@ -412,7 +416,7 @@ class DatabaseApp:
             self.log(f"Error crítico al actualizar alertas: {str(e)}", "ERROR")
     
     def recargar_stock(self):
-        """Recarga completamente el módulo de stock: filtros, jerarquía y datos"""
+        """Recarga completamente el módulo de stock de forma asíncrona sin bloquear la UI"""
         if not self.modules_enabled.get("stock", False):
             self.log("Módulo de stock deshabilitado", "WARNING")
             return
@@ -426,31 +430,33 @@ class DatabaseApp:
             "• Recarga de filtros jerárquicos\n"
             "• Actualización de alertas desde la BD\n"
             "• Reinicio de la carga paralela\n"
-            "• Limpieza de cachés"
+            
         ):
             return
-            
+        
+        # Verificar conexión
+        if not hasattr(self.db_manager, 'conn') or not self.db_manager.conn:
+            self.log("No hay conexión activa a la base de datos", "ERROR")
+            messagebox.showerror("Error de Conexión", "No hay conexión activa a la base de datos.")
+            return
+        
+        # Iniciar recarga asíncrona
+        self.log("🚀 Iniciando recarga asíncrona del módulo de stock...", "INFO")
+        threading.Thread(target=self._recargar_stock_async, daemon=True).start()
+    
+    def _recargar_stock_async(self):
+        """Ejecuta la recarga completa del stock en segundo plano con actualizaciones progresivas de UI"""
+        import time
+        start_time = time.perf_counter()
+        
         try:
-            # Verificar conexión
-            if not hasattr(self.db_manager, 'conn') or not self.db_manager.conn:
-                self.log("No hay conexión activa a la base de datos", "ERROR")
-                return
+            # FASE 1: Inicialización y limpieza (5%)
+            self._update_stock_reload_progress(5, "Inicializando recarga...")
             
-            # Mostrar progreso
-            try:
-                self.api_status.config(text="Recargando stock...", foreground="#004C97")
-                self.global_progress.pack(side=tk.RIGHT, padx=10)
-                self.global_progress.config(mode="indeterminate")
-                self.global_progress.start(10)
-            except Exception:
-                pass
-            
-            self.log("🔄 Iniciando recarga completa del módulo de stock...", "INFO")
-            
-            # 1. Resetear estado de carga paralela
+            # Resetear estado de carga paralela
             self.stock_full_loading_started = False
             
-            # 2. Limpiar caches
+            # Limpiar caches
             self.cached_alertas = []
             self.last_refresh = None
             if hasattr(self, 'all_jerarquia'):
@@ -458,41 +464,149 @@ class DatabaseApp:
             if hasattr(self, 'producto_jerarquia'):
                 self.producto_jerarquia = {}
             
-            # 3. Recargar filtros jerárquicos
-            self.load_stock_filters()
-            self.log("✅ Filtros jerárquicos recargados", "SUCCESS")
+            time.sleep(0.3)  # Dar tiempo para que UI se actualice
             
-            # 4. Forzar actualización de alertas
-            self.actualizar_alertas_stock(force_refresh=True)
-            self.log("✅ Alertas de stock actualizadas", "SUCCESS")
+            # FASE 2: Recargar filtros jerárquicos (25%)
+            self._update_stock_reload_progress(10, "Cargando departamentos...")
+            self.root.after(0, self._load_stock_filters_async_step1)
+            time.sleep(0.5)
             
-            # 5. Recargar jerarquía en hilo paralelo
-            threading.Thread(target=self._init_jerarquia_async, daemon=True).start()
-            self.log("✅ Recarga de jerarquía iniciada", "SUCCESS")
+            self._update_stock_reload_progress(25, "Filtros jerárquicos cargados")
+            self.root.after(0, lambda: self.log("✅ Filtros jerárquicos recargados", "SUCCESS"))
             
-            # 6. Resetear página actual
+            # FASE 3: Cargar alertas iniciales (50%)
+            self._update_stock_reload_progress(30, "Cargando alertas de stock...")
+            
+            try:
+                # Cargar primer lote de alertas (limitado para rapidez)
+                alertas_iniciales = self.db_manager.obtener_alertas_stock(limit=500)
+                self.cached_alertas = alertas_iniciales or []
+                self.last_refresh = datetime.now()
+                self.ultimas_notificaciones.clear()
+                
+                self._update_stock_reload_progress(50, f"Cargadas {len(self.cached_alertas)} alertas iniciales")
+                self.root.after(0, lambda: self.log(f"✅ {len(self.cached_alertas)} alertas de stock cargadas", "SUCCESS"))
+                
+            except Exception as e:
+                self.root.after(0, lambda err=str(e): self.log(f"⚠️ Error cargando alertas: {err}", "WARNING"))
+                self.cached_alertas = []
+            
+            time.sleep(0.3)
+            
+            # FASE 4: Cargar jerarquía de productos (75%)
+            self._update_stock_reload_progress(55, "Cargando jerarquía de productos...")
+            
+            try:
+                from pal.services.stock import load_all_jerarquia, build_producto_jerarquia
+                
+                # Cargar jerarquía completa
+                all_jerarquia = load_all_jerarquia(
+                    self.db_manager,
+                    JERARQUIA_CACHE_FILE,
+                    int(JERARQUIA_CACHE_TTL.total_seconds())
+                )
+                self.all_jerarquia = all_jerarquia or {}
+                
+                self._update_stock_reload_progress(65, f"Jerarquía cargada: {len(self.all_jerarquia)} productos")
+                
+                # Filtrar jerarquía por códigos en alerta
+                codigos_en_alerta = {str(r[0]).strip() for r in self.cached_alertas}
+                self.producto_jerarquia = build_producto_jerarquia(self.all_jerarquia, codigos_en_alerta)
+                
+                self._update_stock_reload_progress(75, f"Jerarquía filtrada: {len(self.producto_jerarquia)} productos")
+                self.root.after(0, lambda: self.log(f"✅ Jerarquía cargada: {len(self.all_jerarquia)} productos totales", "SUCCESS"))
+                
+            except Exception as e:
+                self.root.after(0, lambda err=str(e): self.log(f"⚠️ Error cargando jerarquía: {err}", "WARNING"))
+                self.all_jerarquia = {}
+                self.producto_jerarquia = {}
+            
+            time.sleep(0.3)
+            
+            # FASE 5: Resetear y aplicar filtros (90%)
+            self._update_stock_reload_progress(80, "Aplicando filtros...")
+            
+            # Resetear página actual
             self.current_page = 1
             
-            # 7. Aplicar filtros actuales
-            self.aplicar_filtro_stock()
+            # Aplicar filtros en el hilo principal
+            self.root.after(0, self.aplicar_filtro_stock)
+            time.sleep(0.5)
             
-            self.log("🎉 Recarga del módulo de stock completada exitosamente", "SUCCESS")
+            self._update_stock_reload_progress(90, "Filtros aplicados")
+            
+            # FASE 6: Iniciar carga completa en segundo plano (100%)
+            self._update_stock_reload_progress(95, "Iniciando carga completa...")
+            
+            # Iniciar carga completa de alertas en background
+            if not getattr(self, 'stock_full_loading_started', False):
+                self.stock_full_loading_started = True
+                threading.Thread(target=self._background_load_alertas_stock, daemon=True).start()
+                self.root.after(0, lambda: self.log("✅ Carga paralela de alertas iniciada", "SUCCESS"))
+            
+            # FINALIZACIÓN (100%)
+            elapsed_time = time.perf_counter() - start_time
+            final_msg = f"Recarga completada en {elapsed_time:.1f}s"
+            self._update_stock_reload_progress(100, final_msg)
+            
+            self.root.after(0, lambda: self.log(f"🎉 {final_msg}", "SUCCESS"))
+            
+            # Ocultar progreso después de 2 segundos
+            time.sleep(2)
+            self.root.after(0, self._hide_stock_reload_progress)
             
         except Exception as e:
-            error_msg = f"Error recargando módulo de stock: {str(e)}"
-            self.log(error_msg, "ERROR")
+            error_msg = f"Error en recarga asíncrona de stock: {str(e)}"
+            self.root.after(0, lambda: self.log(error_msg, "ERROR"))
+            self.root.after(0, lambda: self._update_stock_reload_progress(0, "Error en recarga", error=True))
+            time.sleep(3)
+            self.root.after(0, self._hide_stock_reload_progress)
+    
+    def _load_stock_filters_async_step1(self):
+        """Carga filtros de stock de forma segura en el hilo principal"""
+        try:
+            self.load_stock_filters()
+        except Exception as e:
+            self.log(f"Error cargando filtros: {e}", "ERROR")
+    
+    def _update_stock_reload_progress(self, percentage, message, error=False):
+        """Actualiza el progreso de la recarga de stock en la UI"""
+        def update_ui():
             try:
-                self.api_status.config(text="API: Error", foreground="red")
-            except Exception:
-                pass
-        finally:
-            # Ocultar progreso
-            try:
+                # Actualizar texto del status
+                color = "red" if error else "#004C97" if percentage < 100 else "green"
+                status_text = f"Stock: {message} ({percentage}%)"
+                
+                if hasattr(self, 'api_status'):
+                    self.api_status.config(text=status_text, foreground=color)
+                
+                # Actualizar barra de progreso
+                if hasattr(self, 'global_progress'):
+                    if percentage == 0 or error:
+                        # Ocultar barra en caso de error o reset
+                        self.global_progress.pack_forget()
+                    else:
+                        # Mostrar barra determinada
+                        self.global_progress.pack(side=tk.RIGHT, padx=10)
+                        self.global_progress.config(mode="determinate", maximum=100, value=percentage)
+                        
+            except Exception as e:
+                print(f"Error actualizando progreso de recarga: {e}")
+        
+        self.root.after(0, update_ui)
+    
+    def _hide_stock_reload_progress(self):
+        """Oculta los indicadores de progreso de recarga"""
+        try:
+            if hasattr(self, 'global_progress'):
                 self.global_progress.stop()
                 self.global_progress.pack_forget()
+            
+            if hasattr(self, 'api_status'):
                 self.api_status.config(text="API: Lista", foreground="green")
-            except Exception:
-                pass
+                
+        except Exception as e:
+            print(f"Error ocultando progreso: {e}")
     
     def _background_load_ventas_tra(self):
         """Carga todas las ventas TRA en segundo plano con adaptive chunking optimizado.
@@ -515,6 +629,21 @@ class DatabaseApp:
         max_chunk_size = 2000
         initial_chunk_size = 500
         
+        # Inicializar controlador de chunks adaptativos
+        from pal.core.chunks import AdaptiveChunkController
+        controller = AdaptiveChunkController(
+            initial=initial_chunk_size,
+            min_size=min_chunk_size,
+            max_size=max_chunk_size,
+            target_latency=target_latency,
+            fast_ratio=0.5,
+            slow_ratio=1.2,
+            grow_factor=1.3,
+            shrink_factor=0.8,
+            ema_alpha=0.4,
+            cooldown=2,
+        )
+        
         # Parámetros de cache
         cache_key = f"tra_{self.tra_sede_codigo}_{self.tra_fecha_inicio}_{self.tra_fecha_fin}"
         
@@ -526,7 +655,6 @@ class DatabaseApp:
                 return
             
             # Inicializar variables de control
-            current_chunk_size = initial_chunk_size
             chunk_count = 0
             total_loaded = 0
             consecutive_failures = 0
@@ -549,7 +677,7 @@ class DatabaseApp:
                     self.tra_fecha_fin, 
                     self.tra_sede_codigo, 
                     start_row=start_row, 
-                    fetch_size=current_chunk_size
+                    fetch_size=controller.size
                 )
                 
                 chunk_query_time = time.perf_counter() - chunk_start_time
@@ -563,7 +691,7 @@ class DatabaseApp:
                         break
                     
                     # Ajustar parámetros para siguiente intento
-                    start_row += current_chunk_size
+                    start_row += controller.size
                     time.sleep(1.0)  # Pausa tras error
                     continue
                 else:
@@ -582,11 +710,8 @@ class DatabaseApp:
                         new_records += 1
                     existentes[codigo_str] = r
                 
-                # Adaptive chunking: ajustar tamaño según latencia
-                if chunk_query_time > target_latency * 1.2:  # Muy lento
-                    current_chunk_size = max(min_chunk_size, int(current_chunk_size * 0.8))
-                elif chunk_query_time < target_latency * 0.5:  # Muy rápido
-                    current_chunk_size = min(max_chunk_size, int(current_chunk_size * 1.3))
+                # Ajuste adaptativo: delegar en el controlador (EMA + cooldown)
+                controller.update(chunk_query_time, len(rows))
                 
                 # Clasificar rotación de forma incremental para mejor rendimiento
                 if chunk_count % 3 == 0 or len(rows) < current_chunk_size:  # Cada 3 chunks o al final
@@ -619,13 +744,12 @@ class DatabaseApp:
                 
                 start_row += len(rows)
                 
-                # Pausa adaptativa según rendimiento
-                sleep_time = min(0.5, max(0.1, chunk_query_time * 0.1))
-                time.sleep(sleep_time)
+                # Pausa adaptativa según rendimiento (recomendación del controlador)
+                time.sleep(controller.recommend_sleep(chunk_query_time))
                 
                 # Condición de salida optimizada
-                if len(rows) < current_chunk_size:
-                    self.tra_debug_log(f"Último chunk detectado ({len(rows)} < {current_chunk_size})")
+                if len(rows) < controller.size:
+                    self.tra_debug_log(f"Último chunk detectado ({len(rows)} < {controller.size})")
                     break
             
             # Clasificación final y guardado en cache
@@ -717,39 +841,10 @@ class DatabaseApp:
         """Consulta optimizada para chunks TRA con índices y selección minimal"""
         try:
             # Consulta optimizada: solo seleccionar columnas necesarias y usar índices
-            query = """
-            SELECT TOP (?) 
-                p.c_codarticulo,
-                p.c_descripcion,
-                v.c_departamento,
-                v.c_grupo, 
-                v.c_subgrupo,
-                ISNULL(SUM(v.n_neto), 0) as neto
-            FROM (
-                SELECT 
-                    c_codarticulo,
-                    c_departamento,
-                    c_grupo,
-                    c_subgrupo,
-                    n_neto,
-                    ROW_NUMBER() OVER (ORDER BY c_codarticulo, fecha) as rn
-                FROM VW_VENTAS_PRODUCTOS 
-                WHERE fecha BETWEEN ? AND ? 
-                    AND c_sede = ?
-                    AND n_neto > 0
-            ) v
-            INNER JOIN MA_PRODUCTOS p ON p.C_CODIGO = v.c_codarticulo
-            WHERE v.rn >= ?
-            GROUP BY p.c_codarticulo, p.c_descripcion, v.c_departamento, v.c_grupo, v.c_subgrupo
-            ORDER BY neto DESC
-            """
-            
-            params = (fetch_size, fecha_inicio, fecha_fin, sede_codigo, start_row)
-            
-            # Usar conexión thread-safe del pool
-            result = self.db_manager.fetch_data(query, params)
-            
-            return result if result else []
+            # Usar el método correcto del DatabaseManager para evitar consultas duplicadas
+            return self.db_manager.obtener_ventas_por_producto_chunk(
+                fecha_inicio, fecha_fin, sede_codigo, start_row, fetch_size
+            )
             
         except Exception as e:
             self.tra_debug_log(f"Error en consulta optimizada TRA: {e}")
@@ -891,13 +986,18 @@ class DatabaseApp:
                     self.root.after(0, lambda c=chunk_count, t=len(existentes): 
                                   self._update_tra_chunk_progress(c, t))
                 
-                start_row += chunk_size
-                time.sleep(0.2)  # Pausa corta entre chunks
+                start += len(rows)
+                # Ajuste adaptativo del tamaño para el próximo ciclo
+                controller.update(chunk_time, len(rows))
+                time.sleep(controller.recommend_sleep(chunk_time))
                 
                 # Si el chunk es más pequeño, probablemente sea el último
                 if len(chunk_data) < chunk_size:
-                    self.tra_debug_log(f"Último chunk detectado ({len(chunk_data)} < {chunk_size})")
+                    self.mbrp_debug_log(f"Último chunk detectado ({len(chunk_data)} < {chunk_size})")
                     break
+                else:
+                    # Actualizar chunk_size para próximo ciclo después del update
+                    chunk_size = controller.size
             
             # Finalización
             total_time = time.perf_counter() - load_start_time
@@ -1372,7 +1472,8 @@ class DatabaseApp:
     
         if hasattr(self, 'tra_sub_combo'):
             if dept_cod and group_cod:
-                key = (dept_cod, group_cod)
+                # Usar string como key (formato: "dept|group")
+                key = f"{dept_cod}|{group_cod}"
                 subgrupos = list(self.tra_sub_dict.get(key, {}).keys())
                 self.tra_sub_combo['values'] = ['Todos'] + subgrupos
             else:
@@ -1396,8 +1497,15 @@ class DatabaseApp:
                 self.log("Jerarquía vacía, iniciando carga completa", "WARNING")
                 self._cargar_toda_jerarquia_productos()
 
-            codigos_en_alerta = {r[0] for r in self.cached_alertas}
-            self.producto_jerarquia = {cod: self.all_jerarquia[cod] for cod in codigos_en_alerta if cod in self.all_jerarquia}
+            # Normalizar códigos antes de filtrar
+            def _s(x):
+                try:
+                    return str(x).strip()
+                except Exception:
+                    return ""
+            codigos_en_alerta = {_s(r[0]) for r in self.cached_alertas}
+            all_jerarquia_norm = {_s(k): v for k, v in (self.all_jerarquia or {}).items()}
+            self.producto_jerarquia = {cod: all_jerarquia_norm[cod] for cod in codigos_en_alerta if cod in all_jerarquia_norm}
             elapsed = time.perf_counter() - start
             self.log(f"🔍 Filtrado de jerarquía: {len(self.producto_jerarquia)} en {elapsed:.2f}s", "DEBUG")
         except Exception as e:
@@ -1425,7 +1533,27 @@ class DatabaseApp:
             filas = self.db_manager.fetch_data(
                 "SELECT C_CODIGO, C_DEPARTAMENTO, C_GRUPO, C_SUBGRUPO FROM MA_PRODUCTOS"
             )
-            self.all_jerarquia = {fila[0]: (fila[1], fila[2], fila[3]) for fila in filas if all(fila)}
+            # Normalizar y cargar incluyendo productos con campos vacíos
+            def _s(x):
+                try:
+                    s = str(x).strip()
+                    return s if s and s.lower() != 'none' else ""
+                except Exception:
+                    return ""
+            self.all_jerarquia = {}
+            for fila in filas or []:
+                try:
+                    if not fila:
+                        continue
+                    cod = _s(fila[0])
+                    if not cod:
+                        continue
+                    dep = _s(fila[1]) if len(fila) > 1 else ""
+                    grp = _s(fila[2]) if len(fila) > 2 else ""
+                    sub = _s(fila[3]) if len(fila) > 3 else ""
+                    self.all_jerarquia[cod] = (dep, grp, sub)
+                except Exception:
+                    continue
             with open(JERARQUIA_CACHE_FILE, 'w', encoding='utf-8') as f:
                 json.dump(self.all_jerarquia, f, ensure_ascii=False)
             elapsed = time.perf_counter() - start
@@ -1465,16 +1593,63 @@ class DatabaseApp:
         # Asegurar datos base
         if not hasattr(self, 'cached_alertas') or not self.cached_alertas:
             self.actualizar_alertas_stock(force_refresh=True)
-        # Obtener códigos de jerarquía si no existe
+        
+        # Verificar y manejar jerarquía de productos
         if not hasattr(self, 'producto_jerarquia'):
             self.producto_jerarquia = {}
-        # Filtros actuales
-        dept_code = self.dept_dict.get(self.dept_var.get())
-        group_code = self.group_dict.get(self.group_var.get())
-        sub_code = self.sub_dict.get(self.sub_var.get())
-        texto_busqueda = (self.search_var.get() or '').strip()
-        filtro_nivel = (self.filter_var.get() or 'TODAS').upper()
+        
+        # DEBUG: Verificar estado de jerarquía
+        jerarquia_count = len(self.producto_jerarquia)
+        alertas_count = len(self.cached_alertas)
+        self.stock_debug_log(f"Filtro Stock - Jerarquía: {jerarquia_count} productos, Alertas: {alertas_count}")
+        
+        # Filtros actuales (robustos aunque aún no se hayan cargado dicts)
+        dept_dict = getattr(self, 'dept_dict', {}) or {}
+        group_dict = getattr(self, 'group_dict', {}) or {}
+        sub_dict = getattr(self, 'sub_dict', {}) or {}
+        dept_val = self.dept_var.get() if hasattr(self, 'dept_var') else None
+        group_val = self.group_var.get() if hasattr(self, 'group_var') else None
+        sub_val = self.sub_var.get() if hasattr(self, 'sub_var') else None
+        dept_code = dept_dict.get(dept_val)
+        group_code = group_dict.get(group_val)
+        sub_code = sub_dict.get(sub_val)
+        texto_busqueda = (self.search_var.get() if hasattr(self, 'search_var') else '' ).strip()
+        filtro_nivel = (self.filter_var.get() if hasattr(self, 'filter_var') else 'TODAS').upper()
         favoritos = self._get_favoritos_local()
+        
+        # DEBUG: Log de filtros aplicados
+        filtros_activos = []
+        if dept_code:
+            filtros_activos.append(f"Dept: {self.dept_var.get()}")
+        if group_code:
+            filtros_activos.append(f"Group: {self.group_var.get()}")
+        if sub_code:
+            filtros_activos.append(f"Sub: {self.sub_var.get()}")
+        if texto_busqueda:
+            filtros_activos.append(f"Texto: {texto_busqueda}")
+        if filtro_nivel != 'TODAS':
+            filtros_activos.append(f"Nivel: {filtro_nivel}")
+        
+        self.stock_debug_log(f"Filtros activos: {', '.join(filtros_activos) if filtros_activos else 'Ninguno'}")
+        
+        # Si hay filtros jerárquicos pero no hay jerarquía, intentar cargarla
+        if any([dept_code, group_code, sub_code]) and jerarquia_count == 0:
+            self.stock_debug_log("Detectados filtros jerárquicos pero jerarquía vacía - intentando recargar")
+            try:
+                # Intentar cargar jerarquía de productos de forma síncrona rápida
+                from pal.services.stock import load_all_jerarquia, build_producto_jerarquia
+                if hasattr(self, 'all_jerarquia') and self.all_jerarquia:
+                    # Si tenemos all_jerarquia, crear producto_jerarquia filtrado
+                    # Normalizar códigos antes de construir
+                    codigos_en_alerta = {str(r[0]).strip() for r in self.cached_alertas}
+                    self.producto_jerarquia = build_producto_jerarquia(self.all_jerarquia, codigos_en_alerta)
+                    self.stock_debug_log(f"Jerarquía reconstruida desde all_jerarquia: {len(self.producto_jerarquia)} productos")
+                else:
+                    # Cargar desde BD de forma rápida (solo para filtro actual)
+                    self.log("⚠️ Jerarquía vacía detectada - cargando para filtros", "WARNING")
+                    threading.Thread(target=self._init_jerarquia_async, daemon=True).start()
+            except Exception as e:
+                self.stock_debug_log(f"Error intentando recargar jerarquía: {e}")
 
         from pal.services.stock import filter_alertas, paginate
         # Filtrar y ordenar
@@ -1524,6 +1699,13 @@ class DatabaseApp:
         datos_pagina, total_paginas, self.current_page = paginate(
             filtrados_clean, self.current_page, self.page_size
         )
+        # DEBUG: Log de resultados finales
+        self.stock_debug_log(
+            f"Resultado filtrado: {len(filtrados_clean)} productos | "
+            f"Página {self.current_page}/{total_paginas} | "
+            f"Mostrando: {len(datos_pagina)} productos"
+        )
+        
         # Actualizar UI
         self.mostrar_alertas_paginadas(datos_pagina)
         self.actualizar_controles_paginacion(total_paginas)
@@ -1796,7 +1978,8 @@ class DatabaseApp:
         
             if group_cod and hasattr(self, 'tra_sub_var'):
                 sub_desc = self.tra_sub_var.get()
-                key = (dept_cod, group_cod)
+                # Usar string como key (formato: "dept|group")
+                key = f"{dept_cod}|{group_cod}"
                 sub_cod = self.tra_sub_dict.get(key, {}).get(sub_desc)
     
         # Obtener texto de búsqueda
@@ -1964,55 +2147,494 @@ class DatabaseApp:
         if hasattr(self, 'tra_btn_next'):
             self.tra_btn_next['state'] = 'normal' if self.tra_current_page < total_paginas else 'disabled'
     
-    def cargar_jerarquia_tra(self):
-        """Carga diccionarios para departamentos, grupos y subgrupos con estructura correcta"""
-        if not getattr(self.db_manager, 'conn', None):
-            return
+    def _check_jerarquia_cache(self):
+        """Verifica si existe cache válido de jerarquías"""
         try:
-            # Departamentos
-            deps = self.db_manager.fetch_data(
-                "SELECT C_CODIGO, C_DESCRIPCIO FROM MA_DEPARTAMENTOS"
-            )
-            self.tra_dept_dict = {desc: cod for cod, desc in deps if cod and desc}
+            import os
+            import json
+            from datetime import datetime, timedelta
             
-            # Actualizar combo de departamentos si existe
-            if hasattr(self, 'tra_dept_combo'):
+            cache_file = "jerarquia_cache.json"
+            cache_ttl = timedelta(hours=12)  # Cache por 12 horas
+            
+            if not os.path.exists(cache_file):
+                return None
+            
+            # Verificar TTL
+            mtime = datetime.fromtimestamp(os.path.getmtime(cache_file))
+            if datetime.now() - mtime > cache_ttl:
+                self.log("Cache de jerarquía expirado, recargando...", "INFO")
+                try:
+                    os.remove(cache_file)
+                except Exception:
+                    pass
+                return None
+            
+            # Cargar datos desde cache
+            with open(cache_file, 'r', encoding='utf-8') as f:
+                cached_data = json.load(f)
+            
+            self.log("⚙️ Cache de jerarquía cargado exitosamente", "SUCCESS")
+            return cached_data
+            
+        except Exception as e:
+            self.log(f"Error verificando cache de jerarquía: {e}", "ERROR")
+            return None
+    
+    def _save_jerarquia_cache(self, data):
+        """Guarda jerarquías en cache local"""
+        try:
+            import json
+            
+            cache_file = "jerarquia_cache.json"
+            with open(cache_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            
+            self.log("💾 Cache de jerarquía guardado", "DEBUG")
+            
+        except Exception as e:
+            self.log(f"Error guardando cache de jerarquía: {e}", "ERROR")
+    
+    def cargar_jerarquia_unificada(self):
+        """Carga jerarquías TRA y MBRP con una sola consulta optimizada JOIN"""
+        import time
+        # Evitar cargas duplicadas si ya fue cargado por otro hilo
+        if getattr(self, 'jerarquias_unificadas_cargadas', False):
+            self.log("Jerarquía unificada ya cargada — se omite carga duplicada", "DEBUG")
+            return
+        start_time = time.perf_counter()
+        
+        # Verificar cache primero
+        cached_data = self._check_jerarquia_cache()
+        if cached_data and 'tra' in cached_data and 'mbrp' in cached_data:
+            # Cargar TRA desde cache
+            tra_data = cached_data['tra']
+            self.tra_dept_dict = tra_data.get('departments', {})
+            self.tra_group_dict = tra_data.get('groups', {})
+            self.tra_sub_dict = tra_data.get('subgroups', {})
+            
+            # Cargar MBRP desde cache
+            mbrp_data = cached_data['mbrp']
+            self.mbrp_dept_dict = mbrp_data.get('departments', {})
+            self.mbrp_group_dict = mbrp_data.get('groups', {})
+            self.mbrp_sub_dict = mbrp_data.get('subgroups', {})
+            
+            # Actualizar combos si existen
+            self._update_hierarchy_combos()
+            
+            total_items = (len(self.tra_dept_dict) + sum(len(v) for v in self.tra_group_dict.values()) + 
+                          sum(len(v) for v in self.tra_sub_dict.values()))
+            
+            load_time = time.perf_counter() - start_time
+            self.jerarquias_unificadas_cargadas = True
+            self.log(f"⚡ Jerarquía UNIFICADA cargada desde cache en {load_time:.3f}s - {total_items} elementos", "SUCCESS")
+            return
+        
+        # Si no hay cache válido, cargar desde BD con consulta optimizada
+        if not self.db_manager or not self.db_manager.ensure_connection():
+            self.log("No hay conexión válida para cargar jerarquía unificada", "WARNING")
+            return
+        
+        try:
+            # Consulta JOIN optimizada: UNA SOLA consulta en lugar de 6
+            query = """
+            SELECT DISTINCT
+                d.C_CODIGO as dept_cod, d.C_DESCRIPCIO as dept_desc,
+                g.C_CODIGO as group_cod, g.C_DESCRIPCIO as group_desc,
+                s.C_CODIGO as sub_cod, s.C_DESCRIPCIO as sub_desc
+            FROM MA_DEPARTAMENTOS d
+            LEFT JOIN MA_GRUPOS g ON d.C_CODIGO = g.C_DEPARTAMENTO
+            LEFT JOIN MA_SUBGRUPOS s ON g.C_DEPARTAMENTO = s.C_IN_DEPARTAMENTO 
+                AND g.C_CODIGO = s.C_IN_GRUPO
+            WHERE d.C_CODIGO IS NOT NULL AND d.C_DESCRIPCIO IS NOT NULL
+            ORDER BY d.C_CODIGO, g.C_CODIGO, s.C_CODIGO
+            """
+            
+            data = self.db_manager.fetch_data(query)
+            
+            # Procesar resultados de forma eficiente O(n) en lugar de O(n²)
+            tra_dept_dict = {}
+            tra_group_dict = {}
+            tra_sub_dict = {}
+            
+            for row in data:
+                dept_cod, dept_desc, group_cod, group_desc, sub_cod, sub_desc = row
+                
+                # Departamentos (evitar duplicados)
+                if dept_cod and dept_desc and dept_desc.strip() not in tra_dept_dict:
+                    tra_dept_dict[dept_desc.strip()] = dept_cod.strip()
+                    
+                # Grupos por departamento  
+                if group_cod and group_desc and dept_cod:
+                    dept_key = dept_cod.strip()
+                    if dept_key not in tra_group_dict:
+                        tra_group_dict[dept_key] = {}
+                    tra_group_dict[dept_key][group_desc.strip()] = group_cod.strip()
+                    
+                # Subgrupos por departamento y grupo
+                if sub_cod and sub_desc and dept_cod and group_cod:
+                    # Usar string como key en lugar de tupla para compatibilidad con JSON
+                    key = f"{dept_cod.strip()}|{group_cod.strip()}"
+                    if key not in tra_sub_dict:
+                        tra_sub_dict[key] = {}
+                    tra_sub_dict[key][sub_desc.strip()] = sub_cod.strip()
+            
+            # Asignar a ambos módulos (TRA y MBRP comparten la misma jerarquía)
+            self.tra_dept_dict = tra_dept_dict
+            self.tra_group_dict = tra_group_dict
+            self.tra_sub_dict = tra_sub_dict
+            
+            self.mbrp_dept_dict = tra_dept_dict.copy()
+            self.mbrp_group_dict = tra_group_dict.copy()
+            self.mbrp_sub_dict = tra_sub_dict.copy()
+            
+            # Calcular totales
+            total_items = len(tra_dept_dict) + sum(len(v) for v in tra_group_dict.values()) + sum(len(v) for v in tra_sub_dict.values())
+            load_time = time.perf_counter() - start_time
+
+            if total_items == 0:
+                # Fallback explícito si la consulta no devolvió datos útiles
+                self.log("Jerarquía unificada vacía, aplicando fallback por módulos", "WARNING")
+                self.cargar_jerarquia_tra()
+                self.cargar_jerarquia_mbrp()
+                return
+            
+            # Actualizar combos
+            self._update_hierarchy_combos()
+            
+            # Marcar como cargado para evitar duplicados
+            self.jerarquias_unificadas_cargadas = True
+            
+            # Guardar en cache unificado
+            cache_data = {
+                'tra': {
+                    'departments': self.tra_dept_dict,
+                    'groups': self.tra_group_dict,
+                    'subgroups': self.tra_sub_dict
+                },
+                'mbrp': {
+                    'departments': self.mbrp_dept_dict,
+                    'groups': self.mbrp_group_dict,
+                    'subgroups': self.mbrp_sub_dict
+                }
+            }
+            self._save_jerarquia_cache(cache_data)
+            
+            self.log(f"⚙️ Jerarquía UNIFICADA cargada y cacheada en {load_time:.3f}s - {total_items} elementos", "SUCCESS")
+            
+        except Exception as e:
+            self.log(f"Error cargando jerarquía unificada: {e}", "ERROR")
+            # Fallback a métodos individuales
+            self.cargar_jerarquia_tra()
+            self.cargar_jerarquia_mbrp()
+    
+    def _update_hierarchy_combos(self):
+        """Actualiza los combos de jerarquía para ambos módulos"""
+        try:
+            # TRA combos
+            if hasattr(self, 'tra_dept_combo') and self.tra_dept_dict:
                 self.tra_dept_combo['values'] = ['Todos'] + list(self.tra_dept_dict.keys())
                 self.tra_dept_var.set('Todos')
+                
+            # MBRP combos
+            if hasattr(self, 'mbrp_dept_combo') and self.mbrp_dept_dict:
+                self.mbrp_dept_combo['values'] = ['Todos'] + list(self.mbrp_dept_dict.keys())
+                self.mbrp_dept_var.set('Todos')
+                
+        except Exception as e:
+            self.log(f"Error actualizando combos de jerarquía: {e}", "DEBUG")
+    
+    def _inicializar_modulos_paralelo(self):
+        """Inicializa módulos en paralelo real usando ThreadPoolExecutor"""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import time
         
-            # Grupos por departamento
-            grupos = self.db_manager.fetch_data(
-                "SELECT C_DEPARTAMENTO, C_CODIGO, C_DESCRIPCIO FROM MA_GRUPOS"
-            )
-            self.tra_group_dict = {}
-            for dept, cod, desc in grupos:
-                if dept not in self.tra_group_dict:
-                    self.tra_group_dict[dept] = {}
-                if desc and cod:
-                    self.tra_group_dict[dept][desc] = cod
+        start_time = time.perf_counter()
+        self.log("🚀 Iniciando carga paralela de módulos...", "INFO")
         
-            # Subgrupos por departamento y grupo
-            subs = self.db_manager.fetch_data(
-                "SELECT C_IN_DEPARTAMENTO, C_IN_GRUPO, C_CODIGO, C_DESCRIPCIO FROM MA_SUBGRUPOS"
-            )
-            self.tra_sub_dict = {}
-            for dept, grp, cod, desc in subs:
-                key = (dept, grp)
-                if key not in self.tra_sub_dict:
-                    self.tra_sub_dict[key] = {}
-                if desc and cod:
-                    self.tra_sub_dict[key][desc] = cod
+        # Definir tareas a ejecutar en paralelo
+        tareas = []
+        
+        # Stock: filtros + alertas iniciales
+        if self.modules_enabled.get("stock", False):
+            tareas.append(("stock_filters", self._load_stock_parallel))
+            tareas.append(("stock_alerts", self._load_stock_alerts_parallel))
+        
+        # Jerarquías TRA/MBRP unificadas
+        if (self.modules_enabled.get("tra", False) or self.modules_enabled.get("mbrp", False)):
+            tareas.append(("jerarquias", self._load_hierarchies_parallel))
+        
+        # Jerarquía de productos (para stock)
+        if self.modules_enabled.get("stock", False):
+            tareas.append(("producto_jerarquia", self._init_jerarquia_async))
+        
+        # Ejecutar tareas en paralelo con máximo 4 hilos
+        max_workers = min(4, len(tareas)) if tareas else 1
+        resultados = {}
+        
+        try:
+            with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="ModuleInit") as executor:
+                # Enviar todas las tareas
+                future_to_task = {
+                    executor.submit(task_func): task_name 
+                    for task_name, task_func in tareas
+                }
+                
+                # Procesar resultados conforme van completando
+                for future in as_completed(future_to_task, timeout=30):
+                    task_name = future_to_task[future]
+                    try:
+                        resultado = future.result(timeout=5)
+                        resultados[task_name] = {"status": "success", "result": resultado}
+                        self.log(f"✅ Módulo {task_name} cargado exitosamente", "SUCCESS")
+                    except Exception as e:
+                        resultados[task_name] = {"status": "error", "error": str(e)}
+                        self.log(f"❌ Error en módulo {task_name}: {e}", "ERROR")
+                        
+        except Exception as e:
+            self.log(f"Error en carga paralela: {e}", "ERROR")
+            # Evitar fallback si ya hay módulos críticos listos (por ejemplo, jerarquías)
+            if not getattr(self, 'jerarquias_unificadas_cargadas', False):
+                self._fallback_inicializacion_secuencial()
+            else:
+                self.log("Omitiendo fallback: jerarquías ya cargadas", "INFO")
+            return
+        
+        # Estadísticas finales
+        total_time = time.perf_counter() - start_time
+        exitosos = sum(1 for r in resultados.values() if r["status"] == "success")
+        fallidos = len(resultados) - exitosos
+        
+        self.log(
+            f"🎆 Inicialización paralela completada en {total_time:.3f}s | "
+            f"Módulos: {exitosos} exitosos, {fallidos} fallidos", 
+            "SUCCESS" if fallidos == 0 else "WARNING"
+        )
+        
+        # Ejecutar tareas post-carga en hilo principal
+        self.root.after(100, self._post_init_tasks, resultados)
+    
+    def _load_stock_parallel(self):
+        """Carga filtros de stock en hilo paralelo"""
+        try:
+            self.load_stock_filters()
+            return {"filters_loaded": True}
+        except Exception as e:
+            raise Exception(f"Error cargando filtros stock: {e}")
+    
+    def _load_stock_alerts_parallel(self):
+        """Carga alertas iniciales de stock en hilo paralelo"""
+        try:
+            # Ensure connection is valid before loading alerts
+            if not self.db_manager.ensure_connection():
+                raise Exception("No hay conexión válida a la base de datos")
             
-            self.log("Jerarquía TRA cargada correctamente", "SUCCESS")
+            # Use a smaller, safer initial load
+            alertas = self.db_manager.obtener_alertas_stock(limit=50)
+            if alertas:
+                self.cached_alertas = alertas
+                self.last_refresh = datetime.now()
+                self.log(f"Alertas stock cargadas: {len(alertas)} registros", "SUCCESS")
+            
+            return {"alerts_loaded": True, "count": len(alertas) if alertas else 0}
+        except Exception as e:
+            self.log(f"Error cargando alertas stock: {e}", "ERROR")
+            # Don't raise - allow app to continue without initial alerts
+            return {"alerts_loaded": False, "error": str(e)}
+    
+    def _load_hierarchies_parallel(self):
+        """Carga jerarquías unificadas en hilo paralelo"""
+        try:
+            self.cargar_jerarquia_unificada()
+            return {"hierarchies_loaded": True}
+        except Exception as e:
+            # Fallback a métodos individuales
+            try:
+                if self.modules_enabled.get("tra", False):
+                    self.cargar_jerarquia_tra()
+                if self.modules_enabled.get("mbrp", False):
+                    self.cargar_jerarquia_mbrp()
+                return {"hierarchies_loaded": True, "fallback": True}
+            except Exception as e2:
+                raise Exception(f"Error cargando jerarquías: {e} (fallback: {e2})")
+    
+    def _fallback_inicializacion_secuencial(self):
+        """Fallback a inicialización secuencial si falla la paralela"""
+        self.log("⚠️ Fallback: carga secuencial de módulos", "WARNING")
+        
+        try:
+            if self.modules_enabled.get("stock", False):
+                self.load_stock_filters()
+                self.actualizar_alertas_stock(force_refresh=True)
+                threading.Thread(target=self._init_jerarquia_async, daemon=True).start()
+            
+            if (self.modules_enabled.get("tra", False) or self.modules_enabled.get("mbrp", False)) and not getattr(self, 'jerarquias_unificadas_cargadas', False):
+                self.cargar_jerarquia_unificada()
+                
+        except Exception as e:
+            self.log(f"Error en fallback secuencial: {e}", "ERROR")
+    
+    def _post_init_tasks(self, resultados):
+        """Tareas post-inicialización en hilo principal"""
+        try:
+            # Realizar búsqueda inicial si stock está habilitado y fue exitoso
+            if (self.modules_enabled.get("stock", False) and 
+                resultados.get("stock_filters", {}).get("status") == "success"):
+                # Esto se ejecuta en hilo principal para actualizar UI
+                pass  # search_records ya se ejecutó antes
+                
+        except Exception as e:
+            self.log(f"Error en tareas post-inicialización: {e}", "ERROR")
+    
+    def cargar_jerarquia_tra(self):
+        """Carga diccionarios para departamentos, grupos y subgrupos con cache optimizado"""
+        # Intentar cargar desde cache primero
+        cached_data = self._check_jerarquia_cache()
+        if cached_data and 'tra' in cached_data:
+            try:
+                tra_data = cached_data['tra']
+                self.tra_dept_dict = tra_data.get('departments', {})
+                self.tra_group_dict = tra_data.get('groups', {})
+                self.tra_sub_dict = tra_data.get('subgroups', {})
+                
+                # Actualizar combo de departamentos si existe
+                if hasattr(self, 'tra_dept_combo') and self.tra_dept_dict:
+                    self.tra_dept_combo['values'] = ['Todos'] + list(self.tra_dept_dict.keys())
+                    self.tra_dept_var.set('Todos')
+                
+                total_items = len(self.tra_dept_dict) + sum(len(v) for v in self.tra_group_dict.values()) + sum(len(v) for v in self.tra_sub_dict.values())
+                self.log(f"⚙️ Jerarquía TRA cargada desde cache - {total_items} elementos", "SUCCESS")
+                return
+            except Exception as e:
+                self.log(f"Error usando cache TRA: {e}", "ERROR")
+        
+        # Verificar conexión a la base de datos
+        if not self.db_manager or not self.db_manager.ensure_connection():
+            self.log("No hay conexión válida a la base de datos para cargar jerarquía TRA", "WARNING")
+            return
+        
+        # Inicializar diccionarios vacíos por si hay errores
+        self.tra_dept_dict = {}
+        self.tra_group_dict = {}
+        self.tra_sub_dict = {}
+        
+        try:
+            # Departamentos con manejo de errores específico
+            try:
+                deps = self.db_manager.fetch_data(
+                    "SELECT C_CODIGO, C_DESCRIPCIO FROM MA_DEPARTAMENTOS WHERE C_CODIGO IS NOT NULL AND C_DESCRIPCIO IS NOT NULL"
+                )
+                self.tra_dept_dict = {desc.strip(): cod.strip() for cod, desc in deps if cod and desc and str(cod).strip() and str(desc).strip()}
+                
+                # Actualizar combo de departamentos si existe
+                if hasattr(self, 'tra_dept_combo') and self.tra_dept_dict:
+                    self.tra_dept_combo['values'] = ['Todos'] + list(self.tra_dept_dict.keys())
+                    self.tra_dept_var.set('Todos')
+                    
+                self.log(f"Departamentos TRA cargados: {len(self.tra_dept_dict)}", "DEBUG")
+            except Exception as e:
+                self.log(f"Error cargando departamentos TRA: {str(e)}", "ERROR")
+        
+            # Grupos por departamento con manejo de errores específico
+            try:
+                grupos = self.db_manager.fetch_data(
+                    "SELECT C_DEPARTAMENTO, C_CODIGO, C_DESCRIPCIO FROM MA_GRUPOS WHERE C_DEPARTAMENTO IS NOT NULL AND C_CODIGO IS NOT NULL AND C_DESCRIPCIO IS NOT NULL"
+                )
+                self.tra_group_dict = {}
+                for dept, cod, desc in grupos:
+                    if dept and cod and desc:
+                        dept_clean = str(dept).strip()
+                        cod_clean = str(cod).strip()
+                        desc_clean = str(desc).strip()
+                        
+                        if dept_clean not in self.tra_group_dict:
+                            self.tra_group_dict[dept_clean] = {}
+                        self.tra_group_dict[dept_clean][desc_clean] = cod_clean
+                        
+                self.log(f"Grupos TRA cargados: {sum(len(v) for v in self.tra_group_dict.values())}", "DEBUG")
+            except Exception as e:
+                self.log(f"Error cargando grupos TRA: {str(e)}", "ERROR")
+        
+            # Subgrupos por departamento y grupo con manejo de errores específico
+            try:
+                subs = self.db_manager.fetch_data(
+                    "SELECT C_IN_DEPARTAMENTO, C_IN_GRUPO, C_CODIGO, C_DESCRIPCIO FROM MA_SUBGRUPOS WHERE C_IN_DEPARTAMENTO IS NOT NULL AND C_IN_GRUPO IS NOT NULL AND C_CODIGO IS NOT NULL AND C_DESCRIPCIO IS NOT NULL"
+                )
+                self.tra_sub_dict = {}
+                for dept, grp, cod, desc in subs:
+                    if dept and grp and cod and desc:
+                        dept_clean = str(dept).strip()
+                        grp_clean = str(grp).strip()
+                        cod_clean = str(cod).strip()
+                        desc_clean = str(desc).strip()
+                        
+                        # Usar string como key en lugar de tupla para compatibilidad con JSON
+                        key = f"{dept_clean}|{grp_clean}"
+                        if key not in self.tra_sub_dict:
+                            self.tra_sub_dict[key] = {}
+                        self.tra_sub_dict[key][desc_clean] = cod_clean
+                        
+                self.log(f"Subgrupos TRA cargados: {sum(len(v) for v in self.tra_sub_dict.values())}", "DEBUG")
+            except Exception as e:
+                self.log(f"Error cargando subgrupos TRA: {str(e)}", "ERROR")
+            
+            # Verificar si se cargaron datos
+            total_items = len(self.tra_dept_dict) + sum(len(v) for v in self.tra_group_dict.values()) + sum(len(v) for v in self.tra_sub_dict.values())
+            if total_items > 0:
+                self.log(f"✅ Jerarquía TRA cargada correctamente - Total elementos: {total_items}", "SUCCESS")
+                
+                # Guardar en cache para próximas cargas
+                try:
+                    cache_data = {
+                        'tra': {
+                            'departments': self.tra_dept_dict,
+                            'groups': self.tra_group_dict,
+                            'subgroups': self.tra_sub_dict
+                        }
+                    }
+                    
+                    # Si ya existe cache con MBRP, combinar
+                    existing_cache = self._check_jerarquia_cache()
+                    if existing_cache:
+                        cache_data.update(existing_cache)
+                    
+                    self._save_jerarquia_cache(cache_data)
+                except Exception as e:
+                    self.log(f"Error guardando cache TRA: {e}", "DEBUG")
+            else:
+                self.log("⚠️ Jerarquía TRA cargada pero sin datos disponibles", "WARNING")
         
         except Exception as e:
-            self.log(f"Error cargando jerarquía TRA: {str(e)}", "ERROR")
-            self.tra_dept_dict = {}
-            self.tra_group_dict = {}
-            self.tra_sub_dict = {}
+            self.log(f"Error general cargando jerarquía TRA: {str(e)}", "ERROR")
+            # Asegurar que los diccionarios estén inicializados incluso en caso de error
+            if not hasattr(self, 'tra_dept_dict'):
+                self.tra_dept_dict = {}
+            if not hasattr(self, 'tra_group_dict'):
+                self.tra_group_dict = {}
+            if not hasattr(self, 'tra_sub_dict'):
+                self.tra_sub_dict = {}
 
     def cargar_jerarquia_mbrp(self):
-        """Carga diccionarios para departamentos, grupos y subgrupos MBRP con estructura correcta"""
+        """Carga diccionarios para departamentos, grupos y subgrupos MBRP con cache optimizado"""
+        # Intentar cargar desde cache primero
+        cached_data = self._check_jerarquia_cache()
+        if cached_data and 'mbrp' in cached_data:
+            try:
+                mbrp_data = cached_data['mbrp']
+                self.mbrp_dept_dict = mbrp_data.get('departments', {})
+                self.mbrp_group_dict = mbrp_data.get('groups', {})
+                self.mbrp_sub_dict = mbrp_data.get('subgroups', {})
+                
+                # Actualizar combo de departamentos si existe
+                if hasattr(self, 'mbrp_dept_combo') and self.mbrp_dept_dict:
+                    self.mbrp_dept_combo['values'] = ['Todos'] + list(self.mbrp_dept_dict.keys())
+                    self.mbrp_dept_var.set('Todos')
+                
+                self.log("⚙️ Jerarquía MBRP cargada desde cache", "SUCCESS")
+                return
+            except Exception as e:
+                self.log(f"Error usando cache MBRP: {e}", "ERROR")
+        
         if not getattr(self.db_manager, 'conn', None):
             return
         try:
@@ -2044,13 +2666,33 @@ class DatabaseApp:
             )
             self.mbrp_sub_dict = {}
             for dept, grp, cod, desc in subs:
-                key = (dept, grp)
+                # Usar string como key en lugar de tupla para compatibilidad con JSON
+                key = f"{dept}|{grp}"
                 if key not in self.mbrp_sub_dict:
                     self.mbrp_sub_dict[key] = {}
                 if desc and cod:
                     self.mbrp_sub_dict[key][desc] = cod
             
             self.log("Jerarquía MBRP cargada correctamente", "SUCCESS")
+            
+            # Guardar en cache para próximas cargas
+            try:
+                cache_data = {
+                    'mbrp': {
+                        'departments': self.mbrp_dept_dict,
+                        'groups': self.mbrp_group_dict,
+                        'subgroups': self.mbrp_sub_dict
+                    }
+                }
+                
+                # Si ya existe cache con TRA, combinar
+                existing_cache = self._check_jerarquia_cache()
+                if existing_cache:
+                    cache_data.update(existing_cache)
+                
+                self._save_jerarquia_cache(cache_data)
+            except Exception as e:
+                self.log(f"Error guardando cache MBRP: {e}", "DEBUG")
         
         except Exception as e:
             self.log(f"Error cargando jerarquía MBRP: {str(e)}", "ERROR")
@@ -2393,9 +3035,8 @@ class DatabaseApp:
 
 
     def log(self, message: str, level: str = 'INFO'):
-        """Registrar mensaje en el panel de debug de forma segura.
-        Si el panel de logs aún no existe (por ejemplo, si el módulo de mensajería está deshabilitado
-        o la UI no ha terminado de inicializarse), simplemente hace un print de respaldo.
+        """Registrar mensaje con prefijo estandarizado para identificar origen en consola.
+        Si el panel de logs aún no existe, hace un print de respaldo con prefijo [PAL][APP].
         """
         levels = ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'SUCCESS']
         if level not in levels:
@@ -2407,35 +3048,44 @@ class DatabaseApp:
         if not hasattr(self, 'max_logs'):
             self.max_logs = 200
 
+        # Construir prefijo con ubicación del caller y thread
+        try:
+            caller = inspect.stack()[1]
+            module = inspect.getmodule(caller.frame)
+            mod_name = getattr(module, '__name__', 'unknown')
+            func_name = caller.function
+            line_no = caller.lineno
+        except Exception:
+            mod_name, func_name, line_no = 'unknown', 'unknown', 0
+        thread_name = threading.current_thread().name
         timestamp = time.strftime("%H:%M:%S")
-        log_entry = f"[{timestamp}] {message}\n"
+        prefix = f"[PAL][APP][{level}][{thread_name}][{mod_name}.{func_name}:{line_no}]"
+        console_entry = f"{prefix} {message}\n"
 
         # Rotar logs si excede el máximo
         try:
             if self.log_counter >= self.max_logs:
                 self.limpiar_logs()
         except Exception:
-            # Si algo falla en la rotación, no bloquear el flujo de la app
             pass
 
-        # Insertar en panel de logs si existe; de lo contrario, respaldo a consola
+        # Insertar en panel de logs si existe; usar solo mensaje como contenido y nivel como tag
         if hasattr(self, 'logs_text') and self.logs_text:
             try:
                 self.logs_text.configure(state='normal')
-                self.logs_text.insert(tk.END, log_entry, level)
+                # Mostrar también el prefijo dentro del panel para consistencia
+                self.logs_text.insert(tk.END, console_entry, level)
                 self.logs_text.see(tk.END)  # Auto-scroll
                 self.logs_text.configure(state='disabled')
                 self.log_counter += 1
                 return
             except Exception:
-                # En caso de error con el widget, hacer respaldo a consola
                 pass
 
         # Respaldo a consola si no hay UI de logs disponible
         try:
-            print(log_entry.strip())
+            print(console_entry.strip())
         except Exception:
-            # Último recurso: ignorar
             pass
 
     def limpiar_logs(self):
@@ -2508,23 +3158,8 @@ class DatabaseApp:
                     self.log("Conexión a BD exitosa", "SUCCESS")
                     self.search_records()
 
-                    if self.modules_enabled.get("stock", False):
-                        self.load_stock_filters()
-                        self.actualizar_alertas_stock(force_refresh=True)
-
-                        threading.Thread(target=self._init_jerarquia_async, daemon=True).start()
-
-                    if self.modules_enabled.get("tra", False):
-                        try:
-                            self.cargar_jerarquia_tra()
-                        except Exception as e:
-                            self.log(f"Error inicial cargando jerarquía TRA: {e}", "ERROR")
-
-                    if self.modules_enabled.get("mbrp", False):
-                        try:
-                            self.cargar_jerarquia_mbrp()
-                        except Exception as e:
-                            self.log(f"Error inicial cargando jerarquía MBRP: {e}", "ERROR")
+                    # ⚙️ Inicialización PARALELA de módulos para máxima velocidad
+                    self._inicializar_modulos_paralelo()
 
                     total_elapsed = time.perf_counter() - total_start
                     self.log(f"🏁 App inicializada en {total_elapsed:.2f}s", "INFO")
@@ -3136,14 +3771,17 @@ class DatabaseApp:
         
         
     def _background_load_alertas_stock(self):
-        """Carga todas las alertas en segundo plano, en bloques, y refresca UI al llegar datos."""
+        """Carga todas las alertas en segundo plano, en bloques, y refresca UI al llegar datos.
+        Usa chunks adaptativos para optimizar latencia y rendimiento.
+        """
+        from pal.core.chunks import AdaptiveChunkController
         total_loaded = 0
         chunk_count = 0
         load_start_time = time.perf_counter()
         
         try:
             start = 1
-            chunk = 500
+            controller = AdaptiveChunkController(initial=500, min_size=100, max_size=2000, target_latency=2.0)
             # Usar dict para evitar duplicados por código
             existentes = {r[0]: r for r in (self.cached_alertas or [])}
             initial_count = len(existentes)
@@ -3154,8 +3792,9 @@ class DatabaseApp:
             max_consecutive_failures = 3
             
             while True:
+                chunk_size = controller.size
                 chunk_start_time = time.perf_counter()
-                rows = self.db_manager.obtener_alertas_stock_chunk(start_row=start, fetch_size=chunk, deposito='0301')
+                rows = self.db_manager.obtener_alertas_stock_chunk(start_row=start, fetch_size=chunk_size, deposito='0301')
                 chunk_query_time = time.perf_counter() - chunk_start_time
                 
                 if not rows:
@@ -3167,7 +3806,7 @@ class DatabaseApp:
                         break
                     
                     # Incrementar start para saltar posibles huecos
-                    start += chunk
+                    start += chunk_size
                     time.sleep(1)  # Pausa más larga tras error
                     continue
                 else:
@@ -3202,18 +3841,24 @@ class DatabaseApp:
                 )
                 
                 # Refrescar vista en hilo principal cada 3 chunks o al final
-                if chunk_count % 3 == 0 or len(rows) < chunk:
+                if chunk_count % 3 == 0 or len(rows) < chunk_size:
                     try:
                         self.root.after(0, self._update_ui_after_chunk, len(existentes), chunk_count)
                     except Exception as e:
                         self.stock_debug_log(f"Error actualizando UI: {e}")
                 
-                start += chunk
-                time.sleep(0.5)  # Pausa más larga para estabilidad
+                # Avanzar ventana
+                start += len(rows)
+                
+                # Ajuste adaptativo del tamaño del próximo chunk
+                controller.update(chunk_query_time, len(rows))
+                
+                # Pausa adaptativa breve
+                time.sleep(controller.recommend_sleep(chunk_query_time))
                 
                 # Si el chunk es menor que el tamaño esperado, probablemente sea el último
-                if len(rows) < chunk:
-                    self.stock_debug_log(f"Último chunk detectado ({len(rows)} < {chunk})")
+                if len(rows) < chunk_size:
+                    self.stock_debug_log(f"Último chunk detectado ({len(rows)} < {chunk_size})")
                     break
             
             # Estadísticas finales
@@ -4037,7 +4682,10 @@ class DatabaseApp:
 
             # Carga por chunks (reutiliza infra de TRA)
             start = 1
-            chunk_size = 1000
+            # Adaptive chunk size controller
+            from pal.core.chunks import AdaptiveChunkController
+            controller = AdaptiveChunkController(initial=500, min_size=100, max_size=2000, target_latency=2.0)
+            chunk_size = controller.size
             seen = set()
             acumulados = []
             
@@ -4048,6 +4696,7 @@ class DatabaseApp:
                 chunk_count += 1
                 self.mbrp_debug_log(f"Cargando chunk {chunk_count}: start_row={start}")
                 
+                chunk_t0 = time.perf_counter()
                 rows = self.db_manager.obtener_ventas_por_producto_chunk(
                     fecha_inicio=self.mbrp_fecha_inicio,
                     fecha_fin=self.mbrp_fecha_fin,
@@ -4055,6 +4704,7 @@ class DatabaseApp:
                     start_row=start,
                     fetch_size=chunk_size,
                 )
+                chunk_time = time.perf_counter() - chunk_t0
                 if not rows:
                     self.mbrp_debug_log(f"Chunk {chunk_count} vacío, finalizando carga")
                     break
@@ -4131,7 +4781,8 @@ class DatabaseApp:
             group_cod = self.mbrp_group_dict.get(dept_cod, {}).get(group_desc)
             if group_cod and hasattr(self, 'mbrp_sub_var'):
                 sub_desc = self.mbrp_sub_var.get()
-                key = (dept_cod, group_cod)
+                # Usar string como key (formato: "dept|group")
+                key = f"{dept_cod}|{group_cod}"
                 sub_cod = self.mbrp_sub_dict.get(key, {}).get(sub_desc)
 
         texto = self.mbrp_search_var.get() if hasattr(self, 'mbrp_search_var') else ''

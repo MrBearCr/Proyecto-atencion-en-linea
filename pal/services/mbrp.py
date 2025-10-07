@@ -108,6 +108,7 @@ def obtener_fecha_ultima_venta(db_manager, codigo_producto: str, sede_codigo: st
 def obtener_ultimas_ventas_bulk(db_manager, codigos_productos: List[str], sede_codigo: str = None) -> Dict[str, datetime]:
     """
     Obtiene las fechas de última venta para múltiples productos de forma eficiente.
+    Procesa los productos en lotes para evitar el límite de 2100 parámetros de SQL Server.
     
     Args:
         db_manager: Instancia del DatabaseManager
@@ -120,34 +121,44 @@ def obtener_ultimas_ventas_bulk(db_manager, codigos_productos: List[str], sede_c
     if not codigos_productos:
         return {}
     
+    # Límite de parámetros SQL Server (2100) - usamos 2000 para dejar margen
+    BATCH_SIZE = 2000
+    ultimas_ventas = {}
+    
     try:
-        # Crear placeholders para la consulta IN
-        placeholders = ','.join(['?' for _ in codigos_productos])
-        
-        query = f"""
-        SELECT c_Codarticulo, MAX(f_fecha) as ultima_venta
-        FROM TR_INVENTARIO 
-        WHERE c_Codarticulo IN ({placeholders})
-        AND c_Concepto = 'VEN'
-        AND n_Cantidad > 0
-        """
-        params = list(codigos_productos)
-        
-        if sede_codigo:
-            query += " AND c_Deposito LIKE ?"
-            params.append(sede_codigo)
+        # Procesar en lotes para evitar el límite de parámetros
+        for i in range(0, len(codigos_productos), BATCH_SIZE):
+            batch_codigos = codigos_productos[i:i + BATCH_SIZE]
             
-        query += " GROUP BY c_Codarticulo"
+            # Crear placeholders para la consulta IN del lote actual
+            placeholders = ','.join(['?' for _ in batch_codigos])
+            
+            query = f"""
+            SELECT c_Codarticulo, MAX(f_fecha) as ultima_venta
+            FROM TR_INVENTARIO 
+            WHERE c_Codarticulo IN ({placeholders})
+            AND c_Concepto = 'VEN'
+            AND n_Cantidad > 0
+            """
+            params = list(batch_codigos)
+            
+            if sede_codigo:
+                query += " AND c_Deposito LIKE ?"
+                params.append(sede_codigo)
+                
+            query += " GROUP BY c_Codarticulo"
+            
+            logger.debug(f"Procesando lote {i//BATCH_SIZE + 1} con {len(batch_codigos)} productos")
+            
+            result = db_manager.fetch_data(query, params)
+            
+            if result:
+                for row in result:
+                    codigo = str(row[0])
+                    fecha = row[1]
+                    ultimas_ventas[codigo] = fecha
         
-        result = db_manager.fetch_data(query, params)
-        
-        ultimas_ventas = {}
-        if result:
-            for row in result:
-                codigo = str(row[0])
-                fecha = row[1]
-                ultimas_ventas[codigo] = fecha
-        
+        logger.info(f"Procesados {len(codigos_productos)} productos en {math.ceil(len(codigos_productos)/BATCH_SIZE)} lotes")
         return ultimas_ventas
         
     except Exception as e:

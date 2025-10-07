@@ -42,7 +42,7 @@ from threading import Event, Timer
 
 
 CONFIG_FILE = 'db_config.ini'
-JERARQUIA_CACHE_FILE = "jerarquia_cache.json"
+JERARQUIA_CACHE_FILE = "productos_jerarquia_cache.json"
 FAVORITOS_CACHE_FILE = 'favoritos_cache.json'
 JERARQUIA_CACHE_TTL = timedelta(hours=15)
 LOCATION_GROUPS = {
@@ -714,7 +714,7 @@ class DatabaseApp:
                 controller.update(chunk_query_time, len(rows))
                 
                 # Clasificar rotación de forma incremental para mejor rendimiento
-                if chunk_count % 3 == 0 or len(rows) < current_chunk_size:  # Cada 3 chunks o al final
+                if chunk_count % 3 == 0 or len(rows) < controller.size:  # Cada 3 chunks o al final
                     from pal.services.tra import clasificar_rotacion_tra
                     self.cached_ventas_tra = clasificar_rotacion_tra(list(existentes.values()))
                     
@@ -732,11 +732,11 @@ class DatabaseApp:
                 self.tra_debug_log(
                     f"Chunk {chunk_count}: {len(rows)} filas | Nuevos: {new_records} | "
                     f"Total: {len(existentes)} | Latencia: {chunk_query_time:.2f}s | "
-                    f"Chunk size: {current_chunk_size} | Velocidad: {records_per_sec:.0f} reg/s"
+                    f"Chunk size: {controller.size} | Velocidad: {records_per_sec:.0f} reg/s"
                 )
                 
                 # Actualizar UI de forma eficiente (cada 2 chunks o al final)
-                if chunk_count % 2 == 0 or len(rows) < current_chunk_size:
+                if chunk_count % 2 == 0 or len(rows) < controller.size:
                     try:
                         self.root.after(0, self._update_tra_ui_after_chunk, len(existentes), chunk_count, records_per_sec)
                     except Exception as e:
@@ -986,18 +986,15 @@ class DatabaseApp:
                     self.root.after(0, lambda c=chunk_count, t=len(existentes): 
                                   self._update_tra_chunk_progress(c, t))
                 
-                start += len(rows)
-                # Ajuste adaptativo del tamaño para el próximo ciclo
-                controller.update(chunk_time, len(rows))
-                time.sleep(controller.recommend_sleep(chunk_time))
+                start_row += len(chunk_data)
+                
+                # Pausa breve para no sobrecargar la BD
+                time.sleep(0.1)
                 
                 # Si el chunk es más pequeño, probablemente sea el último
                 if len(chunk_data) < chunk_size:
-                    self.mbrp_debug_log(f"Último chunk detectado ({len(chunk_data)} < {chunk_size})")
+                    self.tra_debug_log(f"Último chunk detectado ({len(chunk_data)} < {chunk_size})")
                     break
-                else:
-                    # Actualizar chunk_size para próximo ciclo después del update
-                    chunk_size = controller.size
             
             # Finalización
             total_time = time.perf_counter() - load_start_time

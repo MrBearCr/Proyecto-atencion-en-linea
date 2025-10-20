@@ -1,0 +1,10 @@
+audit.log
+app1.py
+db_config.ini
+favoritos_cache.json
+icon.ico
+jerarquia_cache.json
+productos_jerarquia_cache.json
+recup.py
+s.py
+sirve.py

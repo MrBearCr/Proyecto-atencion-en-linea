@@ -85,8 +85,11 @@ def setup_stock_tab(app):
     action_frame = ttk.Frame(top_controls)
     action_frame.pack(fill=tk.X, pady=5)
 
-    ttk.Button(action_frame, text="📥 Exportar CSV", 
+    ttk.Button(action_frame, text="📅 Exportar CSV", 
                command=lambda: getattr(app, 'exportar_csv', lambda: None)()).pack(side=tk.LEFT, padx=5)
+    
+    ttk.Button(action_frame, text="📈 Exportar Excel", 
+               command=lambda: getattr(app, 'exportar_excel', lambda: None)()).pack(side=tk.LEFT, padx=5)
     
     ttk.Button(action_frame, text="🔄 Recargar", 
                command=lambda: getattr(app, 'recargar_stock', lambda: None)()).pack(side=tk.LEFT, padx=5)
@@ -114,7 +117,12 @@ def setup_stock_tab(app):
         "Nivel": {"width": 100, "anchor": "center"}
     }
 
-    app.stock_tree = ttk.Treeview(tree_frame, columns=list(columns_config.keys()), show="headings", height=15)
+    app.stock_tree = ttk.Treeview(tree_frame, columns=list(columns_config.keys()), show="headings", height=10)
+    
+    # Configurar tamaño de fuente y altura de filas más grandes
+    style = ttk.Style()
+    style.configure('LargeStock.Treeview', font=('', 11), rowheight=25)
+    app.stock_tree.configure(style='LargeStock.Treeview')
     vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=app.stock_tree.yview)
     hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=app.stock_tree.xview)
     app.stock_tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
@@ -132,17 +140,61 @@ def setup_stock_tab(app):
         app.stock_tree.column(col, **config)
 
     # Estilos de filas
-    app.stock_tree.tag_configure('leve', background='#abebc6')
-    app.stock_tree.tag_configure('media', background='#DAF7A6')
-    app.stock_tree.tag_configure('critica', background='#ff856b')
-    app.stock_tree.tag_configure('favorito', background='#FFFFE0')
-    app.stock_tree.tag_configure('hover', background='#f0f0f0')
-    app.stock_tree.tag_configure('selected', background='#d0d0d0')
+    app.stock_tree.tag_configure('leve', background='#4CAF50', foreground='#FFFFFF', font=('', 11))  # Verde vibrante
+    app.stock_tree.tag_configure('media', background='#FF9800', foreground='#FFFFFF', font=('', 11))  # Naranja vibrante
+    app.stock_tree.tag_configure('critica', background='#F44336', foreground='#FFFFFF', font=('', 11))  # Rojo vibrante
+    app.stock_tree.tag_configure('favorito', background='#FFC107', foreground='#000000', font=('', 11))  # Amarillo vibrante
+    app.stock_tree.tag_configure('hover', background='#FFE082', foreground='#000000', font=('', 11, 'bold'))  # Amarillo brillante hover
+    app.stock_tree.tag_configure('selected', background='#1976D2', foreground='#FFFFFF', font=('', 11, 'bold'))  # Azul intenso seleccionado
 
+    # Eventos mejorados con efectos visuales
+    def on_stock_hover(event):
+        try:
+            item = app.stock_tree.identify_row(event.y)
+            if item:
+                app.stock_tree.tk.call(app.stock_tree, 'tag', 'remove', 'hover', '')
+                app.stock_tree.tk.call(app.stock_tree, 'tag', 'add', 'hover', item)
+                app.stock_tree.config(cursor='hand2')
+        except Exception:
+            pass
+        return "break"
+    
+    def on_stock_leave(event):
+        try:
+            app.stock_tree.tk.call(app.stock_tree, 'tag', 'remove', 'hover', '')
+            app.stock_tree.config(cursor='')
+        except Exception:
+            pass
+        return "break"
+    
+    def on_stock_select(event):
+        try:
+            selected = app.stock_tree.selection()
+            if selected:
+                app.stock_tree.tk.call(app.stock_tree, 'tag', 'remove', 'selected', '')
+                app.stock_tree.tk.call(app.stock_tree, 'tag', 'add', 'selected', selected[0])
+                # Efecto de parpadeo
+                def parpadeo():
+                    try:
+                        app.stock_tree.tk.call(app.stock_tree, 'tag', 'remove', 'selected', selected[0])
+                        app.root.after(150, lambda: app.stock_tree.tk.call(app.stock_tree, 'tag', 'add', 'selected', selected[0]))
+                    except Exception:
+                        pass
+                app.root.after(100, parpadeo)
+        except Exception:
+            pass
+        
+        # Llamar a la función de selección existente también
+        try:
+            getattr(app, 'select_row', lambda x: None)(event)
+        except Exception:
+            pass
+        return "break"
+    
     app.stock_tree.bind('<Button-1>', lambda e: getattr(app, 'on_favorito_click', lambda x: None)(e))
-    app.stock_tree.bind('<Enter>', lambda e: getattr(app, 'hover_row', lambda x: None)(e))
-    app.stock_tree.bind('<Leave>', lambda e: getattr(app, 'leave_row', lambda x: None)(e))
-    app.stock_tree.bind('<<TreeviewSelect>>', lambda e: getattr(app, 'select_row', lambda x: None)(e))
+    app.stock_tree.bind('<Motion>', on_stock_hover)
+    app.stock_tree.bind('<Leave>', on_stock_leave)
+    app.stock_tree.bind('<<TreeviewSelect>>', on_stock_select)
 
     # Carga inicial solo si hay conexión
     app.current_page = 1

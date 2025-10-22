@@ -1249,11 +1249,158 @@ class DatabaseApp:
             messagebox.showerror("Error en Exportación", f"Error durante la exportación:\n{str(e)}")
 
         finally:
-            self.global_progress.pack_forget()
-            self.root.after(3000, lambda: self.api_status.config(
-                text="API: Lista",
-                foreground="green"
-            ))
+            # Verificar que los widgets aún existan antes de manipularlos
+            try:
+                if hasattr(self, 'global_progress') and self.global_progress.winfo_exists():
+                    self.global_progress.pack_forget()
+            except tk.TclError:
+                pass  # Widget ya fue destruido
+            
+            try:
+                if hasattr(self, 'root') and self.root.winfo_exists() and hasattr(self, 'api_status'):
+                    self.root.after(3000, lambda: self._safe_update_api_status("API: Lista", "green"))
+            except tk.TclError:
+                pass  # Aplicación ya fue cerrada
+    
+    def exportar_excel(self):
+        """Exporta datos de stock en formato Excel con múltiples hojas y formato avanzado"""
+        try:
+            # Verificar si openpyxl está disponible
+            try:
+                import openpyxl
+            except ImportError:
+                messagebox.showerror(
+                    "Módulo no encontrado", 
+                    "Para exportar en Excel necesita instalar openpyxl:\n\n"
+                    "pip install openpyxl\n\n"
+                    "Use la exportación CSV como alternativa."
+                )
+                return
+            
+            # 1. Mostrar diálogo para seleccionar ubicaciones (igual que CSV)
+            dialog = tk.Toplevel(self.root)
+            dialog.title("Exportar a Excel - Seleccionar Ubicaciones")
+            dialog.transient(self.root)
+            dialog.grab_set()
+            dialog.geometry("400x300")
+        
+            ubicaciones_vars = {
+                ubicacion: tk.BooleanVar(value=True)
+                for ubicacion in LOCATION_GROUPS
+            }
+
+            # Título del diálogo
+            ttk.Label(dialog, text="Exportación Excel - Formato Profesional", 
+                     font=("Arial", 12, "bold")).pack(pady=10)
+            ttk.Label(dialog, text="Incluye: Tablas con filtros, formato condicional,\nresumen por niveles y hoja de productos críticos", 
+                     font=("Arial", 9)).pack(pady=(0,10))
+            
+            ttk.Label(dialog, text="Seleccione las ubicaciones a incluir:").pack(pady=10)
+            
+            for ubicacion in LOCATION_GROUPS:
+                frame = ttk.Frame(dialog)
+                frame.pack(anchor='w', padx=20, pady=2)
+                cb = ttk.Checkbutton(
+                    frame,
+                    text=f"{ubicacion}",
+                    variable=ubicaciones_vars[ubicacion]
+                )
+                cb.pack(side=tk.LEFT)
+                ttk.Label(frame, text=f"({len(LOCATION_GROUPS[ubicacion])} depósitos)", 
+                         foreground="gray").pack(side=tk.LEFT, padx=(5,0))
+
+            seleccionadas = []
+            def confirmar():
+                nonlocal seleccionadas
+                seleccionadas = [u for u, var in ubicaciones_vars.items() if var.get()]
+                dialog.destroy()
+        
+            btn_frame = ttk.Frame(dialog)
+            btn_frame.pack(pady=20)
+            ttk.Button(btn_frame, text="📈 Exportar Excel", command=confirmar).pack(side=tk.LEFT, padx=5)
+            ttk.Button(btn_frame, text="Cancelar", command=dialog.destroy).pack(side=tk.RIGHT, padx=5)
+
+            dialog.wait_window()
+            if not seleccionadas:
+                return
+
+            # 2. Obtener datos filtrados
+            datos_exportar = self._obtener_datos_filtrados()
+            if not datos_exportar:
+                messagebox.showwarning("Sin datos", "No hay registros para exportar")
+                return
+
+            # 3. Configurar progreso
+            total_registros = len(datos_exportar)
+            self.global_progress.pack(side=tk.RIGHT, padx=10)
+            self.global_progress['value'] = 0
+            self.global_progress['maximum'] = total_registros
+            self.api_status.config(text="Creando Excel: 0%", foreground="#004C97")
+
+            filename = f"reporte_stock_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+
+            # Delegar creación a la función especializada
+            from pal.services.exports import export_stock_excel
+
+            def progress_cb(i, total):
+                if i % max(1, total // 20) == 0 or i == total:
+                    progreso = int((i / total) * 100)
+                    self.global_progress['value'] = i
+                    self.api_status.config(text=f"Creando Excel: {progreso}%")
+                    self.root.update_idletasks()
+
+            total_registros = export_stock_excel(
+                filename=filename,
+                datos_exportar=datos_exportar,
+                seleccionadas=seleccionadas,
+                location_groups=LOCATION_GROUPS,
+                db_manager=self.db_manager,
+                progress_cb=progress_cb,
+            )
+
+            # 4. Mostrar resumen final
+            self.api_status.config(text="API: Lista", foreground="green")
+            messagebox.showinfo(
+                "Exportación Excel Exitosa",
+                f"Archivo Excel creado con éxito:\n\n"
+                f"📈 Formato: Excel profesional (.xlsx)\n"
+                f"📅 Registros: {total_registros}\n"
+                f"🗺️ Ubicaciones: {len(seleccionadas)}\n"
+                f"🏢 Depósitos: {sum(len(LOCATION_GROUPS[u]) for u in seleccionadas)}\n\n"
+                f"Características:\n"
+                f"• 3 hojas: Datos, Resumen, Críticos\n"
+                f"• Tablas con filtros automáticos\n"
+                f"• Formato condicional por niveles\n"
+                f"• Columnas auto-ajustadas\n\n"
+                f"📁 Ruta: {os.path.abspath(filename)}"
+            )
+
+        except Exception as e:
+            self.log(f"Error en exportación Excel: {str(e)}", "ERROR")
+            self.api_status.config(text="API: Error", foreground="red")
+            messagebox.showerror("Error en Exportación Excel", f"Error durante la exportación:\n{str(e)}")
+
+        finally:
+            # Verificar que los widgets aún existan antes de manipularlos
+            try:
+                if hasattr(self, 'global_progress') and self.global_progress.winfo_exists():
+                    self.global_progress.pack_forget()
+            except tk.TclError:
+                pass  # Widget ya fue destruido
+            
+            try:
+                if hasattr(self, 'root') and self.root.winfo_exists() and hasattr(self, 'api_status'):
+                    self.root.after(3000, lambda: self._safe_update_api_status("API: Lista", "green"))
+            except tk.TclError:
+                pass  # Aplicación ya fue cerrada
+    
+    def _safe_update_api_status(self, text, color):
+        """Actualiza el estado API de forma segura verificando que el widget exista"""
+        try:
+            if hasattr(self, 'api_status') and hasattr(self, 'root') and self.root.winfo_exists():
+                self.api_status.config(text=text, foreground=color)
+        except tk.TclError:
+            pass  # Widget destruido, ignorar
                 
             
             

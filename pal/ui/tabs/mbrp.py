@@ -102,7 +102,12 @@ def setup_mbrp_tab(app):
     tree_frame.pack(fill=tk.BOTH, expand=True)
 
     columns = ("Código", "Descripción", "Rotación", "Neto", "Stock Actual", "IM %", "Última Venta")
-    app.mbrp_tree = ttk.Treeview(tree_frame, columns=columns, show='headings', height=15)
+    app.mbrp_tree = ttk.Treeview(tree_frame, columns=columns, show='headings', height=10)
+    
+    # Configurar tamaño de fuente y altura de filas más grandes
+    style = ttk.Style()
+    style.configure('LargeMBRP.Treeview', font=('', 11), rowheight=25)
+    app.mbrp_tree.configure(style='LargeMBRP.Treeview')
 
     vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=app.mbrp_tree.yview)
     hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=app.mbrp_tree.xview)
@@ -123,18 +128,65 @@ def setup_mbrp_tab(app):
         app.mbrp_tree.column(col, **column_config.get(col, {"width": 120, "anchor": "center"}))
 
     # Colores para MBRP - resaltar productos de BAJA movilidad (inverso a TRA)
-    app.mbrp_tree.tag_configure('alta', background='#F5F5F5', foreground='#666666')  # Gris claro (menos importante en MBRP)
-    app.mbrp_tree.tag_configure('media', background='#FFF3E0', foreground='#000000')  # Naranja muy claro
-    app.mbrp_tree.tag_configure('baja', background='#FFEBEE', foreground='#000000', font=('', 9, 'bold'))  # Rosa claro + negrita
-    app.mbrp_tree.tag_configure('sin_movimiento', background='#FFCDD2', foreground='#B71C1C', font=('', 9, 'bold'))  # Rojo claro + texto rojo oscuro
-    app.mbrp_tree.tag_configure('sin_clasificar', background='#EDE7F6', foreground='#000000')
-    app.mbrp_tree.tag_configure('loading', background='#E6F3FF', foreground='#0066CC', font=('', 10, 'italic'))
+    app.mbrp_tree.tag_configure('alta', background='#607D8B', foreground='#FFFFFF', font=('', 11))  # Gris azulado vibrante (menos importante en MBRP)
+    app.mbrp_tree.tag_configure('media', background='#FF9800', foreground='#FFFFFF', font=('', 11))  # Naranja vibrante
+    app.mbrp_tree.tag_configure('baja', background='#E91E63', foreground='#FFFFFF', font=('', 11, 'bold'))  # Rosa vibrante + negrita
+    app.mbrp_tree.tag_configure('sin_movimiento', background='#D32F2F', foreground='#FFFFFF', font=('', 11, 'bold'))  # Rojo vibrante + texto blanco
+    app.mbrp_tree.tag_configure('sin_clasificar', background='#9C27B0', foreground='#FFFFFF', font=('', 11))  # Púrpura vibrante
+    app.mbrp_tree.tag_configure('loading', background='#2196F3', foreground='#FFFFFF', font=('', 12, 'italic'))  # Azul vibrante
     
     # Colores adicionales por Índice de Movilidad
-    app.mbrp_tree.tag_configure('im_critico', background='#FFCDD2', foreground='#B71C1C', font=('', 9, 'bold'))  # IM < 5%
-    app.mbrp_tree.tag_configure('im_muy_bajo', background='#FFEBEE', foreground='#D32F2F', font=('', 9, 'bold'))  # IM 5-10%
-    app.mbrp_tree.tag_configure('im_bajo', background='#FFF3E0', foreground='#000000')  # IM 10-20%
+    app.mbrp_tree.tag_configure('im_critico', background='#B71C1C', foreground='#FFFFFF', font=('', 11, 'bold'))  # IM < 5% - Rojo muy vibrante
+    app.mbrp_tree.tag_configure('im_muy_bajo', background='#D32F2F', foreground='#FFFFFF', font=('', 11, 'bold'))  # IM 5-10% - Rojo vibrante
+    app.mbrp_tree.tag_configure('im_bajo', background='#FF5722', foreground='#FFFFFF', font=('', 11))  # IM 10-20% - Naranja rojizo vibrante
+    
+    # Efectos de hover y selección mejorados
+    app.mbrp_tree.tag_configure('hover', background='#FFC107', foreground='#000000', font=('', 11, 'bold'))  # Amarillo brillante hover
+    app.mbrp_tree.tag_configure('selected', background='#1976D2', foreground='#FFFFFF', font=('', 11, 'bold'))  # Azul intenso selección
 
+    # Eventos de hover y selección mejorados
+    def on_mbrp_hover(event):
+        try:
+            item = app.mbrp_tree.identify_row(event.y)
+            if item:
+                app.mbrp_tree.tk.call(app.mbrp_tree, 'tag', 'remove', 'hover', '')
+                app.mbrp_tree.tk.call(app.mbrp_tree, 'tag', 'add', 'hover', item)
+                app.mbrp_tree.config(cursor='hand2')
+        except Exception:
+            pass
+        return "break"
+    
+    def on_mbrp_leave(event):
+        try:
+            app.mbrp_tree.tk.call(app.mbrp_tree, 'tag', 'remove', 'hover', '')
+            app.mbrp_tree.config(cursor='')
+        except Exception:
+            pass
+        return "break"
+    
+    def on_mbrp_select(event):
+        try:
+            selected = app.mbrp_tree.selection()
+            if selected:
+                app.mbrp_tree.tk.call(app.mbrp_tree, 'tag', 'remove', 'selected', '')
+                app.mbrp_tree.tk.call(app.mbrp_tree, 'tag', 'add', 'selected', selected[0])
+                # Efecto de parpadeo
+                def parpadeo():
+                    try:
+                        app.mbrp_tree.tk.call(app.mbrp_tree, 'tag', 'remove', 'selected', selected[0])
+                        app.root.after(150, lambda: app.mbrp_tree.tk.call(app.mbrp_tree, 'tag', 'add', 'selected', selected[0]))
+                    except Exception:
+                        pass
+                app.root.after(100, parpadeo)
+        except Exception:
+            pass
+        return "break"
+    
+    # Bindings de eventos
+    app.mbrp_tree.bind('<Motion>', on_mbrp_hover)
+    app.mbrp_tree.bind('<Leave>', on_mbrp_leave)
+    app.mbrp_tree.bind('<<TreeviewSelect>>', on_mbrp_select)
+    
     # Layout
     app.mbrp_tree.grid(row=0, column=0, sticky="nsew")
     vsb.grid(row=0, column=1, sticky="ns")

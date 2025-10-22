@@ -154,7 +154,12 @@ def setup_tra_tab(app):
     tree_frame.pack(fill=tk.BOTH, expand=True)
 
     columns = ("Código", "Descripción", "Rotación", "Neto", "Representación %", "Stock Actual", "Stock Ideal", "Días Restantes")
-    app.tra_tree = ttk.Treeview(tree_frame, columns=columns, show='headings', height=15)
+    app.tra_tree = ttk.Treeview(tree_frame, columns=columns, show='headings', height=10)
+    
+    # Configurar tamaño de fuente y altura de filas más grandes
+    style = ttk.Style()
+    style.configure('Large.Treeview', font=('', 11), rowheight=25)
+    app.tra_tree.configure(style='Large.Treeview')
 
     # Configurar scrollbars
     vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=app.tra_tree.yview)
@@ -178,23 +183,77 @@ def setup_tra_tab(app):
         config = column_config.get(col, {"width": 120, "anchor": "center"})
         app.tra_tree.column(col, **config)
     
-    # Configurar estilos de colores para rotación (fondos suaves + texto negro)
-    app.tra_tree.tag_configure('alta', background='#E6F4EA', foreground='#000000')
-    app.tra_tree.tag_configure('media', background='#FFF8E1', foreground='#000000')
-    app.tra_tree.tag_configure('baja', background='#FFEBEE', foreground='#000000')
-    app.tra_tree.tag_configure('sin_movimiento', background='#F5F5F5', foreground='#000000')
-    app.tra_tree.tag_configure('sin_clasificar', background='#EDE7F6', foreground='#000000')
+    # Configurar estilos de colores para rotación (fondos vivos + texto blanco + fuente grande)
+    app.tra_tree.tag_configure('alta', background='#4CAF50', foreground='#FFFFFF', font=('', 11))  # Verde vibrante
+    app.tra_tree.tag_configure('media', background='#FF9800', foreground='#FFFFFF', font=('', 11))  # Naranja vibrante
+    app.tra_tree.tag_configure('baja', background='#F44336', foreground='#FFFFFF', font=('', 11))  # Rojo vibrante
+    app.tra_tree.tag_configure('sin_movimiento', background='#9E9E9E', foreground='#FFFFFF', font=('', 11))  # Gris vibrante
+    app.tra_tree.tag_configure('sin_clasificar', background='#9C27B0', foreground='#FFFFFF', font=('', 11))  # Púrpura vibrante
     
-    # Estilos por representación (mantener texto negro y fuente normal)
-    app.tra_tree.tag_configure('high_representation', foreground='#000000', font=('', 9))
-    app.tra_tree.tag_configure('medium_representation', foreground='#000000', font=('', 9))
-    app.tra_tree.tag_configure('low_representation', foreground='#000000', font=('', 9))
+    # Efectos de hover y selección mejorados
+    app.tra_tree.tag_configure('hover', background='#FFE082', foreground='#000000', font=('', 11, 'bold'))  # Amarillo brillante hover
+    app.tra_tree.tag_configure('selected', background='#1976D2', foreground='#FFFFFF', font=('', 11, 'bold'))  # Azul intenso selección
+    
+    # Estilos por representación (mantener texto blanco y fuente grande)
+    app.tra_tree.tag_configure('high_representation', foreground='#FFFFFF', font=('', 11))
+    app.tra_tree.tag_configure('medium_representation', foreground='#FFFFFF', font=('', 11))
+    app.tra_tree.tag_configure('low_representation', foreground='#FFFFFF', font=('', 11))
     
     # Estilos para mensajes de estado
-    app.tra_tree.tag_configure('loading', background='#E6F3FF', foreground='#0066CC', font=('', 10, 'italic'))
-    app.tra_tree.tag_configure('no_data', background='#FFF3E0', foreground='#FF8C00', font=('', 10, 'italic'))
-    app.tra_tree.tag_configure('error', background='#FFEBEE', foreground='#D32F2F', font=('', 10, 'italic'))
+    app.tra_tree.tag_configure('loading', background='#2196F3', foreground='#FFFFFF', font=('', 12, 'italic'))  # Azul vibrante
+    app.tra_tree.tag_configure('no_data', background='#FF9800', foreground='#FFFFFF', font=('', 12, 'italic'))  # Naranja vibrante
+    app.tra_tree.tag_configure('error', background='#F44336', foreground='#FFFFFF', font=('', 12, 'italic'))  # Rojo vibrante
 
+    # Eventos de hover y selección mejorados
+    def on_tra_hover(event):
+        try:
+            item = app.tra_tree.identify_row(event.y)
+            if item:
+                # Limpiar hover previo
+                app.tra_tree.tk.call(app.tra_tree, 'tag', 'remove', 'hover', '')
+                # Aplicar hover actual
+                app.tra_tree.tk.call(app.tra_tree, 'tag', 'add', 'hover', item)
+                # Cambiar cursor
+                app.tra_tree.config(cursor='hand2')
+        except Exception:
+            pass
+        return "break"  # Importante: devolver string para Tkinter
+    
+    def on_tra_leave(event):
+        try:
+            # Limpiar todos los hovers
+            app.tra_tree.tk.call(app.tra_tree, 'tag', 'remove', 'hover', '')
+            # Restaurar cursor
+            app.tra_tree.config(cursor='')
+        except Exception:
+            pass
+        return "break"  # Importante: devolver string para Tkinter
+    
+    def on_tra_select(event):
+        try:
+            selected = app.tra_tree.selection()
+            if selected:
+                # Limpiar selección previa
+                app.tra_tree.tk.call(app.tra_tree, 'tag', 'remove', 'selected', '')
+                # Aplicar selección actual
+                app.tra_tree.tk.call(app.tra_tree, 'tag', 'add', 'selected', selected[0])
+                # Efecto visual: breve parpadeo
+                def parpadeo():
+                    try:
+                        app.tra_tree.tk.call(app.tra_tree, 'tag', 'remove', 'selected', selected[0])
+                        app.root.after(150, lambda: app.tra_tree.tk.call(app.tra_tree, 'tag', 'add', 'selected', selected[0]))
+                    except Exception:
+                        pass
+                app.root.after(100, parpadeo)
+        except Exception:
+            pass
+        return "break"  # Importante: devolver string para Tkinter
+    
+    # Bindings de eventos
+    app.tra_tree.bind('<Motion>', on_tra_hover)
+    app.tra_tree.bind('<Leave>', on_tra_leave)
+    app.tra_tree.bind('<<TreeviewSelect>>', on_tra_select)
+    
     # Layout
     app.tra_tree.grid(row=0, column=0, sticky="nsew")
     vsb.grid(row=0, column=1, sticky="ns")

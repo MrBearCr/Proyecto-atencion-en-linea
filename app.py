@@ -2031,7 +2031,7 @@ class DatabaseApp:
             
             self.tra_tree.insert(
                 "", tk.END,
-                values=(codigo, desc, rotacion, round(neto, 2), stock_actual, stock_ideal, dias_restantes),
+                values=(codigo, desc, rotacion, int(neto), stock_actual, stock_ideal, dias_restantes),
                 tags=(tag_rotacion,)
             )
     
@@ -2071,7 +2071,7 @@ class DatabaseApp:
             tag_rotacion = rotacion.lower()
             self.tra_tree.insert(
                 "", "end", 
-                values=(codigo, desc, rotacion, round(neto, 2), stock_actual, stock_ideal, dias_restantes),
+                values=(codigo, desc, rotacion, int(neto), stock_actual, stock_ideal, dias_restantes),
                 tags=(tag_rotacion,)
             )
     
@@ -5017,7 +5017,7 @@ class DatabaseApp:
                 
                 self.mbrp_tree.insert(
                     "", tk.END,
-                    values=(codigo, desc, rotacion, round(float(neto or 0), 2), stock_actual, f"{im_porcentaje}%", ultima_venta_texto),
+                    values=(codigo, desc, rotacion, int(float(neto or 0)), stock_actual, f"{im_porcentaje}%", ultima_venta_texto),
                     tags=(tag_im, tag_rotacion)
                 )
             except Exception as e:

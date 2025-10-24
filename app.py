@@ -1161,106 +1161,215 @@ class DatabaseApp:
             threaded=False
         )
 
-    def exportar_csv(self):
+    
+    def exportar_tra_excel(self):
+        """Exporta datos TRA en formato Excel con múltiples hojas y formato profesional"""
         try:
-            # 1. Mostrar diálogo para seleccionar ubicaciones
-            dialog = tk.Toplevel(self.root)
-            dialog.title("Seleccionar Ubicaciones")
-            dialog.transient(self.root)
-            dialog.grab_set()
-        
-            ubicaciones_vars = {
-                ubicacion: tk.BooleanVar(value=True)
-                for ubicacion in LOCATION_GROUPS
-            }
-
-            ttk.Label(dialog, text="Seleccione las ubicaciones a incluir:").pack(pady=10)
-            for ubicacion in LOCATION_GROUPS:
-                cb = ttk.Checkbutton(
-                    dialog,
-                    text=f"{ubicacion} ({len(LOCATION_GROUPS[ubicacion])} depósitos)",
-                    variable=ubicaciones_vars[ubicacion]
+            # Verificar si hay datos para exportar
+            if not hasattr(self, 'cached_ventas_tra') or not self.cached_ventas_tra:
+                messagebox.showwarning("Sin datos", "No hay datos TRA cargados para exportar")
+                return
+            
+            # Verificar si openpyxl está disponible
+            try:
+                import openpyxl
+            except ImportError:
+                messagebox.showerror(
+                    "Módulo no encontrado", 
+                    "Para exportar en Excel necesita instalar openpyxl:\n\n"
+                    "pip install openpyxl\n\n"
+                    "Use la exportación CSV como alternativa."
                 )
-                cb.pack(anchor='w', padx=20)
-
-            seleccionadas = []
-            def confirmar():
-                nonlocal seleccionadas
-                seleccionadas = [u for u, var in ubicaciones_vars.items() if var.get()]
-                dialog.destroy()
-        
-            btn_frame = ttk.Frame(dialog)
-            btn_frame.pack(pady=10)
-            ttk.Button(btn_frame, text="Exportar", command=confirmar).pack(side=tk.LEFT, padx=5)
-            ttk.Button(btn_frame, text="Cancelar", command=dialog.destroy).pack(side=tk.RIGHT)
-
-            dialog.wait_window()
-            if not seleccionadas:
                 return
-
-            # 2. Obtener datos filtrados
-            datos_exportar = self._obtener_datos_filtrados()
+            
+            # Obtener los mismos datos filtrados que se muestran en la interfaz
+            if not hasattr(self, 'cached_ventas_tra') or not self.cached_ventas_tra:
+                messagebox.showwarning("Sin datos", "No hay datos TRA cargados para exportar")
+                return
+            
+            # Aplicar los mismos filtros que se usan en la interfaz
+            dept_cod = self.tra_dept_dict.get(self.tra_dept_var.get()) if hasattr(self, 'tra_dept_var') else None
+            group_cod = None
+            sub_cod = None
+            
+            if dept_cod and hasattr(self, 'tra_group_var'):
+                group_desc = self.tra_group_var.get()
+                group_cod = self.tra_group_dict.get(dept_cod, {}).get(group_desc)
+                
+                if group_cod and hasattr(self, 'tra_sub_var'):
+                    sub_desc = self.tra_sub_var.get()
+                    key = f"{dept_cod}|{group_cod}"
+                    sub_cod = self.tra_sub_dict.get(key, {}).get(sub_desc)
+            
+            texto = self.tra_search_var.get() if hasattr(self, 'tra_search_var') else ''
+            favoritos = self._get_favoritos_local()
+            
+            # Usar las mismas funciones de filtrado que la interfaz
+            from pal.services.tra import filter_ventas_tra
+            
+            datos_exportar = filter_ventas_tra(
+                ventas=self.cached_ventas_tra,
+                dept_code=dept_cod,
+                group_code=group_cod,
+                sub_code=sub_cod,
+                search_text=texto,
+                filter_rotacion='TODAS',
+                favoritos=favoritos
+            )
+            
+            # DEBUG: Log para diagnosticar discrepancias
+            self.log(f"[EXPORT DEBUG] Datos originales en cache: {len(self.cached_ventas_tra)} registros", "DEBUG")
+            self.log(f"[EXPORT DEBUG] Filtros aplicados - Dept: {dept_cod}, Group: {group_cod}, Sub: {sub_cod}, Texto: '{texto}'", "DEBUG")
+            self.log(f"[EXPORT DEBUG] Datos para exportar: {len(datos_exportar)} registros", "DEBUG")
+            if datos_exportar:
+                primer_item = datos_exportar[0]
+                self.log(f"[EXPORT DEBUG] Primer item: {primer_item}", "DEBUG")
+                if len(primer_item) > 5:
+                    neto_raw = primer_item[5]
+                    self.log(f"[EXPORT DEBUG] Neto raw del primer item: {neto_raw} (tipo: {type(neto_raw)})", "DEBUG")
+            
             if not datos_exportar:
-                messagebox.showwarning("Sin datos", "No hay registros para exportar")
+                messagebox.showwarning("Sin datos", "No hay registros TRA para exportar")
                 return
-
-            # 3. Configurar progreso
+            
+            # Configurar progreso
             total_registros = len(datos_exportar)
             self.global_progress.pack(side=tk.RIGHT, padx=10)
             self.global_progress['value'] = 0
             self.global_progress['maximum'] = total_registros
-            self.api_status.config(text="Exportando: 0%", foreground="#004C97")
-
-            filename = f"reporte_stock_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-
+            self.api_status.config(text="Exportando TRA: 0%", foreground="#004C97")
+            
+            filename = f"reporte_tra_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+            
             # Delegar escritura al servicio con callback de progreso
-            from pal.services.exports import export_stock_csv
-
+            from pal.services.exports import export_tra_excel
+            
             def progress_cb(i, total):
                 if i % max(1, total // 50) == 0 or i == total:
                     progreso = int((i / total) * 100)
                     self.global_progress['value'] = i
-                    self.api_status.config(text=f"Exportando: {progreso}%")
+                    self.api_status.config(text=f"Exportando TRA: {progreso}%")
                     self.root.update_idletasks()
-
-            total_registros = export_stock_csv(
+            
+            total_registros = export_tra_excel(
                 filename=filename,
-                datos_exportar=datos_exportar,
-                seleccionadas=seleccionadas,
-                location_groups=LOCATION_GROUPS,
+                datos_tra=datos_exportar,
                 db_manager=self.db_manager,
                 progress_cb=progress_cb,
             )
-
-            # 4. Mostrar resumen final
+            
+            # Mostrar resumen final
             self.api_status.config(text="API: Lista", foreground="green")
             messagebox.showinfo(
-                "Exportación Exitosa",
-                f"Reporte generado con éxito:\n\n"
+                "Exportación TRA Exitosa",
+                f"Reporte TRA generado con éxito:\n\n"
                 f"• Registros: {total_registros}\n"
-                f"• Ubicaciones incluidas: {len(seleccionadas)}\n"
-                f"• Depósitos consultados: {sum(len(LOCATION_GROUPS[u]) for u in seleccionadas)}\n"
+                f"• Hojas incluidas: Datos principales, Resumen por rotación, Productos de baja rotación\n"
+                f"• Formato: Tablas con filtros y formato condicional\n"
                 f"• Ruta: {os.path.abspath(filename)}"
             )
-
+            
         except Exception as e:
-            self.log(f"Error en exportación: {str(e)}", "ERROR")
+            self.log(f"Error en exportación TRA: {str(e)}", "ERROR")
             self.api_status.config(text="API: Error", foreground="red")
-            messagebox.showerror("Error en Exportación", f"Error durante la exportación:\n{str(e)}")
-
+            messagebox.showerror("Error en Exportación TRA", f"Error durante la exportación:\n{str(e)}")
+        
         finally:
-            # Verificar que los widgets aún existan antes de manipularlos
+            # Limpiar progreso
             try:
                 if hasattr(self, 'global_progress') and self.global_progress.winfo_exists():
                     self.global_progress.pack_forget()
             except tk.TclError:
-                pass  # Widget ya fue destruido
+                pass
             
             try:
                 if hasattr(self, 'root') and self.root.winfo_exists() and hasattr(self, 'api_status'):
                     self.root.after(3000, lambda: self._safe_update_api_status("API: Lista", "green"))
             except tk.TclError:
-                pass  # Aplicación ya fue cerrada
+                pass
+    
+    def exportar_mbrp_excel(self):
+        """Exporta datos MBRP en formato Excel con múltiples hojas y análisis de rentabilidad"""
+        try:
+            # Verificar si hay datos para exportar
+            if not hasattr(self, 'cached_ventas_mbrp') or not self.cached_ventas_mbrp:
+                messagebox.showwarning("Sin datos", "No hay datos MBRP cargados para exportar")
+                return
+            
+            # Verificar si openpyxl está disponible
+            try:
+                import openpyxl
+            except ImportError:
+                messagebox.showerror(
+                    "Módulo no encontrado", 
+                    "Para exportar en Excel necesita instalar openpyxl:\n\n"
+                    "pip install openpyxl\n\n"
+                    "Use la exportación CSV como alternativa."
+                )
+                return
+            
+            # Preparar datos filtrados para exportar
+            datos_exportar = getattr(self, 'mbrp_ventas_datos_filtrados', self.cached_ventas_mbrp) or self.cached_ventas_mbrp
+            
+            if not datos_exportar:
+                messagebox.showwarning("Sin datos", "No hay registros MBRP para exportar")
+                return
+            
+            # Configurar progreso
+            total_registros = len(datos_exportar)
+            self.global_progress.pack(side=tk.RIGHT, padx=10)
+            self.global_progress['value'] = 0
+            self.global_progress['maximum'] = total_registros
+            self.api_status.config(text="Exportando MBRP: 0%", foreground="#004C97")
+            
+            filename = f"reporte_mbrp_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+            
+            # Delegar escritura al servicio con callback de progreso
+            from pal.services.exports import export_mbrp_excel
+            
+            def progress_cb(i, total):
+                if i % max(1, total // 50) == 0 or i == total:
+                    progreso = int((i / total) * 100)
+                    self.global_progress['value'] = i
+                    self.api_status.config(text=f"Exportando MBRP: {progreso}%")
+                    self.root.update_idletasks()
+            
+            total_registros = export_mbrp_excel(
+                filename=filename,
+                datos_mbrp=datos_exportar,
+                db_manager=self.db_manager,
+                progress_cb=progress_cb,
+            )
+            
+            # Mostrar resumen final
+            self.api_status.config(text="API: Lista", foreground="green")
+            messagebox.showinfo(
+                "Exportación MBRP Exitosa",
+                f"Reporte MBRP generado con éxito:\n\n"
+                f"• Registros: {total_registros}\n"
+                f"• Hojas incluidas: Datos principales, Resumen por rentabilidad, Productos críticos\n"
+                f"• Formato: Tablas con filtros y formato condicional por margen\n"
+                f"• Ruta: {os.path.abspath(filename)}"
+            )
+            
+        except Exception as e:
+            self.log(f"Error en exportación MBRP: {str(e)}", "ERROR")
+            self.api_status.config(text="API: Error", foreground="red")
+            messagebox.showerror("Error en Exportación MBRP", f"Error durante la exportación:\n{str(e)}")
+        
+        finally:
+            # Limpiar progreso
+            try:
+                if hasattr(self, 'global_progress') and self.global_progress.winfo_exists():
+                    self.global_progress.pack_forget()
+            except tk.TclError:
+                pass
+            
+            try:
+                if hasattr(self, 'root') and self.root.winfo_exists() and hasattr(self, 'api_status'):
+                    self.root.after(3000, lambda: self._safe_update_api_status("API: Lista", "green"))
+            except tk.TclError:
+                pass
     
     def exportar_excel(self):
         """Exporta datos de stock en formato Excel con múltiples hojas y formato avanzado"""
@@ -2069,9 +2178,13 @@ class DatabaseApp:
             stock_ideal = self.calcular_stock_ideal_producto(neto)
             dias_restantes = self.calcular_dias_restantes(stock_actual, neto, fecha_inicio, fecha_fin)
             tag_rotacion = rotacion.lower()
+            # Formatear neto: si es entero, mostrar sin decimales
+            neto_valor = float(neto or 0)
+            neto_formateado = int(neto_valor) if neto_valor == int(neto_valor) else round(neto_valor, 2)
+            
             self.tra_tree.insert(
                 "", "end", 
-                values=(codigo, desc, rotacion, int(neto), stock_actual, stock_ideal, dias_restantes),
+                values=(codigo, desc, rotacion, neto_formateado, stock_actual, stock_ideal, dias_restantes),
                 tags=(tag_rotacion,)
             )
     
@@ -2271,9 +2384,13 @@ class DatabaseApp:
                 else:
                     tag_representacion = "low_representation"
 
+                # Formatear neto: si es entero, mostrar sin decimales
+                neto_valor = float(neto or 0)
+                neto_formateado = int(neto_valor) if neto_valor == int(neto_valor) else round(neto_valor, 2)
+                
                 self.tra_tree.insert(
                     "", tk.END,
-                    values=(codigo, desc, rotacion, round(float(neto or 0), 2), f"{porcentaje}%", stock_actual, stock_ideal, dias_restantes),
+                    values=(codigo, desc, rotacion, neto_formateado, f"{porcentaje}%", stock_actual, stock_ideal, dias_restantes),
                     tags=(tag_rotacion, tag_representacion)
                 )
             except Exception as e:

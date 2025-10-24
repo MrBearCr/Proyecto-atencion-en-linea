@@ -50,7 +50,10 @@ def setup_mbrp_tab(app):
     app.mbrp_sede_combo.current(0)
     app.mbrp_sede_combo.pack(side=tk.LEFT)
 
+    # Botones de acción
     ttk.Button(top_controls, text="Cargar", command=app.cargar_mbrp_base).pack(side=tk.RIGHT, padx=10)
+    ttk.Button(top_controls, text="📈 Exportar Excel", 
+               command=lambda: getattr(app, 'exportar_mbrp_excel', lambda: None)()).pack(side=tk.RIGHT, padx=5)
     ttk.Button(top_controls, text="📊 Reporte", command=app.generar_reporte_mbrp).pack(side=tk.RIGHT, padx=5)
 
     # Filtros jerárquicos

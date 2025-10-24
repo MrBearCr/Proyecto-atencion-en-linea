@@ -52,7 +52,9 @@ def setup_tra_tab(app):
     app.sede_combo.current(0)  # Seleccionar primer elemento por defecto
     app.sede_combo.pack(side=tk.LEFT)
 
-    # Botón de cargar - conectado al método principal
+    # Botones de acción
+    ttk.Button(top_controls, text="📈 Exportar Excel", 
+               command=lambda: getattr(app, 'exportar_tra_excel', lambda: None)()).pack(side=tk.RIGHT, padx=5)
     ttk.Button(top_controls, text="Cargar", command=app.cargar_tra_base).pack(side=tk.RIGHT, padx=10)
 
     # Frame para filtros jerárquicos

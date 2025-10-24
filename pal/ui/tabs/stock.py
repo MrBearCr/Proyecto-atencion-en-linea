@@ -85,8 +85,6 @@ def setup_stock_tab(app):
     action_frame = ttk.Frame(top_controls)
     action_frame.pack(fill=tk.X, pady=5)
 
-    ttk.Button(action_frame, text="📅 Exportar CSV", 
-               command=lambda: getattr(app, 'exportar_csv', lambda: None)()).pack(side=tk.LEFT, padx=5)
     
     ttk.Button(action_frame, text="📈 Exportar Excel", 
                command=lambda: getattr(app, 'exportar_excel', lambda: None)()).pack(side=tk.LEFT, padx=5)

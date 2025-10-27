@@ -33,6 +33,26 @@ def setup_styles(app):
     app.style.configure("Disabled.TButton", 
                 foreground="#666666",
                 background="#e0e0e0")
+    
+    # Estilos modernos para dashboard
+    app.style.configure("Accent.TButton",
+                font=("Segoe UI", 10),
+                padding=(15, 8),
+                relief="flat",
+                borderwidth=1)
+    app.style.map("Accent.TButton",
+                background=[("active", "#003d7a"), ("!active", "#004C97")],
+                foreground=[("active", "white"), ("!active", "white")],
+                relief=[("pressed", "sunken")])
+    
+    app.style.configure("ModuleCard.TButton",
+                font=("Segoe UI", 9),
+                padding=(10, 5),
+                relief="flat")
+    app.style.map("ModuleCard.TButton",
+                background=[("active", "#004C97"), ("!active", "#F3F4F6")],
+                foreground=[("active", "white"), ("!active", "#004C97")])
+    
     app.style.configure(
         "HeaderMenu.TMenubutton",
         background="#004C97",

@@ -30,7 +30,7 @@ from pal.core.audit import AuditLogger
 from pal.infrastructure.database import DatabaseManager
 from pal.ui.splash import SplashScreen
 from pal.ui.header import setup_styles as ui_setup_styles, create_header
-from pal.ui.sidebar import create_sidebar
+from pal.ui.debug_console import DebugConsole
 from pal.core.session import SessionManager
 from pal.services.cache import CacheDescripciones
 from pal.services.envios import EnvioProgramado, ProgramadorEnvios
@@ -186,6 +186,9 @@ class DatabaseApp:
             self.setup_bindings()
             self.cache = CacheDescripciones()
             
+            # Consola de debug flotante (para desarrolladores)
+            self.debug_console = DebugConsole(self)
+            
             # Flags de carga para evitar duplicados
             self.jerarquias_unificadas_cargadas = False
             
@@ -228,6 +231,8 @@ class DatabaseApp:
                 self.main_notebook.add(self.tra_tab, text="📈 T.R.A")
                 from pal.ui.tabs.tra import setup_tra_tab as setup_tra_tab_ui
                 setup_tra_tab_ui(self)
+                # Programar actualización de combos después de que todo esté listo
+                self.root.after(500, self._update_hierarchy_combos)
             
             # MBRP - Movimiento de Baja Rotación de Producto
             if self.modules_enabled.get("mbrp", False):
@@ -249,15 +254,17 @@ class DatabaseApp:
                 self.main_notebook.add(self.mbrp_tab, text="📉 MBRP")
                 from pal.ui.tabs.mbrp import setup_mbrp_tab as setup_mbrp_tab_ui
                 setup_mbrp_tab_ui(self)
+                # Programar actualización de combos después de que todo esté listo
+                self.root.after(500, self._update_hierarchy_combos)
             
             # Sistema de Paginacion ya inicializado arriba
-            self.attempt_auto_connect()
-            self.programar_actualizaciones_stock()
-
-            # Sistema de notificaciones y ayuda
+            # Sistema de notificaciones y ayuda (inicializar antes de auto-connect)
             self.notification_manager = self.NotificationManager(self.root)  
             self.help_tooltips = self.HelpTooltips(self.root)  
             self.setup_tooltips()
+            
+            self.attempt_auto_connect()
+            self.programar_actualizaciones_stock()
             
             # Notificaciones de Win10
             self.toaster = ToastNotifier()
@@ -390,7 +397,7 @@ class DatabaseApp:
                             medias += 1
                         else:
                             criticas += 1
-                    self.log(f"Distribución alertas -> Leves: {leves} | Medias: {medias} | Críticas: {criticas}", "DEBUG")
+                    self.stock_debug_log(f"Distribución alertas -> Leves: {leves} | Medias: {medias} | Críticas: {criticas}")
                 except Exception:
                     pass
                 self.log("Datos de alertas actualizados desde BD", "INFO")
@@ -402,9 +409,9 @@ class DatabaseApp:
                         # Debug: verificar total de registros disponibles
                         try:
                             total_count = self._get_total_stock_count()
-                            self.log(f"📊 [DEBUG] Registros totales disponibles en BD: {total_count}", "DEBUG")
+                            self.stock_debug_log(f"📃 Registros totales disponibles en BD: {total_count}")
                         except Exception as debug_e:
-                            self.log(f"⚠️ [DEBUG] No se pudo obtener total de registros: {debug_e}", "DEBUG")
+                            self.stock_debug_log(f"⚠️ No se pudo obtener total de registros: {debug_e}")
                         
                         threading.Thread(target=self._background_load_alertas_stock, daemon=True).start()
                         self.log("Carga paralela de alertas iniciada", "INFO")
@@ -684,10 +691,15 @@ class DatabaseApp:
                 
                 if not rows:
                     consecutive_failures += 1
-                    self.tra_debug_log(f"Chunk {chunk_count + 1}: Sin datos (fallo {consecutive_failures}/{max_consecutive_failures})")
+                    # Solo loggear si es el primer fallo o el último antes de terminar
+                    if consecutive_failures == 1 or consecutive_failures >= max_consecutive_failures:
+                        self.tra_debug_log(
+                            f"Chunk {chunk_count + 1}: Sin datos (fallo {consecutive_failures}/{max_consecutive_failures})",
+                            level="WARNING"
+                        )
                     
                     if consecutive_failures >= max_consecutive_failures:
-                        self.tra_debug_log(f"Finalizando carga TRA tras {consecutive_failures} fallos consecutivos")
+                        self.log(f"[TRA] Carga finalizada - {consecutive_failures} chunks consecutivos sin datos", "INFO")
                         break
                     
                     # Ajustar parámetros para siguiente intento
@@ -713,34 +725,42 @@ class DatabaseApp:
                 # Ajuste adaptativo: delegar en el controlador (EMA + cooldown)
                 controller.update(chunk_query_time, len(rows))
                 
-                # Clasificar rotación de forma incremental para mejor rendimiento
-                if chunk_count % 3 == 0 or len(rows) < controller.size:  # Cada 3 chunks o al final
-                    from pal.services.tra import clasificar_rotacion_tra
-                    self.cached_ventas_tra = clasificar_rotacion_tra(list(existentes.values()))
-                    
-                    # Guardar en cache periódicamente
-                    if chunk_count % 5 == 0:  # Cada 5 chunks
-                        self._save_tra_cache(cache_key, self.cached_ventas_tra)
+                # OPTIMIZACIÓN: Guardar en cache sin clasificar (clasificamos solo al final)
+                # Esto ahorra muchísimo tiempo en consultas largas (180 días)
+                if chunk_count % 10 == 0:  # Cada 10 chunks (menos frecuente)
+                    self._save_tra_cache(cache_key, list(existentes.values()))
                 
                 total_loaded += len(rows)
                 
-                # Logging optimizado
+                # Logging optimizado - solo cada 5 chunks o si es importante
                 total_time = time.perf_counter() - load_start_time
                 avg_latency = total_time / chunk_count
                 records_per_sec = total_loaded / total_time if total_time > 0 else 0
                 
-                self.tra_debug_log(
-                    f"Chunk {chunk_count}: {len(rows)} filas | Nuevos: {new_records} | "
-                    f"Total: {len(existentes)} | Latencia: {chunk_query_time:.2f}s | "
-                    f"Chunk size: {controller.size} | Velocidad: {records_per_sec:.0f} reg/s"
+                # Log cada 5 chunks, al inicio, o si hay problemas de rendimiento
+                should_log = (
+                    chunk_count <= 2 or  # Primeros 2 chunks siempre
+                    chunk_count % 5 == 0 or  # Cada 5 chunks
+                    chunk_query_time > target_latency * 1.5 or  # Si es muy lento
+                    len(rows) < controller.size  # Último chunk
                 )
                 
-                # Actualizar UI de forma eficiente (cada 2 chunks o al final)
-                if chunk_count % 2 == 0 or len(rows) < controller.size:
+                if should_log:
+                    self.tra_debug_log(
+                        f"Chunk {chunk_count}: {len(rows)} filas | Nuevos: {new_records} | "
+                        f"Total: {len(existentes)} | Latencia: {chunk_query_time:.2f}s | "
+                        f"Size: {controller.size} | Velocidad: {records_per_sec:.0f} reg/s",
+                        level="INFO",
+                        throttle_key="chunk_progress",
+                        throttle_seconds=3.0
+                    )
+                
+                # Actualizar UI de forma eficiente (cada 3 chunks o al final para reducir overhead)
+                if chunk_count % 3 == 0 or len(rows) < controller.size:
                     try:
                         self.root.after(0, self._update_tra_ui_after_chunk, len(existentes), chunk_count, records_per_sec)
                     except Exception as e:
-                        self.tra_debug_log(f"Error actualizando UI TRA: {e}")
+                        self.tra_debug_log(f"Error actualizando UI TRA: {e}", level="ERROR")
                 
                 start_row += len(rows)
                 
@@ -749,7 +769,7 @@ class DatabaseApp:
                 
                 # Condición de salida optimizada
                 if len(rows) < controller.size:
-                    self.tra_debug_log(f"Último chunk detectado ({len(rows)} < {controller.size})")
+                    self.log(f"[TRA] Último chunk cargado: {len(rows)} registros", "INFO")
                     break
             
             # Clasificación final y guardado en cache
@@ -810,7 +830,7 @@ class DatabaseApp:
             
             if isinstance(cached_data, list) and len(cached_data) > 0:
                 self.cached_ventas_tra = [tuple(item) for item in cached_data]
-                self.tra_debug_log(f"Cache cargado: {len(self.cached_ventas_tra)} registros desde {cache_file}")
+                self.log(f"[TRA] Cache cargado: {len(self.cached_ventas_tra)} registros", "INFO")
                 return True
             
             return False
@@ -832,7 +852,14 @@ class DatabaseApp:
             with open(cache_file, 'w', encoding='utf-8') as f:
                 json.dump(json_data, f, ensure_ascii=False, default=str)
             
-            self.tra_debug_log(f"Cache guardado: {len(data)} registros en {cache_file}")
+            # Solo loggear si es un guardado significativo
+            if len(data) > 100:
+                self.tra_debug_log(
+                    f"Cache guardado: {len(data)} registros",
+                    level="DEBUG",
+                    throttle_key="cache_save",
+                    throttle_seconds=10.0
+                )
             
         except Exception as e:
             self.tra_debug_log(f"Error guardando cache TRA: {e}")
@@ -847,14 +874,14 @@ class DatabaseApp:
             )
             
         except Exception as e:
-            self.tra_debug_log(f"Error en consulta optimizada TRA: {e}")
+            self.tra_debug_log(f"Error en consulta TRA: {e}", level="ERROR", throttle_key="query_error", throttle_seconds=5.0)
             # Fallback a método original si la optimizada falla
             try:
                 return self.db_manager.obtener_ventas_por_producto_chunk(
                     fecha_inicio, fecha_fin, sede_codigo, start_row, fetch_size
                 )
             except Exception as e2:
-                self.tra_debug_log(f"Error en fallback TRA: {e2}")
+                self.tra_debug_log(f"Error en fallback TRA: {e2}", level="ERROR")
                 return []
     
     def _update_tra_ui_after_chunk(self, total_records, chunk_count, records_per_sec=0):
@@ -878,7 +905,7 @@ class DatabaseApp:
                 self.aplicar_filtro_tra()
             
         except Exception as e:
-            self.tra_debug_log(f"Error en _update_tra_ui_after_chunk: {e}")
+            self.tra_debug_log(f"Error actualizando UI: {e}", level="ERROR", throttle_key="ui_update_error", throttle_seconds=5.0)
     
     def _background_load_ventas_tra_fast(self):
         """Versión super optimizada de carga TRA - primeros datos en <2 segundos"""
@@ -1163,7 +1190,9 @@ class DatabaseApp:
 
     
     def exportar_tra_excel(self):
-        """Exporta datos TRA en formato Excel con múltiples hojas y formato profesional"""
+        """Exporta datos TRA en formato Excel con múltiples hojas y formato profesional - ASYNC"""
+        import threading
+        
         try:
             # Verificar si hay datos para exportar
             if not hasattr(self, 'cached_ventas_tra') or not self.cached_ventas_tra:
@@ -1241,55 +1270,52 @@ class DatabaseApp:
             
             filename = f"reporte_tra_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
             
-            # Delegar escritura al servicio con callback de progreso
-            from pal.services.exports import export_tra_excel
-            
+            # Callback de progreso thread-safe
             def progress_cb(i, total):
                 if i % max(1, total // 50) == 0 or i == total:
                     progreso = int((i / total) * 100)
-                    self.global_progress['value'] = i
-                    self.api_status.config(text=f"Exportando TRA: {progreso}%")
-                    self.root.update_idletasks()
+                    # Usar after() para actualizar UI de forma segura desde otro hilo
+                    self.root.after(0, lambda: self._update_export_progress(i, progreso, "TRA"))
             
-            total_registros = export_tra_excel(
-                filename=filename,
-                datos_tra=datos_exportar,
-                db_manager=self.db_manager,
-                progress_cb=progress_cb,
-            )
+            # Función para ejecutar la exportación en hilo separado
+            def export_thread():
+                try:
+                    from pal.services.exports import export_tra_excel
+                    
+                    total_registros = export_tra_excel(
+                        filename=filename,
+                        datos_tra=datos_exportar,
+                        db_manager=self.db_manager,
+                        progress_cb=progress_cb,
+                    )
+                    
+                    # Notificar éxito en el hilo principal
+                    self.root.after(0, lambda: self._export_success(
+                        "TRA",
+                        total_registros,
+                        filename,
+                        "• Hojas incluidas: Datos principales, Resumen por rotación, Productos de baja rotación\n"
+                        "• Formato: Tablas con filtros y formato condicional"
+                    ))
+                    
+                except Exception as e:
+                    # Notificar error en el hilo principal
+                    self.root.after(0, lambda err=str(e): self._export_error("TRA", err))
             
-            # Mostrar resumen final
-            self.api_status.config(text="API: Lista", foreground="green")
-            messagebox.showinfo(
-                "Exportación TRA Exitosa",
-                f"Reporte TRA generado con éxito:\n\n"
-                f"• Registros: {total_registros}\n"
-                f"• Hojas incluidas: Datos principales, Resumen por rotación, Productos de baja rotación\n"
-                f"• Formato: Tablas con filtros y formato condicional\n"
-                f"• Ruta: {os.path.abspath(filename)}"
-            )
+            # Iniciar exportación en hilo separado
+            thread = threading.Thread(target=export_thread, daemon=True, name="ExportTRA")
+            thread.start()
             
         except Exception as e:
-            self.log(f"Error en exportación TRA: {str(e)}", "ERROR")
+            self.log(f"Error iniciando exportación TRA: {str(e)}", "ERROR")
             self.api_status.config(text="API: Error", foreground="red")
             messagebox.showerror("Error en Exportación TRA", f"Error durante la exportación:\n{str(e)}")
-        
-        finally:
-            # Limpiar progreso
-            try:
-                if hasattr(self, 'global_progress') and self.global_progress.winfo_exists():
-                    self.global_progress.pack_forget()
-            except tk.TclError:
-                pass
-            
-            try:
-                if hasattr(self, 'root') and self.root.winfo_exists() and hasattr(self, 'api_status'):
-                    self.root.after(3000, lambda: self._safe_update_api_status("API: Lista", "green"))
-            except tk.TclError:
-                pass
+            self._cleanup_export_progress()
     
     def exportar_mbrp_excel(self):
-        """Exporta datos MBRP en formato Excel con múltiples hojas y análisis de rentabilidad"""
+        """Exporta datos MBRP en formato Excel con múltiples hojas y análisis de rentabilidad - ASYNC"""
+        import threading
+        
         try:
             # Verificar si hay datos para exportar
             if not hasattr(self, 'cached_ventas_mbrp') or not self.cached_ventas_mbrp:
@@ -1324,55 +1350,52 @@ class DatabaseApp:
             
             filename = f"reporte_mbrp_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
             
-            # Delegar escritura al servicio con callback de progreso
-            from pal.services.exports import export_mbrp_excel
-            
+            # Callback de progreso thread-safe
             def progress_cb(i, total):
                 if i % max(1, total // 50) == 0 or i == total:
                     progreso = int((i / total) * 100)
-                    self.global_progress['value'] = i
-                    self.api_status.config(text=f"Exportando MBRP: {progreso}%")
-                    self.root.update_idletasks()
+                    # Usar after() para actualizar UI de forma segura desde otro hilo
+                    self.root.after(0, lambda: self._update_export_progress(i, progreso, "MBRP"))
             
-            total_registros = export_mbrp_excel(
-                filename=filename,
-                datos_mbrp=datos_exportar,
-                db_manager=self.db_manager,
-                progress_cb=progress_cb,
-            )
+            # Función para ejecutar la exportación en hilo separado
+            def export_thread():
+                try:
+                    from pal.services.exports import export_mbrp_excel
+                    
+                    total_registros = export_mbrp_excel(
+                        filename=filename,
+                        datos_mbrp=datos_exportar,
+                        db_manager=self.db_manager,
+                        progress_cb=progress_cb,
+                    )
+                    
+                    # Notificar éxito en el hilo principal
+                    self.root.after(0, lambda: self._export_success(
+                        "MBRP",
+                        total_registros,
+                        filename,
+                        "• Hojas incluidas: Datos principales, Resumen por rentabilidad, Productos críticos\n"
+                        "• Formato: Tablas con filtros y formato condicional por margen"
+                    ))
+                    
+                except Exception as e:
+                    # Notificar error en el hilo principal
+                    self.root.after(0, lambda err=str(e): self._export_error("MBRP", err))
             
-            # Mostrar resumen final
-            self.api_status.config(text="API: Lista", foreground="green")
-            messagebox.showinfo(
-                "Exportación MBRP Exitosa",
-                f"Reporte MBRP generado con éxito:\n\n"
-                f"• Registros: {total_registros}\n"
-                f"• Hojas incluidas: Datos principales, Resumen por rentabilidad, Productos críticos\n"
-                f"• Formato: Tablas con filtros y formato condicional por margen\n"
-                f"• Ruta: {os.path.abspath(filename)}"
-            )
+            # Iniciar exportación en hilo separado
+            thread = threading.Thread(target=export_thread, daemon=True, name="ExportMBRP")
+            thread.start()
             
         except Exception as e:
-            self.log(f"Error en exportación MBRP: {str(e)}", "ERROR")
+            self.log(f"Error iniciando exportación MBRP: {str(e)}", "ERROR")
             self.api_status.config(text="API: Error", foreground="red")
             messagebox.showerror("Error en Exportación MBRP", f"Error durante la exportación:\n{str(e)}")
-        
-        finally:
-            # Limpiar progreso
-            try:
-                if hasattr(self, 'global_progress') and self.global_progress.winfo_exists():
-                    self.global_progress.pack_forget()
-            except tk.TclError:
-                pass
-            
-            try:
-                if hasattr(self, 'root') and self.root.winfo_exists() and hasattr(self, 'api_status'):
-                    self.root.after(3000, lambda: self._safe_update_api_status("API: Lista", "green"))
-            except tk.TclError:
-                pass
+            self._cleanup_export_progress()
     
     def exportar_excel(self):
-        """Exporta datos de stock en formato Excel con múltiples hojas y formato avanzado"""
+        """Exporta datos de stock en formato Excel con múltiples hojas y formato avanzado - ASYNC"""
+        import threading
+        
         try:
             # Verificar si openpyxl está disponible
             try:
@@ -1448,60 +1471,54 @@ class DatabaseApp:
 
             filename = f"reporte_stock_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
 
-            # Delegar creación a la función especializada
-            from pal.services.exports import export_stock_excel
-
+            # Callback de progreso thread-safe
             def progress_cb(i, total):
                 if i % max(1, total // 20) == 0 or i == total:
                     progreso = int((i / total) * 100)
-                    self.global_progress['value'] = i
-                    self.api_status.config(text=f"Creando Excel: {progreso}%")
-                    self.root.update_idletasks()
+                    # Usar after() para actualizar UI de forma segura desde otro hilo
+                    self.root.after(0, lambda: self._update_export_progress(i, progreso, "Stock"))
 
-            total_registros = export_stock_excel(
-                filename=filename,
-                datos_exportar=datos_exportar,
-                seleccionadas=seleccionadas,
-                location_groups=LOCATION_GROUPS,
-                db_manager=self.db_manager,
-                progress_cb=progress_cb,
-            )
-
-            # 4. Mostrar resumen final
-            self.api_status.config(text="API: Lista", foreground="green")
-            messagebox.showinfo(
-                "Exportación Excel Exitosa",
-                f"Archivo Excel creado con éxito:\n\n"
-                f"📈 Formato: Excel profesional (.xlsx)\n"
-                f"📅 Registros: {total_registros}\n"
-                f"🗺️ Ubicaciones: {len(seleccionadas)}\n"
-                f"🏢 Depósitos: {sum(len(LOCATION_GROUPS[u]) for u in seleccionadas)}\n\n"
-                f"Características:\n"
-                f"• 3 hojas: Datos, Resumen, Críticos\n"
-                f"• Tablas con filtros automáticos\n"
-                f"• Formato condicional por niveles\n"
-                f"• Columnas auto-ajustadas\n\n"
-                f"📁 Ruta: {os.path.abspath(filename)}"
-            )
+            # Función para ejecutar la exportación en hilo separado
+            def export_thread():
+                try:
+                    from pal.services.exports import export_stock_excel
+                    
+                    total_registros = export_stock_excel(
+                        filename=filename,
+                        datos_exportar=datos_exportar,
+                        seleccionadas=seleccionadas,
+                        location_groups=LOCATION_GROUPS,
+                        db_manager=self.db_manager,
+                        progress_cb=progress_cb,
+                    )
+                    
+                    # Notificar éxito en el hilo principal
+                    ubicaciones_info = f"🗺️ Ubicaciones: {len(seleccionadas)}\n🏢 Depósitos: {sum(len(LOCATION_GROUPS[u]) for u in seleccionadas)}\n\n"
+                    self.root.after(0, lambda: self._export_success(
+                        "Stock",
+                        total_registros,
+                        filename,
+                        f"{ubicaciones_info}"
+                        "Características:\n"
+                        "• 3 hojas: Datos, Resumen, Críticos\n"
+                        "• Tablas con filtros automáticos\n"
+                        "• Formato condicional por niveles\n"
+                        "• Columnas auto-ajustadas"
+                    ))
+                    
+                except Exception as e:
+                    # Notificar error en el hilo principal
+                    self.root.after(0, lambda err=str(e): self._export_error("Stock", err))
+            
+            # Iniciar exportación en hilo separado
+            thread = threading.Thread(target=export_thread, daemon=True, name="ExportStock")
+            thread.start()
 
         except Exception as e:
-            self.log(f"Error en exportación Excel: {str(e)}", "ERROR")
+            self.log(f"Error iniciando exportación Excel: {str(e)}", "ERROR")
             self.api_status.config(text="API: Error", foreground="red")
             messagebox.showerror("Error en Exportación Excel", f"Error durante la exportación:\n{str(e)}")
-
-        finally:
-            # Verificar que los widgets aún existan antes de manipularlos
-            try:
-                if hasattr(self, 'global_progress') and self.global_progress.winfo_exists():
-                    self.global_progress.pack_forget()
-            except tk.TclError:
-                pass  # Widget ya fue destruido
-            
-            try:
-                if hasattr(self, 'root') and self.root.winfo_exists() and hasattr(self, 'api_status'):
-                    self.root.after(3000, lambda: self._safe_update_api_status("API: Lista", "green"))
-            except tk.TclError:
-                pass  # Aplicación ya fue cerrada
+            self._cleanup_export_progress()
     
     def _safe_update_api_status(self, text, color):
         """Actualiza el estado API de forma segura verificando que el widget exista"""
@@ -1545,6 +1562,64 @@ class DatabaseApp:
         # Ordenar por favoritos
         favoritos = self._get_favoritos_local()
         return sorted(datos_filtrados, key=lambda x: x[0] not in favoritos)
+    
+    # === Funciones auxiliares para exportación asíncrona ===
+    
+    def _update_export_progress(self, current, percentage, module_name):
+        """Actualiza la barra de progreso y el estado durante la exportación (thread-safe)"""
+        try:
+            if hasattr(self, 'global_progress') and self.global_progress.winfo_exists():
+                self.global_progress['value'] = current
+            if hasattr(self, 'api_status'):
+                self.api_status.config(text=f"Exportando {module_name}: {percentage}%", foreground="#004C97")
+        except tk.TclError:
+            pass  # Widget destruido, ignorar
+    
+    def _export_success(self, module_name, total_registros, filename, extra_info=""):
+        """Muestra mensaje de éxito tras completar la exportación (thread-safe)"""
+        try:
+            self._cleanup_export_progress()
+            self.api_status.config(text="API: Lista", foreground="green")
+            
+            messagebox.showinfo(
+                f"Exportación {module_name} Exitosa",
+                f"Reporte {module_name} generado con éxito:\n\n"
+                f"• Registros: {total_registros}\n"
+                f"{extra_info}\n\n"
+                f"📁 Ruta: {os.path.abspath(filename)}"
+            )
+            
+            # Restaurar estado después de 3 segundos
+            self.root.after(3000, lambda: self._safe_update_api_status("API: Lista", "green"))
+            
+        except Exception as e:
+            self.log(f"Error mostrando mensaje de éxito: {e}", "ERROR")
+    
+    def _export_error(self, module_name, error_msg):
+        """Muestra mensaje de error tras fallar la exportación (thread-safe)"""
+        try:
+            self._cleanup_export_progress()
+            self.api_status.config(text="API: Error", foreground="red")
+            self.log(f"Error en exportación {module_name}: {error_msg}", "ERROR")
+            
+            messagebox.showerror(
+                f"Error en Exportación {module_name}",
+                f"Error durante la exportación:\n{error_msg}"
+            )
+            
+            # Restaurar estado después de 3 segundos
+            self.root.after(3000, lambda: self._safe_update_api_status("API: Lista", "green"))
+            
+        except Exception as e:
+            self.log(f"Error mostrando mensaje de error: {e}", "ERROR")
+    
+    def _cleanup_export_progress(self):
+        """Limpia la barra de progreso tras finalizar exportación (thread-safe)"""
+        try:
+            if hasattr(self, 'global_progress') and self.global_progress.winfo_exists():
+                self.global_progress.pack_forget()
+        except tk.TclError:
+            pass  # Widget ya fue destruido
 
     def buscar_por_fecha(self):
         # Obtener fechas como objetos datetime.datetime (incluyendo hora)
@@ -1571,19 +1646,23 @@ class DatabaseApp:
 
     def setup_bindings(self):
         """Configurar eventos del teclado y widgets"""
-        # Doble click en la tabla
-        self.tree.bind("<Double-1>", lambda e: self.on_tree_double_click(e) or 0)
+        # Doble click en la tabla (solo si existe)
+        if hasattr(self, 'tree'):
+            self.tree.bind("<Double-1>", lambda e: self.on_tree_double_click(e) or 0)
         
-        # Validación en tiempo real del código de producto
-        self.cod_producto.bind("<KeyRelease>", lambda e: self.buscar_descripcion(e) or 0)
+        # Validación en tiempo real del código de producto (solo si existe)
+        if hasattr(self, 'cod_producto'):
+            self.cod_producto.bind("<KeyRelease>", lambda e: self.buscar_descripcion(e) or 0)
+        
+        # Atajo de teclado para consola de debug (Ctrl+Shift+D)
+        self.root.bind("<Control-Shift-D>", lambda e: self.debug_console.toggle())
 
     def setup_modern_ui(self):   
         self.root.title("Gestión de Clientes - Corporativo")
         self.root.geometry("1200x800")
         self.root.minsize(1000, 600)
         
-        create_header(self)
-        create_sidebar(self)
+        # create_header(self)  # Header eliminado para aprovechar espacio
         self.create_main_workspace()
         self.create_status_panel()
 
@@ -2044,14 +2123,24 @@ class DatabaseApp:
         
 
     def mostrar_alertas_paginadas(self, datos):
-        """Mostrar datos con estado de favoritos"""
+        """Mostrar datos con estado de favoritos y filas alternadas"""
         self.stock_tree.delete(*self.stock_tree.get_children())
         favoritos = self._get_favoritos_local()
         
-        for codigo, desc, stock, nivel in datos:
+        for idx, (codigo, desc, stock, nivel) in enumerate(datos):
             es_favorito = codigo in favoritos
             estado = "✓" if es_favorito else "☐"
-            tags = ('favorito' if es_favorito else '', nivel.lower().replace('ítica', 'itica'))
+            
+            # Si es favorito, usar estilo de favorito
+            if es_favorito:
+                tags = ('favorito',)
+            else:
+                # Usar estilo alternado basado en el índice
+                nivel_base = nivel.lower().replace('ítica', 'itica')
+                if idx % 2 == 0:
+                    tags = (nivel_base,)  # Filas pares: colores claros
+                else:
+                    tags = (f"{nivel_base}_alt",)  # Filas impares: colores oscuros
             
             self.stock_tree.insert("", tk.END, 
                                 values=(estado, codigo, desc, stock, nivel),
@@ -2076,11 +2165,18 @@ class DatabaseApp:
         self.main_notebook = ttk.Notebook(self.root)
         self.main_notebook.pack(expand=True, fill=tk.BOTH, padx=10, pady=10)
         
-        # Pestaña de Registros
-        self.records_tab = ttk.Frame(self.main_notebook)
-        self.main_notebook.add(self.records_tab, text="Registros")
-        from pal.ui.tabs.records import setup_records_tab as setup_records_tab_ui
-        setup_records_tab_ui(self)
+        # Pestaña de Dashboard (Pantalla Principal)
+        self.dashboard_tab = ttk.Frame(self.main_notebook)
+        self.main_notebook.add(self.dashboard_tab, text="🏠 Inicio")
+        from pal.ui.tabs.dashboard import setup_dashboard_tab
+        setup_dashboard_tab(self)
+        
+        # Pestaña de Registros (solo si el módulo de mensajes está activo)
+        if self.modules_enabled.get("envio_mensajes", False):
+            self.records_tab = ttk.Frame(self.main_notebook)
+            self.main_notebook.add(self.records_tab, text="Registros")
+            from pal.ui.tabs.records import setup_records_tab as setup_records_tab_ui
+            setup_records_tab_ui(self)
 
 
         # Pestaña de Mensajería
@@ -2193,29 +2289,95 @@ class DatabaseApp:
         self.tra_btn_prev['state'] = 'normal' if self.tra_current_page > 1 else 'disabled'
         self.tra_btn_next['state'] = 'normal' if self.tra_current_page < total_pages else 'disabled'
         
-    def tra_debug_log(self, message: str):
-        """Log EARLY/DEBUG para módulo TRA si el modo debug está habilitado"""
-        if getattr(self, 'tra_debug', False):
-            try:
-                self.log(f"[TRA DEBUG] {message}", "DEBUG")
-            except Exception:
-                pass
+    def tra_debug_log(self, message: str, level: str = "DEBUG", throttle_key: str = None, throttle_seconds: float = 2.0):
+        """Log DEBUG inteligente para módulo TRA con throttling para evitar spam.
+        
+        Args:
+            message: Mensaje a loggear
+            level: Nivel del log (DEBUG, INFO, etc.)
+            throttle_key: Clave para agrupar mensajes similares (ej: "chunk_load")
+            throttle_seconds: Segundos mínimos entre logs del mismo throttle_key
+        """
+        if not getattr(self, 'tra_debug', False):
+            return
+            
+        try:
+            # Inicializar throttle cache si no existe
+            if not hasattr(self, '_tra_debug_throttle'):
+                self._tra_debug_throttle = {}
+            
+            current_time = time.time()
+            
+            # Si hay throttle_key, verificar si debemos loggear
+            if throttle_key:
+                last_time = self._tra_debug_throttle.get(throttle_key, 0)
+                if current_time - last_time < throttle_seconds:
+                    return  # Suprimir este log por throttling
+                self._tra_debug_throttle[throttle_key] = current_time
+            
+            self.log(f"[TRA DEBUG] {message}", level)
+        except Exception:
+            pass
 
-    def stock_debug_log(self, message: str):
-        """Log DEBUG del módulo Stock controlado por bandera de configuración."""
-        if getattr(self, 'stock_debug', False):
-            try:
-                self.log(f"[STOCK DEBUG] {message}", "DEBUG")
-            except Exception:
-                pass
+    def stock_debug_log(self, message: str, level: str = "DEBUG", throttle_key: str = None, throttle_seconds: float = 2.0):
+        """Log DEBUG inteligente para módulo Stock con throttling para evitar spam.
+        
+        Args:
+            message: Mensaje a loggear
+            level: Nivel del log (DEBUG, INFO, etc.)
+            throttle_key: Clave para agrupar mensajes similares
+            throttle_seconds: Segundos mínimos entre logs del mismo throttle_key
+        """
+        if not getattr(self, 'stock_debug', False):
+            return
+            
+        try:
+            # Inicializar throttle cache si no existe
+            if not hasattr(self, '_stock_debug_throttle'):
+                self._stock_debug_throttle = {}
+            
+            current_time = time.time()
+            
+            # Si hay throttle_key, verificar si debemos loggear
+            if throttle_key:
+                last_time = self._stock_debug_throttle.get(throttle_key, 0)
+                if current_time - last_time < throttle_seconds:
+                    return  # Suprimir este log por throttling
+                self._stock_debug_throttle[throttle_key] = current_time
+            
+            self.log(f"[STOCK DEBUG] {message}", level)
+        except Exception:
+            pass
 
-    def mbrp_debug_log(self, message: str):
-        """Log DEBUG del módulo MBRP controlado por bandera de configuración."""
-        if getattr(self, 'mbrp_debug', False):
-            try:
-                self.log(f"[MBRP DEBUG] {message}", "DEBUG")
-            except Exception:
-                pass
+    def mbrp_debug_log(self, message: str, level: str = "DEBUG", throttle_key: str = None, throttle_seconds: float = 2.0):
+        """Log DEBUG inteligente para módulo MBRP con throttling para evitar spam.
+        
+        Args:
+            message: Mensaje a loggear
+            level: Nivel del log (DEBUG, INFO, etc.)
+            throttle_key: Clave para agrupar mensajes similares
+            throttle_seconds: Segundos mínimos entre logs del mismo throttle_key
+        """
+        if not getattr(self, 'mbrp_debug', False):
+            return
+            
+        try:
+            # Inicializar throttle cache si no existe
+            if not hasattr(self, '_mbrp_debug_throttle'):
+                self._mbrp_debug_throttle = {}
+            
+            current_time = time.time()
+            
+            # Si hay throttle_key, verificar si debemos loggear
+            if throttle_key:
+                last_time = self._mbrp_debug_throttle.get(throttle_key, 0)
+                if current_time - last_time < throttle_seconds:
+                    return  # Suprimir este log por throttling
+                self._mbrp_debug_throttle[throttle_key] = current_time
+            
+            self.log(f"[MBRP DEBUG] {message}", level)
+        except Exception:
+            pass
 
     def aplicar_filtro_tra(self):
         """Aplica filtros jerárquicos y de texto a los datos TRA usando las nuevas funciones de filtrado"""
@@ -2248,9 +2410,13 @@ class DatabaseApp:
         # Usar las nuevas funciones de filtrado
         from pal.services.tra import filter_ventas_tra, paginate_tra
         
-        # Debug: verificar datos antes del filtro
-        self.tra_debug_log(f"Aplicando filtros - Datos disponibles: {len(self.cached_ventas_tra)}")
-        self.tra_debug_log(f"Filtros activos - Dept: {dept_cod}, Group: {group_cod}, Sub: {sub_cod}, Texto: '{texto}'")
+        # Debug: verificar datos antes del filtro (con throttling para evitar spam)
+        self.tra_debug_log(
+            f"Aplicando filtros - Datos: {len(self.cached_ventas_tra)} | "
+            f"Dept: {dept_cod}, Group: {group_cod}, Sub: {sub_cod}, Texto: '{texto}'",
+            throttle_key="filter_input",
+            throttle_seconds=2.0
+        )
         
         # Filtrar y ordenar
         datos_filtrados = filter_ventas_tra(
@@ -2263,7 +2429,11 @@ class DatabaseApp:
             favoritos=favoritos
         )
         
-        self.tra_debug_log(f"Datos filtrados: {len(datos_filtrados)} registros")
+        self.tra_debug_log(
+            f"Resultado filtrado: {len(datos_filtrados)} registros",
+            throttle_key="filter_result",
+            throttle_seconds=2.0
+        )
         
         # Asegurar que la página actual sea válida
         if not hasattr(self, 'tra_current_page') or self.tra_current_page < 1:
@@ -2274,7 +2444,11 @@ class DatabaseApp:
             datos_filtrados, self.tra_current_page, self.tra_page_size
         )
         
-        self.tra_debug_log(f"Página {self.tra_current_page}/{total_paginas} - Mostrando {len(datos_pagina)} registros")
+        self.tra_debug_log(
+            f"Paginación: página {self.tra_current_page}/{total_paginas} ({len(datos_pagina)} registros)",
+            throttle_key="pagination",
+            throttle_seconds=1.5
+        )
         
         # Actualizar vista
         self.mostrar_tra_paginado(datos_pagina)
@@ -2283,17 +2457,20 @@ class DatabaseApp:
     def mostrar_tra_paginado(self, datos):
         """Muestra datos TRA paginados en el Treeview con colores, stock actual e ideal, días restantes y porcentajes"""
         if not hasattr(self, 'tra_tree'):
-            self.log("[TRA DEBUG] Error: tra_tree no existe", "ERROR")
+            self.tra_debug_log("Error: tra_tree no existe")  # Usar función condicional
             return
             
         self.tra_tree.delete(*self.tra_tree.get_children())
         
         if not datos:
-            # Evitar spam en warning; mantenemos un debug suave
-            self.tra_debug_log("No hay datos para mostrar en esta página")
+            # Solo loggear una vez para evitar spam
+            self.tra_debug_log(
+                "No hay datos para mostrar en esta página",
+                level="DEBUG",
+                throttle_key="empty_page",
+                throttle_seconds=5.0
+            )
             return
-            
-        self.tra_debug_log(f"Mostrando {len(datos)} registros en TreeView")
             
         # Optimización: solo calcular porcentajes si no están en cache o si hay cambios significativos
         cached_data = getattr(self, 'cached_ventas_tra', [])
@@ -2311,9 +2488,11 @@ class DatabaseApp:
             from pal.services.tra import calcular_porcentajes_representacion
             self.tra_porcentajes_map = calcular_porcentajes_representacion(cached_data)
             self._tra_last_porcentaje_count = current_count
-            self.tra_debug_log(f"Porcentajes recalculados para {current_count} productos")
-        else:
-            self.tra_debug_log(f"Usando porcentajes cacheados (diferencia: {count_diff})")
+            self.tra_debug_log(
+                f"Porcentajes recalculados para {current_count} productos",
+                throttle_key="percentage_calc",
+                throttle_seconds=5.0
+            )
             
         # Optimización: cache de stock para evitar consultas repetidas
         codigos = [r[0] for r in datos]
@@ -2338,14 +2517,16 @@ class DatabaseApp:
             nuevos_stocks = self.obtener_stock_actual_bulk(codigos_faltantes, sede)
             self._stock_cache.update(nuevos_stocks)
             self._stock_cache_time = current_time
-            self.tra_debug_log(f"Stock consultado para {len(codigos_faltantes)} códigos nuevos")
-        else:
-            self.tra_debug_log(f"Usando stock cacheado para {len(codigos)} códigos")
+            self.tra_debug_log(
+                f"Stock consultado: {len(codigos_faltantes)} códigos nuevos",
+                throttle_key="stock_query",
+                throttle_seconds=3.0
+            )
         
         # Usar el cache para obtener el stock
         stock_map = {cod: self._stock_cache.get(cod, 0) for cod in codigos}
         
-        for fila in datos:
+        for idx, fila in enumerate(datos):
             try:
                 # Manejo robusto para diferentes longitudes de tupla
                 if len(fila) >= 7:
@@ -2357,7 +2538,12 @@ class DatabaseApp:
                 elif len(fila) >= 6:
                     codigo, desc, _, _, _, neto = fila[:6]
                     rotacion = "SIN CLASIFICAR"
-                    self.tra_debug_log(f"Fila con 6 campos, asignando rotación SIN CLASIFICAR: {codigo}")
+                    # Solo loggear la primera vez para evitar spam
+                    self.tra_debug_log(
+                        f"Fila con 6 campos (sin rotación): {codigo}",
+                        throttle_key="missing_rotation",
+                        throttle_seconds=10.0
+                    )
                 else:
                     self.log(f"[TRA DEBUG] Fila con formato incorrecto ({len(fila)} campos): {fila}", "WARNING")
                     continue
@@ -2373,16 +2559,12 @@ class DatabaseApp:
                     self.tra_fecha_fin or datetime.now()
                 )
 
-                # Determinar tag de color según rotación
-                tag_rotacion = (str(rotacion).lower() if rotacion else "sin_clasificar")
-                
-                # Determinar tag adicional por porcentaje de representación
-                if porcentaje >= 5:
-                    tag_representacion = "high_representation"
-                elif porcentaje >= 1:
-                    tag_representacion = "medium_representation"
+                # Determinar tag de color según rotación con filas alternadas
+                tag_base = (str(rotacion).lower() if rotacion else "sin_clasificar")
+                if idx % 2 == 0:
+                    tag_rotacion = tag_base  # Filas pares: colores claros
                 else:
-                    tag_representacion = "low_representation"
+                    tag_rotacion = f"{tag_base}_alt"  # Filas impares: colores oscuros
 
                 # Formatear neto: si es entero, mostrar sin decimales
                 neto_valor = float(neto or 0)
@@ -2391,7 +2573,7 @@ class DatabaseApp:
                 self.tra_tree.insert(
                     "", tk.END,
                     values=(codigo, desc, rotacion, neto_formateado, f"{porcentaje}%", stock_actual, stock_ideal, dias_restantes),
-                    tags=(tag_rotacion, tag_representacion)
+                    tags=(tag_rotacion,)
                 )
             except Exception as e:
                 self.log(f"Error procesando fila TRA {fila}: {str(e)}", "ERROR")
@@ -2489,6 +2671,10 @@ class DatabaseApp:
             load_time = time.perf_counter() - start_time
             self.jerarquias_unificadas_cargadas = True
             self.log(f"⚡ Jerarquía UNIFICADA cargada desde cache en {load_time:.3f}s - {total_items} elementos", "SUCCESS")
+            
+            # Programar actualización adicional por si los combos se crean después
+            if hasattr(self, 'root'):
+                self.root.after(200, self._update_hierarchy_combos)
             return
         
         # Si no hay cache válido, cargar desde BD con consulta optimizada
@@ -2560,7 +2746,7 @@ class DatabaseApp:
                 self.cargar_jerarquia_mbrp()
                 return
             
-            # Actualizar combos
+            # Actualizar combos si están disponibles
             self._update_hierarchy_combos()
             
             # Marcar como cargado para evitar duplicados
@@ -2583,6 +2769,10 @@ class DatabaseApp:
             
             self.log(f"⚙️ Jerarquía UNIFICADA cargada y cacheada en {load_time:.3f}s - {total_items} elementos", "SUCCESS")
             
+            # Programar actualización adicional después de 200ms por si los combos se crean tarde
+            if hasattr(self, 'root'):
+                self.root.after(200, self._update_hierarchy_combos)
+            
         except Exception as e:
             self.log(f"Error cargando jerarquía unificada: {e}", "ERROR")
             # Fallback a métodos individuales
@@ -2592,18 +2782,38 @@ class DatabaseApp:
     def _update_hierarchy_combos(self):
         """Actualiza los combos de jerarquía para ambos módulos"""
         try:
+            tra_actualizado = False
+            mbrp_actualizado = False
+            
             # TRA combos
-            if hasattr(self, 'tra_dept_combo') and self.tra_dept_dict:
-                self.tra_dept_combo['values'] = ['Todos'] + list(self.tra_dept_dict.keys())
+            if hasattr(self, 'tra_dept_combo') and hasattr(self, 'tra_dept_dict') and self.tra_dept_dict:
+                valores_tra = ['Todos'] + list(self.tra_dept_dict.keys())
+                self.tra_dept_combo['values'] = valores_tra
                 self.tra_dept_var.set('Todos')
+                tra_actualizado = True
                 
             # MBRP combos
-            if hasattr(self, 'mbrp_dept_combo') and self.mbrp_dept_dict:
-                self.mbrp_dept_combo['values'] = ['Todos'] + list(self.mbrp_dept_dict.keys())
+            if hasattr(self, 'mbrp_dept_combo') and hasattr(self, 'mbrp_dept_dict') and self.mbrp_dept_dict:
+                valores_mbrp = ['Todos'] + list(self.mbrp_dept_dict.keys())
+                self.mbrp_dept_combo['values'] = valores_mbrp
                 self.mbrp_dept_var.set('Todos')
+                mbrp_actualizado = True
+            
+            # Log consolidado - solo una línea
+            if tra_actualizado or mbrp_actualizado:
+                modulos = []
+                if tra_actualizado:
+                    modulos.append(f"TRA({len(self.tra_dept_dict)} depts)")
+                if mbrp_actualizado:
+                    modulos.append(f"MBRP({len(self.mbrp_dept_dict)} depts)")
+                self.log(f"✅ Filtros actualizados: {', '.join(modulos)}", "SUCCESS")
+            else:
+                # Solo mostrar advertencia si ambos fallaron Y los diccionarios tienen datos
+                if (getattr(self, 'tra_dept_dict', {}) or getattr(self, 'mbrp_dept_dict', {})):
+                    self.log("⚠️ Filtros no actualizados - combos aún no creados", "WARNING")
                 
         except Exception as e:
-            self.log(f"Error actualizando combos de jerarquía: {e}", "DEBUG")
+            self.log(f"Error actualizando combos de jerarquía: {e}", "ERROR")
     
     def _inicializar_modulos_paralelo(self):
         """Inicializa módulos en paralelo real usando ThreadPoolExecutor"""
@@ -2707,6 +2917,8 @@ class DatabaseApp:
         """Carga jerarquías unificadas en hilo paralelo"""
         try:
             self.cargar_jerarquia_unificada()
+            # Programar actualización de combos en hilo principal después de cargar
+            self.root.after(100, self._update_hierarchy_combos)
             return {"hierarchies_loaded": True}
         except Exception as e:
             # Fallback a métodos individuales
@@ -2715,6 +2927,8 @@ class DatabaseApp:
                     self.cargar_jerarquia_tra()
                 if self.modules_enabled.get("mbrp", False):
                     self.cargar_jerarquia_mbrp()
+                # Programar actualización de combos incluso en fallback
+                self.root.after(100, self._update_hierarchy_combos)
                 return {"hierarchies_loaded": True, "fallback": True}
             except Exception as e2:
                 raise Exception(f"Error cargando jerarquías: {e} (fallback: {e2})")
@@ -3323,6 +3537,13 @@ class DatabaseApp:
         prefix = f"[PAL][APP][{level}][{thread_name}][{mod_name}.{func_name}:{line_no}]"
         console_entry = f"{prefix} {message}\n"
 
+        # SIEMPRE escribir en consola de debug flotante
+        if hasattr(self, 'debug_console'):
+            try:
+                self.debug_console.write(console_entry.strip(), level)
+            except Exception:
+                pass
+
         # Rotar logs si excede el máximo
         try:
             if self.log_counter >= self.max_logs:
@@ -3464,9 +3685,12 @@ class DatabaseApp:
 
 
     def setup_tooltips(self):
-        self.help_tooltips.add_tooltip(self.num_cliente, "Número de cliente (1-11 dígitos)")
-        self.help_tooltips.add_tooltip(self.cod_producto, "Código de producto (buscar en base de datos)")
-        self.help_tooltips.add_tooltip(self.user_menu, "Menú de usuario con opciones de configuración")
+        if hasattr(self, 'num_cliente'):
+            self.help_tooltips.add_tooltip(self.num_cliente, "Número de cliente (1-11 dígitos)")
+        if hasattr(self, 'cod_producto'):
+            self.help_tooltips.add_tooltip(self.cod_producto, "Código de producto (buscar en base de datos)")
+        if hasattr(self, 'user_menu'):
+            self.help_tooltips.add_tooltip(self.user_menu, "Menú de usuario con opciones de configuración")
 
     def show_settings(self):
     # Si ya existe una ventana, la traemos al frente
@@ -3574,6 +3798,10 @@ class DatabaseApp:
             pass
         finally:
             self.settings_window = None
+
+    def connect_to_database(self):
+        """Alias for connect_db to maintain compatibility"""
+        self.show_settings()
 
     def connect_db(self):
         try:
@@ -3753,8 +3981,13 @@ class DatabaseApp:
         def show_success(self, message):
             self._show_notification("✓ Éxito", message, "#d4edda")
         
-        def show_error(self, message):
-            self._show_notification("⚠ Error", message, "#f8d7da")
+        def show_error(self, message, details=None):
+            # Support both old style (message only) and new style (message, details)
+            if details:
+                full_message = f"{message}: {details}"
+            else:
+                full_message = message
+            self._show_notification("⚠ Error", full_message, "#f8d7da")
         
         def _show_notification(self, title, message, color):
             notification = tk.Toplevel(self.root)
@@ -4680,8 +4913,6 @@ class DatabaseApp:
             return False
         finally:
             self.log(f"Finalizado el procesamiento del envío {id_envio} para el cliente {numero_cliente}", "INFO")
-            error_code=ErrorCode.WHATSAPP_API_FAILURE
-            return False
 
     def procesar_envio_masivo(self,):
 
@@ -4722,7 +4953,6 @@ class DatabaseApp:
                 self.progress.destroy()
                 self.lbl_progreso.destroy()
                 self.log("Proceso de envío completado", "SUCCESS")
-                return
 
         numero = self.clientes_lista[self.actual][0]
     
@@ -4897,19 +5127,24 @@ class DatabaseApp:
             fecha_fin = self.mbrp_fecha_fin_entry.get_date()
             sede = (self.mbrp_sede_var.get() or '').split(' - ')[0]
             
-            self.mbrp_debug_log(f"Iniciando carga MBRP: {fecha_inicio} - {fecha_fin}, Sede: {sede}")
+            self.log(f"[MBRP] Iniciando carga: {fecha_inicio} a {fecha_fin}, Sede: {sede}", "INFO")
 
             # Evitar cargas simultáneas
             if getattr(self, 'mbrp_loader_thread', None) is not None and self.mbrp_loader_thread.is_alive():
-                self.mbrp_debug_log("Carga MBRP ya en curso, ignorando nuevo clic")
                 self.log("MBRP: Carga en curso; ignorando clic", "WARNING")
                 return
 
-            # Reset datos
+            # Reset datos y cachés
             self.cached_ventas_mbrp = []
             self.mbrp_fecha_inicio = fecha_inicio
             self.mbrp_fecha_fin = fecha_fin
             self.mbrp_sede_codigo = sede
+            
+            # Invalidar caché de últimas ventas al cargar nuevos datos
+            if hasattr(self, '_mbrp_ultimas_ventas_cache'):
+                self._mbrp_ultimas_ventas_cache = {}
+                self._mbrp_ultimas_ventas_time = 0
+                self.log("[MBRP] Caché de últimas ventas invalidado", "DEBUG")
 
             # Estado UI
             try:
@@ -4937,7 +5172,6 @@ class DatabaseApp:
     def _background_load_ventas_mbrp(self):
         try:
             if not all([self.mbrp_fecha_inicio, self.mbrp_fecha_fin, self.mbrp_sede_codigo]):
-                self.mbrp_debug_log("Parámetros faltantes para carga MBRP")
                 self.log("MBRP: Faltan parámetros", "ERROR")
                 return
 
@@ -4950,12 +5184,11 @@ class DatabaseApp:
             seen = set()
             acumulados = []
             
-            self.mbrp_debug_log(f"Iniciando carga por chunks: chunk_size={chunk_size}")
+            self.log(f"[MBRP] Iniciando carga adaptativa (chunk inicial: {chunk_size})", "INFO")
 
             chunk_count = 0
             while True:
                 chunk_count += 1
-                self.mbrp_debug_log(f"Cargando chunk {chunk_count}: start_row={start}")
                 
                 chunk_t0 = time.perf_counter()
                 rows = self.db_manager.obtener_ventas_por_producto_chunk(
@@ -4967,10 +5200,9 @@ class DatabaseApp:
                 )
                 chunk_time = time.perf_counter() - chunk_t0
                 if not rows:
-                    self.mbrp_debug_log(f"Chunk {chunk_count} vacío, finalizando carga")
+                    self.log(f"[MBRP] Carga finalizada en chunk {chunk_count}", "INFO")
                     break
                     
-                self.mbrp_debug_log(f"Chunk {chunk_count}: {len(rows)} registros obtenidos")
                 productos_nuevos = 0
                 productos_duplicados = 0
                 for r in rows:
@@ -4982,34 +5214,46 @@ class DatabaseApp:
                     acumulados.append(r)
                     productos_nuevos += 1
                 
-                self.mbrp_debug_log(f"Chunk {chunk_count}: {productos_nuevos} productos nuevos, {productos_duplicados} duplicados")
+                # Solo loggear cada 5 chunks, al inicio, o al final
+                should_log = chunk_count <= 2 or chunk_count % 5 == 0 or len(rows) < chunk_size
+                if should_log:
+                    self.mbrp_debug_log(
+                        f"Chunk {chunk_count}: {len(rows)} filas | Nuevos: {productos_nuevos} | "
+                        f"Total: {len(acumulados)} | Latencia: {chunk_time:.2f}s",
+                        level="INFO",
+                        throttle_key="chunk_progress",
+                        throttle_seconds=3.0
+                    )
+                
                 start += chunk_size
-                if chunk_count % 10 == 0:
-                    self.mbrp_debug_log(f"Progreso: {len(acumulados)} productos únicos acumulados")
                 time.sleep(0.05)
 
-            self.mbrp_debug_log(f"Carga completada: {len(acumulados)} productos únicos cargados")
+            self.log(f"[MBRP] Carga completada: {len(acumulados)} productos únicos", "SUCCESS")
             
-            # Clasificar por rotación usando lógica específica para MBRP
+            # Clasificar y filtrar por rotación usando lógica específica para MBRP
             from pal.services.mbrp import clasificar_rotacion_mbrp, filtrar_productos_baja_rotacion
             try:
-                self.mbrp_debug_log("Iniciando clasificación MBRP...")
-                # Usar clasificación MBRP que se enfoca en productos de baja rotación
-                clasificados = clasificar_rotacion_mbrp(acumulados)
-                self.mbrp_debug_log(f"Clasificados: {len(clasificados)} productos")
+                self.log("[MBRP] Clasificando y filtrando productos de baja rotación...", "INFO")
                 
+                # PASO 1: Primero filtrar por IM (usa datos sin clasificar)
                 # Filtrar productos con Índice de Movilidad bajo (umbral 30%)
-                productos_baja_rotacion = filtrar_productos_baja_rotacion(clasificados, umbral_im=30.0)
-                self.mbrp_debug_log(f"Productos baja rotación: {len(productos_baja_rotacion)} (umbral IM < 30%)")
+                productos_baja_rotacion = filtrar_productos_baja_rotacion(acumulados, umbral_im=30.0)
+                self.log(f"[MBRP] Filtrados: {len(productos_baja_rotacion)}/{len(acumulados)} productos (IM <= 30%)", "INFO")
                 
-                self.cached_ventas_mbrp = productos_baja_rotacion
+                # PASO 2: Luego clasificar los productos filtrados
+                # Usar clasificación MBRP que se enfoca en productos de baja rotación
+                productos_clasificados = clasificar_rotacion_mbrp(productos_baja_rotacion)
+                self.log(f"[MBRP] Clasificados: {len(productos_clasificados)} productos", "INFO")
+                
+                self.cached_ventas_mbrp = productos_clasificados
             except Exception as e:
                 self.log(f"Error en clasificación MBRP: {e}", "ERROR")
-                self.mbrp_debug_log(f"Error en clasificación, usando datos crudos: {e}")
+                import traceback
+                self.log(f"Traceback: {traceback.format_exc()}", "DEBUG")
+                # En caso de error, usar datos sin clasificar
                 self.cached_ventas_mbrp = list(acumulados)
 
             # Actualizar UI
-            self.mbrp_debug_log("Finalizando carga MBRP, actualizando UI...")
             def _finish():
                 try:
                     self.aplicar_filtro_mbrp()
@@ -5029,10 +5273,14 @@ class DatabaseApp:
 
     def aplicar_filtro_mbrp(self):
         if not hasattr(self, 'cached_ventas_mbrp') or not self.cached_ventas_mbrp:
-            self.mbrp_debug_log("No hay datos MBRP en cache para filtrar")
+            self.mbrp_debug_log(
+                "No hay datos MBRP en cache",
+                level="WARNING",
+                throttle_key="no_data",
+                throttle_seconds=5.0
+            )
             return
         
-        self.mbrp_debug_log(f"Aplicando filtros MBRP a {len(self.cached_ventas_mbrp)} productos")
         # Filtros jerárquicos (similar a TRA)
         dept_cod = self.mbrp_dept_dict.get(self.mbrp_dept_var.get()) if hasattr(self, 'mbrp_dept_var') else None
         group_cod = None
@@ -5048,7 +5296,12 @@ class DatabaseApp:
 
         texto = self.mbrp_search_var.get() if hasattr(self, 'mbrp_search_var') else ''
         
-        self.mbrp_debug_log(f"Filtros: Dept={dept_cod}, Group={group_cod}, Sub={sub_cod}, Texto='{texto}'")
+        self.mbrp_debug_log(
+            f"Filtros MBRP - Datos: {len(self.cached_ventas_mbrp)} | "
+            f"Dept: {dept_cod}, Group: {group_cod}, Sub: {sub_cod}, Texto: '{texto}'",
+            throttle_key="filter_input",
+            throttle_seconds=2.0
+        )
 
         from pal.services.tra import filter_ventas_tra, paginate_tra
         datos_filtrados = filter_ventas_tra(
@@ -5061,7 +5314,11 @@ class DatabaseApp:
             favoritos=self._get_favoritos_local(),
         )
         
-        self.mbrp_debug_log(f"Datos filtrados: {len(datos_filtrados)} productos")
+        self.mbrp_debug_log(
+            f"Resultado: {len(datos_filtrados)} productos",
+            throttle_key="filter_result",
+            throttle_seconds=2.0
+        )
 
         if not hasattr(self, 'mbrp_current_page') or self.mbrp_current_page < 1:
             self.mbrp_current_page = 1
@@ -5069,7 +5326,11 @@ class DatabaseApp:
             datos_filtrados, self.mbrp_current_page, self.mbrp_page_size
         )
         
-        self.mbrp_debug_log(f"Paginación: página {self.mbrp_current_page} de {total_paginas}, {len(datos_pagina)} filas en página")
+        self.mbrp_debug_log(
+            f"Página {self.mbrp_current_page}/{total_paginas} ({len(datos_pagina)} filas)",
+            throttle_key="pagination",
+            throttle_seconds=1.5
+        )
         self.mostrar_mbrp_paginado(datos_pagina)
         self.actualizar_controles_paginacion_mbrp(total_paginas)
 
@@ -5091,10 +5352,41 @@ class DatabaseApp:
         # Calcular Índices de Movilidad para todos los productos
         indices_movilidad = calcular_indice_movilidad(self.cached_ventas_mbrp or datos)
         
-        # Obtener fechas de última venta para todos los productos
-        ultimas_ventas = obtener_ultimas_ventas_bulk(self.db_manager, codigos, sede)
+        # Cache de últimas ventas con TTL de 60 segundos
+        # Se invalida automáticamente al presionar "Cargar"
+        if not hasattr(self, '_mbrp_ultimas_ventas_cache') or not hasattr(self, '_mbrp_ultimas_ventas_time'):
+            self._mbrp_ultimas_ventas_cache = {}
+            self._mbrp_ultimas_ventas_time = 0
         
-        for fila in datos:
+        current_time = time.time()
+        cache_ttl = 60  # 60 segundos (reducido de 5 minutos para mayor frescura de datos)
+        
+        # Verificar si los códigos de la página actual están en caché
+        codigos_faltantes = [c for c in codigos if c not in self._mbrp_ultimas_ventas_cache]
+        cache_expirado = (current_time - self._mbrp_ultimas_ventas_time) > cache_ttl
+        
+        # Consultar si: 1) caché expirado, 2) caché vacío, o 3) hay códigos faltantes
+        if cache_expirado or not self._mbrp_ultimas_ventas_cache or codigos_faltantes:
+            # Consultar todos los códigos de la página actual
+            ultimas_ventas_nuevas = obtener_ultimas_ventas_bulk(self.db_manager, codigos, sede)
+            
+            # Actualizar caché (merge con datos existentes si no está expirado)
+            if cache_expirado or not self._mbrp_ultimas_ventas_cache:
+                self._mbrp_ultimas_ventas_cache = ultimas_ventas_nuevas
+                self.mbrp_debug_log(f"Últimas ventas consultadas: {len(ultimas_ventas_nuevas)} productos (caché renovado)")
+            else:
+                # Merge incremental
+                self._mbrp_ultimas_ventas_cache.update(ultimas_ventas_nuevas)
+                self.mbrp_debug_log(f"Últimas ventas actualizadas: {len(ultimas_ventas_nuevas)} productos nuevos")
+            
+            self._mbrp_ultimas_ventas_time = current_time
+            ultimas_ventas = self._mbrp_ultimas_ventas_cache
+        else:
+            ultimas_ventas = self._mbrp_ultimas_ventas_cache
+            tiempo_restante = int(cache_ttl - (current_time - self._mbrp_ultimas_ventas_time))
+            self.mbrp_debug_log(f"Usando caché de últimas ventas ({tiempo_restante}s restantes)")
+        
+        for idx, fila in enumerate(datos):
             try:
                 codigo = str(fila[0])
                 desc = fila[1]
@@ -5119,23 +5411,29 @@ class DatabaseApp:
                 else:
                     ultima_venta_texto = f"{dias_sin_venta} días"
                 
-                # Determinar tags de color por rotación e Índice de Movilidad
-                tag_rotacion = str(rotacion).lower()
+                # Determinar tags de color por rotación e Índice de Movilidad con filas alternadas
+                tag_base_rotacion = str(rotacion).lower()
                 
-                # Tag adicional por Índice de Movilidad (prioridad sobre rotación)
+                # Tag por Índice de Movilidad (prioridad sobre rotación)
                 if im_porcentaje < 5.0:
-                    tag_im = "im_critico"
+                    tag_base = "im_critico"
                 elif im_porcentaje <= 10.0:
-                    tag_im = "im_muy_bajo" 
+                    tag_base = "im_muy_bajo" 
                 elif im_porcentaje <= 20.0:
-                    tag_im = "im_bajo"
+                    tag_base = "im_bajo"
                 else:
-                    tag_im = tag_rotacion  # Usar tag de rotación normal
+                    tag_base = tag_base_rotacion  # Usar tag de rotación normal
+                
+                # Aplicar estilo alternado
+                if idx % 2 == 0:
+                    tag_final = tag_base  # Filas pares: colores claros
+                else:
+                    tag_final = f"{tag_base}_alt"  # Filas impares: colores oscuros
                 
                 self.mbrp_tree.insert(
                     "", tk.END,
                     values=(codigo, desc, rotacion, int(float(neto or 0)), stock_actual, f"{im_porcentaje}%", ultima_venta_texto),
-                    tags=(tag_im, tag_rotacion)
+                    tags=(tag_final,)
                 )
             except Exception as e:
                 self.log(f"Error procesando fila MBRP {fila}: {str(e)}", "ERROR")
@@ -5152,6 +5450,31 @@ class DatabaseApp:
     def cambiar_pagina_mbrp(self, delta):
         self.mbrp_current_page += delta
         self.aplicar_filtro_mbrp()
+    
+    def actualizar_ultimas_ventas_mbrp(self):
+        """
+        Fuerza la actualización del caché de últimas ventas sin recargar todos los datos.
+        Útil cuando se sabe que hubo ventas recientes.
+        """
+        if not hasattr(self, 'cached_ventas_mbrp') or not self.cached_ventas_mbrp:
+            self.log("No hay datos MBRP cargados. Use 'Cargar' primero.", "WARNING")
+            return
+        
+        try:
+            # Invalidar caché
+            if hasattr(self, '_mbrp_ultimas_ventas_cache'):
+                self._mbrp_ultimas_ventas_cache = {}
+                self._mbrp_ultimas_ventas_time = 0
+            
+            self.log("[MBRP] Actualizando últimas ventas...", "INFO")
+            
+            # Refrescar la vista actual (forzará nueva consulta)
+            self.aplicar_filtro_mbrp()
+            
+            self.log("[MBRP] Últimas ventas actualizadas correctamente", "SUCCESS")
+            
+        except Exception as e:
+            self.log(f"Error actualizando últimas ventas MBRP: {e}", "ERROR")
 
     def generar_reporte_mbrp(self):
         """Genera un reporte detallado de productos de baja rotación"""

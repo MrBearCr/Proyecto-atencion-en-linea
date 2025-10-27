@@ -120,9 +120,26 @@ def setup_tra_tab(app):
         app.fecha_inicio_entry.set_date(fecha_inicio)
         app.fecha_fin_entry.set_date(ayer)
     
+    # Función para verificar y recargar filtros si están vacíos
+    def _verificar_y_recargar_filtros_tra(event=None):
+        """Verifica si los filtros están vacíos y los recarga automáticamente"""
+        if len(app.tra_dept_combo['values']) <= 1:  # Solo tiene 'Todos'
+            try:
+                app.log("Filtros TRA vacíos detectados, recargando...", "WARNING")
+                # Intentar cargar desde cache o BD
+                if hasattr(app, 'cargar_jerarquia_unificada'):
+                    app.cargar_jerarquia_unificada()
+                elif hasattr(app, 'cargar_jerarquia_tra'):
+                    app.cargar_jerarquia_tra()
+            except Exception as e:
+                app.log(f"Error recargando filtros TRA: {e}", "ERROR")
+    
     # Conectar eventos de búsqueda y filtros
     rango_combo.bind('<<ComboboxSelected>>', _on_tra_rango_selected)
     app.tra_search_var.trace_add('write', lambda *args: app.aplicar_filtro_tra())
+    
+    # Eventos con verificación automática
+    app.tra_dept_combo.bind('<Button-1>', _verificar_y_recargar_filtros_tra)  # Antes de abrir
     app.tra_dept_combo.bind('<<ComboboxSelected>>', app.on_tra_dept_selected)
     app.tra_group_combo.bind('<<ComboboxSelected>>', app.on_tra_group_selected)
     app.tra_sub_combo.bind('<<ComboboxSelected>>', lambda e: app.aplicar_filtro_tra())
@@ -185,75 +202,62 @@ def setup_tra_tab(app):
         config = column_config.get(col, {"width": 120, "anchor": "center"})
         app.tra_tree.column(col, **config)
     
-    # Configurar estilos de colores para rotación (fondos vivos + texto blanco + fuente grande)
+    # Configurar estilos de colores para rotación con filas alternadas
     app.tra_tree.tag_configure('alta', background='#4CAF50', foreground='#FFFFFF', font=('', 11))  # Verde vibrante
     app.tra_tree.tag_configure('media', background='#FF9800', foreground='#FFFFFF', font=('', 11))  # Naranja vibrante
     app.tra_tree.tag_configure('baja', background='#F44336', foreground='#FFFFFF', font=('', 11))  # Rojo vibrante
     app.tra_tree.tag_configure('sin_movimiento', background='#9E9E9E', foreground='#FFFFFF', font=('', 11))  # Gris vibrante
     app.tra_tree.tag_configure('sin_clasificar', background='#9C27B0', foreground='#FFFFFF', font=('', 11))  # Púrpura vibrante
     
-    # Efectos de hover y selección mejorados
-    app.tra_tree.tag_configure('hover', background='#FFE082', foreground='#000000', font=('', 11, 'bold'))  # Amarillo brillante hover
-    app.tra_tree.tag_configure('selected', background='#1976D2', foreground='#FFFFFF', font=('', 11, 'bold'))  # Azul intenso selección
+    # Estilos alternados para mejor distinción de filas
+    app.tra_tree.tag_configure('alta_alt', background='#388E3C', foreground='#FFFFFF', font=('', 11))  # Verde más oscuro
+    app.tra_tree.tag_configure('media_alt', background='#F57C00', foreground='#FFFFFF', font=('', 11))  # Naranja más oscuro
+    app.tra_tree.tag_configure('baja_alt', background='#D32F2F', foreground='#FFFFFF', font=('', 11))  # Rojo más oscuro
+    app.tra_tree.tag_configure('sin_movimiento_alt', background='#757575', foreground='#FFFFFF', font=('', 11))  # Gris más oscuro
+    app.tra_tree.tag_configure('sin_clasificar_alt', background='#7B1FA2', foreground='#FFFFFF', font=('', 11))  # Púrpura más oscuro
     
-    # Estilos por representación (mantener texto blanco y fuente grande)
-    app.tra_tree.tag_configure('high_representation', foreground='#FFFFFF', font=('', 11))
-    app.tra_tree.tag_configure('medium_representation', foreground='#FFFFFF', font=('', 11))
-    app.tra_tree.tag_configure('low_representation', foreground='#FFFFFF', font=('', 11))
+    # Configurar colores de selección en el style para que funcione correctamente
+    style.map('Large.Treeview',
+        background=[('selected', '#0D47A1')],  # Azul oscuro para selección
+        foreground=[('selected', '#FFFFFF')]   # Texto blanco para contraste
+    )
+    
+    # Variable para rastrear el ítem actualmente seleccionado
+    app.tra_current_selected_item = None
     
     # Estilos para mensajes de estado
     app.tra_tree.tag_configure('loading', background='#2196F3', foreground='#FFFFFF', font=('', 12, 'italic'))  # Azul vibrante
     app.tra_tree.tag_configure('no_data', background='#FF9800', foreground='#FFFFFF', font=('', 12, 'italic'))  # Naranja vibrante
     app.tra_tree.tag_configure('error', background='#F44336', foreground='#FFFFFF', font=('', 12, 'italic'))  # Rojo vibrante
 
-    # Eventos de hover y selección mejorados
-    def on_tra_hover(event):
+    # Eventos de selección mejorados
+    def on_tra_click(event):
+        """Maneja el click en una fila del treeview"""
         try:
-            item = app.tra_tree.identify_row(event.y)
-            if item:
-                # Limpiar hover previo
-                app.tra_tree.tk.call(app.tra_tree, 'tag', 'remove', 'hover', '')
-                # Aplicar hover actual
-                app.tra_tree.tk.call(app.tra_tree, 'tag', 'add', 'hover', item)
-                # Cambiar cursor
-                app.tra_tree.config(cursor='hand2')
+            region = app.tra_tree.identify_region(event.x, event.y)
+            if region == 'cell' or region == 'tree':
+                item = app.tra_tree.identify_row(event.y)
+                if item:
+                    # Seleccionar el item
+                    app.tra_tree.selection_set(item)
+                    app.tra_tree.focus(item)
+                    app.tra_current_selected_item = item
+                    # Asegurar que sea visible
+                    app.tra_tree.see(item)
         except Exception:
             pass
-        return "break"  # Importante: devolver string para Tkinter
-    
-    def on_tra_leave(event):
-        try:
-            # Limpiar todos los hovers
-            app.tra_tree.tk.call(app.tra_tree, 'tag', 'remove', 'hover', '')
-            # Restaurar cursor
-            app.tra_tree.config(cursor='')
-        except Exception:
-            pass
-        return "break"  # Importante: devolver string para Tkinter
     
     def on_tra_select(event):
+        """Maneja el evento de selección del treeview"""
         try:
             selected = app.tra_tree.selection()
             if selected:
-                # Limpiar selección previa
-                app.tra_tree.tk.call(app.tra_tree, 'tag', 'remove', 'selected', '')
-                # Aplicar selección actual
-                app.tra_tree.tk.call(app.tra_tree, 'tag', 'add', 'selected', selected[0])
-                # Efecto visual: breve parpadeo
-                def parpadeo():
-                    try:
-                        app.tra_tree.tk.call(app.tra_tree, 'tag', 'remove', 'selected', selected[0])
-                        app.root.after(150, lambda: app.tra_tree.tk.call(app.tra_tree, 'tag', 'add', 'selected', selected[0]))
-                    except Exception:
-                        pass
-                app.root.after(100, parpadeo)
+                app.tra_current_selected_item = selected[0]
         except Exception:
             pass
-        return "break"  # Importante: devolver string para Tkinter
     
     # Bindings de eventos
-    app.tra_tree.bind('<Motion>', on_tra_hover)
-    app.tra_tree.bind('<Leave>', on_tra_leave)
+    app.tra_tree.bind('<Button-1>', on_tra_click)
     app.tra_tree.bind('<<TreeviewSelect>>', on_tra_select)
     
     # Layout

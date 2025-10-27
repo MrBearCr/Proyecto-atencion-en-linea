@@ -23,7 +23,7 @@ def calcular_indice_movilidad(ventas_data: List, total_ventas_periodo: float = N
         
     El IM se calcula como:
     - 100% = Producto con máximas ventas
-    - 0% = Producto sin ventas o ventas mínimas
+    - 0% = Producto sin ventas o con ventas netas <= 0
     """
     if not ventas_data:
         return {}
@@ -34,29 +34,46 @@ def calcular_indice_movilidad(ventas_data: List, total_ventas_periodo: float = N
         for item in ventas_data:
             if len(item) >= 6:
                 codigo = str(item[0])
+                # El neto siempre está en item[5], independiente de clasificación
                 neto = float(item[5]) if item[5] is not None else 0.0
                 ventas_por_codigo[codigo] = neto
         
         if not ventas_por_codigo:
             return {}
         
-        # Encontrar máximo y mínimo para normalización
-        ventas_values = list(ventas_por_codigo.values())
-        max_ventas = max(ventas_values)
-        min_ventas = min(ventas_values)
+        # Filtrar solo productos con ventas positivas para el cálculo del IM
+        ventas_positivas = {k: v for k, v in ventas_por_codigo.items() if v > 0}
+        
+        # Si no hay ventas positivas, todos tienen IM = 0
+        if not ventas_positivas:
+            return {codigo: 0.0 for codigo in ventas_por_codigo.keys()}
+        
+        # Encontrar máximo y mínimo para normalización (solo de ventas positivas)
+        max_ventas = max(ventas_positivas.values())
+        min_ventas_positivas = min(ventas_positivas.values())
         
         # Evitar división por cero
-        rango_ventas = max_ventas - min_ventas
+        rango_ventas = max_ventas - min_ventas_positivas
         if rango_ventas == 0:
-            # Todos tienen las mismas ventas
-            return {codigo: 50.0 for codigo in ventas_por_codigo.keys()}
+            # Todos los productos con ventas tienen las mismas ventas
+            indices = {codigo: 50.0 for codigo in ventas_positivas.keys()}
+            # Productos sin ventas tienen IM = 0
+            for codigo in ventas_por_codigo:
+                if codigo not in indices:
+                    indices[codigo] = 0.0
+            return indices
         
-        # Calcular IM para cada producto (normalizado 0-100%)
+        # Calcular IM para cada producto
         indices_movilidad = {}
         for codigo, ventas in ventas_por_codigo.items():
-            # IM = (ventas - min_ventas) / (max_ventas - min_ventas) * 100
-            im = ((ventas - min_ventas) / rango_ventas) * 100
-            indices_movilidad[codigo] = round(im, 1)
+            if ventas <= 0:
+                # Productos sin ventas o con neto negativo tienen IM = 0
+                indices_movilidad[codigo] = 0.0
+            else:
+                # IM = (ventas - min_positivas) / (max_ventas - min_positivas) * 100
+                im = ((ventas - min_ventas_positivas) / rango_ventas) * 100
+                # Asegurar que el IM mínimo para productos con ventas sea > 0.1%
+                indices_movilidad[codigo] = max(0.1, round(im, 1))
         
         return indices_movilidad
         
@@ -117,6 +134,10 @@ def obtener_ultimas_ventas_bulk(db_manager, codigos_productos: List[str], sede_c
         
     Returns:
         dict: Mapeo código -> fecha de última venta
+        
+    Nota: Busca única y exclusivamente registros de VENTAS (c_Concepto = 'VEN').
+    No considera devoluciones. Si un producto tiene neto > 0 pero no se encuentra
+    en esta consulta, es porque todas sus transacciones fueron devoluciones.
     """
     if not codigos_productos:
         return {}
@@ -133,9 +154,10 @@ def obtener_ultimas_ventas_bulk(db_manager, codigos_productos: List[str], sede_c
             # Crear placeholders para la consulta IN del lote actual
             placeholders = ','.join(['?' for _ in batch_codigos])
             
+            # Buscar única y exclusivamente transacciones de VENTA
             query = f"""
             SELECT c_Codarticulo, MAX(f_fecha) as ultima_venta
-            FROM TR_INVENTARIO 
+            FROM TR_INVENTARIO WITH (NOLOCK)
             WHERE c_Codarticulo IN ({placeholders})
             AND c_Concepto = 'VEN'
             AND n_Cantidad > 0
@@ -158,7 +180,7 @@ def obtener_ultimas_ventas_bulk(db_manager, codigos_productos: List[str], sede_c
                     fecha = row[1]
                     ultimas_ventas[codigo] = fecha
         
-        logger.info(f"Procesados {len(codigos_productos)} productos en {math.ceil(len(codigos_productos)/BATCH_SIZE)} lotes")
+        logger.info(f"Procesados {len(codigos_productos)} productos - {len(ultimas_ventas)} con últimas ventas encontradas")
         return ultimas_ventas
         
     except Exception as e:
@@ -196,37 +218,45 @@ def filtrar_productos_baja_rotacion(ventas_data: List, umbral_im: float = 20.0) 
     Filtra productos con Índice de Movilidad bajo para el módulo MBRP.
     
     Args:
-        ventas_data: Lista de datos de ventas
+        ventas_data: Lista de datos de ventas (puede incluir clasificación en posición 6)
         umbral_im: Umbral de IM por debajo del cual se considera baja rotación
         
     Returns:
-        list: Productos filtrados con baja rotación
+        list: Productos filtrados con baja rotación, ordenados por IM ascendente
     """
     if not ventas_data:
         return []
     
     try:
-        # Calcular IM para todos los productos
+        # Calcular IM para todos los productos (usa item[5] que siempre es neto)
         indices_movilidad = calcular_indice_movilidad(ventas_data)
         
-        # Filtrar productos con IM bajo
+        if not indices_movilidad:
+            logger.warning("No se pudieron calcular índices de movilidad")
+            return []
+        
+        # Filtrar productos con IM bajo o igual al umbral
         productos_baja_rotacion = []
         for item in ventas_data:
             if len(item) >= 6:
                 codigo = str(item[0])
                 im = indices_movilidad.get(codigo, 0.0)
                 
+                # Incluir solo productos con IM por debajo o igual al umbral
                 if im <= umbral_im:
                     productos_baja_rotacion.append(item)
         
         # Ordenar por IM ascendente (los de menor movilidad primero)
         productos_baja_rotacion.sort(key=lambda x: indices_movilidad.get(str(x[0]), 0.0))
         
+        logger.info(f"Filtrados {len(productos_baja_rotacion)}/{len(ventas_data)} productos con IM <= {umbral_im}%")
+        
         return productos_baja_rotacion
         
     except Exception as e:
         logger.error(f"Error filtrando productos de baja rotación: {e}")
-        return ventas_data
+        # En caso de error, devolver lista vacía en lugar de todos los datos
+        return []
 
 
 def clasificar_rotacion_mbrp(ventas_data: List) -> List:
@@ -241,7 +271,7 @@ def clasificar_rotacion_mbrp(ventas_data: List) -> List:
         list: Lista con clasificación de rotación añadida
         
     Criterios MBRP (inversos a TRA):
-    - SIN_MOVIMIENTO: IM = 0% (sin ventas)
+    - SIN_MOVIMIENTO: IM = 0% (sin ventas o neto <= 0)
     - BAJA: IM <= 10% (muy poca rotación)
     - MEDIA: IM <= 30% (rotación moderadamente baja)  
     - ALTA: IM > 30% (se excluye normalmente del análisis MBRP)
@@ -253,16 +283,23 @@ def clasificar_rotacion_mbrp(ventas_data: List) -> List:
         # Calcular índices de movilidad
         indices_movilidad = calcular_indice_movilidad(ventas_data)
         
+        if not indices_movilidad:
+            logger.warning("No se pudieron calcular índices de movilidad para clasificación")
+            return list(ventas_data)
+        
         ventas_clasificadas = []
         for item in ventas_data:
             if len(item) < 6:
+                logger.warning(f"Item con menos de 6 campos: {item}")
                 continue
                 
             codigo = str(item[0])
             im = indices_movilidad.get(codigo, 0.0)
+            neto = float(item[5]) if item[5] is not None else 0.0
             
             # Clasificación específica para MBRP (enfoque en baja rotación)
-            if im == 0.0:
+            # SIN_MOVIMIENTO: IM = 0% O neto <= 0
+            if im == 0.0 or neto <= 0:
                 rotacion = "SIN_MOVIMIENTO"
             elif im <= 10.0:
                 rotacion = "BAJA"
@@ -277,18 +314,21 @@ def clasificar_rotacion_mbrp(ventas_data: List) -> List:
             except Exception:
                 item_list = list(item[:]) if hasattr(item, '__getitem__') else [item]
             
+            # Asegurar que siempre se añade o reemplaza la clasificación en posición 6
             if len(item_list) == 6:
                 item_list.append(rotacion)
             elif len(item_list) > 6:
+                # Ya tiene clasificación, reemplazarla
                 item_list[6] = rotacion
             else:
-                # Completar con valores por defecto
+                # Completar con valores por defecto hasta tener 6 campos
                 while len(item_list) < 6:
                     item_list.append(None)
                 item_list.append(rotacion)
             
             ventas_clasificadas.append(tuple(item_list))
         
+        logger.info(f"Clasificados {len(ventas_clasificadas)} productos para MBRP")
         return ventas_clasificadas
         
     except Exception as e:

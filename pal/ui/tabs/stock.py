@@ -137,61 +137,66 @@ def setup_stock_tab(app):
         app.stock_tree.heading(col, text=col)
         app.stock_tree.column(col, **config)
 
-    # Estilos de filas
+    # Estilos de filas con bordes visuales (colores más oscuros para resaltar líneas)
     app.stock_tree.tag_configure('leve', background='#4CAF50', foreground='#FFFFFF', font=('', 11))  # Verde vibrante
     app.stock_tree.tag_configure('media', background='#FF9800', foreground='#FFFFFF', font=('', 11))  # Naranja vibrante
     app.stock_tree.tag_configure('critica', background='#F44336', foreground='#FFFFFF', font=('', 11))  # Rojo vibrante
-    app.stock_tree.tag_configure('favorito', background='#FFC107', foreground='#000000', font=('', 11))  # Amarillo vibrante
-    app.stock_tree.tag_configure('hover', background='#FFE082', foreground='#000000', font=('', 11, 'bold'))  # Amarillo brillante hover
-    app.stock_tree.tag_configure('selected', background='#1976D2', foreground='#FFFFFF', font=('', 11, 'bold'))  # Azul intenso seleccionado
-
-    # Eventos mejorados con efectos visuales
-    def on_stock_hover(event):
-        try:
-            item = app.stock_tree.identify_row(event.y)
-            if item:
-                app.stock_tree.tk.call(app.stock_tree, 'tag', 'remove', 'hover', '')
-                app.stock_tree.tk.call(app.stock_tree, 'tag', 'add', 'hover', item)
-                app.stock_tree.config(cursor='hand2')
-        except Exception:
-            pass
-        return "break"
     
-    def on_stock_leave(event):
+    # Estilos alternados para mejor distinción de filas
+    app.stock_tree.tag_configure('leve_alt', background='#388E3C', foreground='#FFFFFF', font=('', 11))  # Verde más oscuro
+    app.stock_tree.tag_configure('media_alt', background='#F57C00', foreground='#FFFFFF', font=('', 11))  # Naranja más oscuro
+    app.stock_tree.tag_configure('critica_alt', background='#D32F2F', foreground='#FFFFFF', font=('', 11))  # Rojo más oscuro
+    
+    app.stock_tree.tag_configure('favorito', background='#FFC107', foreground='#000000', font=('', 11, 'bold'))  # Amarillo vibrante
+
+    # Configurar colores de selección en el style para que funcione correctamente
+    style.map('LargeStock.Treeview',
+        background=[('selected', '#0D47A1')],  # Azul oscuro para selección
+        foreground=[('selected', '#FFFFFF')]   # Texto blanco para contraste
+    )
+    
+    # Variable para rastrear el ítem actualmente seleccionado
+    app.current_selected_item = None
+    
+    # Eventos mejorados con efectos visuales
+    def on_stock_click(event):
+        """Maneja el click en una fila del treeview"""
         try:
-            app.stock_tree.tk.call(app.stock_tree, 'tag', 'remove', 'hover', '')
-            app.stock_tree.config(cursor='')
+            region = app.stock_tree.identify_region(event.x, event.y)
+            if region == 'cell' or region == 'tree':
+                item = app.stock_tree.identify_row(event.y)
+                if item:
+                    # Seleccionar el item
+                    app.stock_tree.selection_set(item)
+                    app.stock_tree.focus(item)
+                    app.current_selected_item = item
+                    # Asegurar que sea visible
+                    app.stock_tree.see(item)
         except Exception:
             pass
-        return "break"
     
     def on_stock_select(event):
+        """Maneja el evento de selección del treeview"""
         try:
             selected = app.stock_tree.selection()
             if selected:
-                app.stock_tree.tk.call(app.stock_tree, 'tag', 'remove', 'selected', '')
-                app.stock_tree.tk.call(app.stock_tree, 'tag', 'add', 'selected', selected[0])
-                # Efecto de parpadeo
-                def parpadeo():
-                    try:
-                        app.stock_tree.tk.call(app.stock_tree, 'tag', 'remove', 'selected', selected[0])
-                        app.root.after(150, lambda: app.stock_tree.tk.call(app.stock_tree, 'tag', 'add', 'selected', selected[0]))
-                    except Exception:
-                        pass
-                app.root.after(100, parpadeo)
+                app.current_selected_item = selected[0]
         except Exception:
             pass
-        
-        # Llamar a la función de selección existente también
-        try:
-            getattr(app, 'select_row', lambda x: None)(event)
-        except Exception:
-            pass
-        return "break"
     
-    app.stock_tree.bind('<Button-1>', lambda e: getattr(app, 'on_favorito_click', lambda x: None)(e))
-    app.stock_tree.bind('<Motion>', on_stock_hover)
-    app.stock_tree.bind('<Leave>', on_stock_leave)
+    # Bind para favoritos (solo en columna de favoritos)
+    def on_tree_click(event):
+        """Maneja clicks distinguiendo entre favorito y selección de fila"""
+        try:
+            col = app.stock_tree.identify_column(event.x)
+            if col == '#1':  # Primera columna (Favorito)
+                getattr(app, 'on_favorito_click', lambda x: None)(event)
+            else:
+                on_stock_click(event)
+        except Exception:
+            pass
+    
+    app.stock_tree.bind('<Button-1>', on_tree_click)
     app.stock_tree.bind('<<TreeviewSelect>>', on_stock_select)
 
     # Carga inicial solo si hay conexión

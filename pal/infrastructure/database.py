@@ -82,9 +82,11 @@ class DatabaseManager:
         )
     
         if user:
+            # Autenticación SQL Server (usuario sa u otro)
             initial_conn_str += f"UID={user};PWD={password or ''};"
         else:
-            initial_conn_str += "Trusted_Connection=no;"
+            # Autenticación Windows
+            initial_conn_str += "Trusted_Connection=yes;"
 
         # Track retries
         attempt = 0
@@ -176,8 +178,19 @@ class DatabaseManager:
                 estado NVARCHAR(20) DEFAULT 'PENDIENTE',
                 tipo_envio NVARCHAR(20) NOT NULL 
                     CHECK (tipo_envio IN ('ENTREGA', 'DISPONIBILIDAD')),
-                codigo_producto NVARCHAR(15) NULL  -- Nueva columna añadida
+                codigo_producto NVARCHAR(15) NULL
             );
+            
+            -- Agregar columna codigo_producto si la tabla existe pero no tiene la columna
+            IF EXISTS (SELECT * FROM sys.tables WHERE name = 'envios_programados' AND type = 'U')
+            AND NOT EXISTS (
+                SELECT * FROM sys.columns 
+                WHERE object_id = OBJECT_ID('envios_programados') 
+                AND name = 'codigo_producto'
+            )
+            BEGIN
+                ALTER TABLE envios_programados ADD codigo_producto NVARCHAR(15) NULL;
+            END
 
             IF NOT EXISTS (
                 SELECT * FROM sys.indexes 
@@ -197,8 +210,13 @@ class DatabaseManager:
                 SELECT * FROM sys.indexes 
                 WHERE name = 'idx_envios_producto'
             )
+            AND EXISTS (
+                SELECT * FROM sys.columns 
+                WHERE object_id = OBJECT_ID('envios_programados') 
+                AND name = 'codigo_producto'
+            )
             CREATE INDEX idx_envios_producto 
-            ON envios_programados (codigo_producto);  -- Nuevo índice añadido
+            ON envios_programados (codigo_producto);
         """)
             self.conn.commit()
 
@@ -679,7 +697,7 @@ class DatabaseManager:
             query = """
                 SELECT 
                     i.c_Codarticulo AS codigo,
-                    COALESCE(p.C_DESCRI, 'SIN DESCRIPCIÓN') AS descripcion,
+                    COALESCE(p.cu_descripcion_corta, p.C_DESCRI, 'SIN DESCRIPCIÓN') AS descripcion,
                     COALESCE(p.C_DEPARTAMENTO, '') AS departamento,
                     COALESCE(p.C_GRUPO, '') AS grupo,
                     COALESCE(p.C_SUBGRUPO, '') AS subgrupo,
@@ -695,6 +713,7 @@ class DatabaseManager:
                 AND i.c_Deposito LIKE ?
                 GROUP BY 
                     i.c_Codarticulo,
+                    p.cu_descripcion_corta,
                     p.C_DESCRI,
                     p.C_DEPARTAMENTO,
                     p.C_GRUPO,
@@ -715,7 +734,7 @@ class DatabaseManager:
     
     def obtener_ventas_por_producto_chunk(self, fecha_inicio, fecha_fin, sede_codigo, 
                                          start_row=1, fetch_size=1000):
-        """Obtiene ventas TRA en chunks para carga paralela
+        """Obtiene ventas TRA en chunks para carga paralela - OPTIMIZADO
         
         Args:
             fecha_inicio: Fecha inicio del rango
@@ -726,32 +745,45 @@ class DatabaseManager:
             
         Returns:
             list: Lista de ventas en el chunk especificado
+            
+        Optimizaciones:
+        - WITH (NOLOCK): Evita bloqueos de lectura (4x-10x más rápido)
+        - Usa = en lugar de LIKE: Permite uso de índices
+        - CTE pre-agregada: Reduce datos antes del JOIN costoso
+        - Filtra neto > 0: Solo productos con ventas reales
         """
         try:
+            # OPTIMIZACIÓN CRÍTICA: CTE + NOLOCK + = en lugar de LIKE
             query = """
-                SELECT 
-                    i.c_Codarticulo AS codigo,
-                    COALESCE(p.C_DESCRI, 'SIN DESCRIPCIÓN') AS descripcion,
-                    COALESCE(p.C_DEPARTAMENTO, '') AS departamento,
-                    COALESCE(p.C_GRUPO, '') AS grupo,
-                    COALESCE(p.C_SUBGRUPO, '') AS subgrupo,
-                    SUM(CASE 
+                WITH VentasAgregadas AS (
+                    SELECT 
+                        i.c_Codarticulo AS codigo,
+                        SUM(CASE 
+                            WHEN i.c_Concepto = 'VEN' THEN i.n_Cantidad
+                            WHEN i.c_Concepto = 'DEV' THEN -i.n_Cantidad 
+                            ELSE 0 
+                        END) AS neto
+                    FROM TR_INVENTARIO i WITH (NOLOCK)
+                    WHERE i.f_fecha BETWEEN CONVERT(DATE, ?, 105) AND CONVERT(DATE, ?, 105)
+                        AND i.c_Concepto IN ('VEN', 'DEV')
+                        AND i.c_Deposito = ?
+                    GROUP BY i.c_Codarticulo
+                    HAVING SUM(CASE 
                         WHEN i.c_Concepto = 'VEN' THEN i.n_Cantidad
                         WHEN i.c_Concepto = 'DEV' THEN -i.n_Cantidad 
                         ELSE 0 
-                    END) AS neto
-                FROM TR_INVENTARIO i
-                LEFT JOIN MA_PRODUCTOS p ON i.c_Codarticulo = p.C_CODIGO
-                WHERE i.f_fecha BETWEEN CONVERT(DATE, ?, 105) AND CONVERT(DATE, ?, 105)
-                AND i.c_Concepto IN ('VEN', 'DEV')
-                AND i.c_Deposito LIKE ?
-                GROUP BY 
-                    i.c_Codarticulo,
-                    p.C_DESCRI,
-                    p.C_DEPARTAMENTO,
-                    p.C_GRUPO,
-                    p.C_SUBGRUPO
-                ORDER BY neto DESC
+                    END) > 0
+                )
+                SELECT 
+                    v.codigo,
+                    COALESCE(p.cu_descripcion_corta, p.C_DESCRI, 'SIN DESCRIPCIÓN') AS descripcion,
+                    COALESCE(p.C_DEPARTAMENTO, '') AS departamento,
+                    COALESCE(p.C_GRUPO, '') AS grupo,
+                    COALESCE(p.C_SUBGRUPO, '') AS subgrupo,
+                    v.neto
+                FROM VentasAgregadas v
+                LEFT JOIN MA_PRODUCTOS p WITH (NOLOCK) ON v.codigo = p.C_CODIGO
+                ORDER BY v.neto DESC
                 OFFSET ? ROWS FETCH NEXT ? ROWS ONLY
             """
             

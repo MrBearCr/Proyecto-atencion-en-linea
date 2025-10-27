@@ -8,3 +8,9 @@ productos_jerarquia_cache.json
 recup.py
 s.py
 sirve.py
+test_connection.py
+docs/cache_ultimas_ventas_mbrp.md
+docs/correcciones_mbrp.md
+docs/PLAN_USUARIOS_PRIVILEGIOS.md
+docs/optimizaciones_tra_resumen.md
+EXPORT_THREADING_FIX.md

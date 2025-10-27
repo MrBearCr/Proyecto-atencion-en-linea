@@ -52,6 +52,8 @@ def setup_mbrp_tab(app):
 
     # Botones de acción
     ttk.Button(top_controls, text="Cargar", command=app.cargar_mbrp_base).pack(side=tk.RIGHT, padx=10)
+    ttk.Button(top_controls, text="🔄 Actualizar Ventas", 
+               command=lambda: getattr(app, 'actualizar_ultimas_ventas_mbrp', lambda: None)()).pack(side=tk.RIGHT, padx=5)
     ttk.Button(top_controls, text="📈 Exportar Excel", 
                command=lambda: getattr(app, 'exportar_mbrp_excel', lambda: None)()).pack(side=tk.RIGHT, padx=5)
     ttk.Button(top_controls, text="📊 Reporte", command=app.generar_reporte_mbrp).pack(side=tk.RIGHT, padx=5)
@@ -130,7 +132,7 @@ def setup_mbrp_tab(app):
         app.mbrp_tree.heading(col, text=col)
         app.mbrp_tree.column(col, **column_config.get(col, {"width": 120, "anchor": "center"}))
 
-    # Colores para MBRP - resaltar productos de BAJA movilidad (inverso a TRA)
+    # Colores para MBRP - resaltar productos de BAJA movilidad con filas alternadas
     app.mbrp_tree.tag_configure('alta', background='#607D8B', foreground='#FFFFFF', font=('', 11))  # Gris azulado vibrante (menos importante en MBRP)
     app.mbrp_tree.tag_configure('media', background='#FF9800', foreground='#FFFFFF', font=('', 11))  # Naranja vibrante
     app.mbrp_tree.tag_configure('baja', background='#E91E63', foreground='#FFFFFF', font=('', 11, 'bold'))  # Rosa vibrante + negrita
@@ -138,56 +140,60 @@ def setup_mbrp_tab(app):
     app.mbrp_tree.tag_configure('sin_clasificar', background='#9C27B0', foreground='#FFFFFF', font=('', 11))  # Púrpura vibrante
     app.mbrp_tree.tag_configure('loading', background='#2196F3', foreground='#FFFFFF', font=('', 12, 'italic'))  # Azul vibrante
     
+    # Estilos alternados para mejor distinción de filas
+    app.mbrp_tree.tag_configure('alta_alt', background='#546E7A', foreground='#FFFFFF', font=('', 11))  # Gris azulado más oscuro
+    app.mbrp_tree.tag_configure('media_alt', background='#F57C00', foreground='#FFFFFF', font=('', 11))  # Naranja más oscuro
+    app.mbrp_tree.tag_configure('baja_alt', background='#C2185B', foreground='#FFFFFF', font=('', 11, 'bold'))  # Rosa más oscuro
+    app.mbrp_tree.tag_configure('sin_movimiento_alt', background='#B71C1C', foreground='#FFFFFF', font=('', 11, 'bold'))  # Rojo más oscuro
+    app.mbrp_tree.tag_configure('sin_clasificar_alt', background='#7B1FA2', foreground='#FFFFFF', font=('', 11))  # Púrpura más oscuro
+    
     # Colores adicionales por Índice de Movilidad
     app.mbrp_tree.tag_configure('im_critico', background='#B71C1C', foreground='#FFFFFF', font=('', 11, 'bold'))  # IM < 5% - Rojo muy vibrante
     app.mbrp_tree.tag_configure('im_muy_bajo', background='#D32F2F', foreground='#FFFFFF', font=('', 11, 'bold'))  # IM 5-10% - Rojo vibrante
     app.mbrp_tree.tag_configure('im_bajo', background='#FF5722', foreground='#FFFFFF', font=('', 11))  # IM 10-20% - Naranja rojizo vibrante
     
-    # Efectos de hover y selección mejorados
-    app.mbrp_tree.tag_configure('hover', background='#FFC107', foreground='#000000', font=('', 11, 'bold'))  # Amarillo brillante hover
-    app.mbrp_tree.tag_configure('selected', background='#1976D2', foreground='#FFFFFF', font=('', 11, 'bold'))  # Azul intenso selección
-
-    # Eventos de hover y selección mejorados
-    def on_mbrp_hover(event):
-        try:
-            item = app.mbrp_tree.identify_row(event.y)
-            if item:
-                app.mbrp_tree.tk.call(app.mbrp_tree, 'tag', 'remove', 'hover', '')
-                app.mbrp_tree.tk.call(app.mbrp_tree, 'tag', 'add', 'hover', item)
-                app.mbrp_tree.config(cursor='hand2')
-        except Exception:
-            pass
-        return "break"
+    # Colores alternados para IM
+    app.mbrp_tree.tag_configure('im_critico_alt', background='#9A0007', foreground='#FFFFFF', font=('', 11, 'bold'))  # IM crítico más oscuro
+    app.mbrp_tree.tag_configure('im_muy_bajo_alt', background='#B71C1C', foreground='#FFFFFF', font=('', 11, 'bold'))  # IM muy bajo más oscuro
+    app.mbrp_tree.tag_configure('im_bajo_alt', background='#E64A19', foreground='#FFFFFF', font=('', 11))  # IM bajo más oscuro
     
-    def on_mbrp_leave(event):
+    # Configurar colores de selección en el style para que funcione correctamente
+    style.map('LargeMBRP.Treeview',
+        background=[('selected', '#0D47A1')],  # Azul oscuro para selección
+        foreground=[('selected', '#FFFFFF')]   # Texto blanco para contraste
+    )
+    
+    # Variable para rastrear el ítem actualmente seleccionado
+    app.mbrp_current_selected_item = None
+
+    # Eventos de selección mejorados
+    def on_mbrp_click(event):
+        """Maneja el click en una fila del treeview"""
         try:
-            app.mbrp_tree.tk.call(app.mbrp_tree, 'tag', 'remove', 'hover', '')
-            app.mbrp_tree.config(cursor='')
+            region = app.mbrp_tree.identify_region(event.x, event.y)
+            if region == 'cell' or region == 'tree':
+                item = app.mbrp_tree.identify_row(event.y)
+                if item:
+                    # Seleccionar el item
+                    app.mbrp_tree.selection_set(item)
+                    app.mbrp_tree.focus(item)
+                    app.mbrp_current_selected_item = item
+                    # Asegurar que sea visible
+                    app.mbrp_tree.see(item)
         except Exception:
             pass
-        return "break"
     
     def on_mbrp_select(event):
+        """Maneja el evento de selección del treeview"""
         try:
             selected = app.mbrp_tree.selection()
             if selected:
-                app.mbrp_tree.tk.call(app.mbrp_tree, 'tag', 'remove', 'selected', '')
-                app.mbrp_tree.tk.call(app.mbrp_tree, 'tag', 'add', 'selected', selected[0])
-                # Efecto de parpadeo
-                def parpadeo():
-                    try:
-                        app.mbrp_tree.tk.call(app.mbrp_tree, 'tag', 'remove', 'selected', selected[0])
-                        app.root.after(150, lambda: app.mbrp_tree.tk.call(app.mbrp_tree, 'tag', 'add', 'selected', selected[0]))
-                    except Exception:
-                        pass
-                app.root.after(100, parpadeo)
+                app.mbrp_current_selected_item = selected[0]
         except Exception:
             pass
-        return "break"
     
     # Bindings de eventos
-    app.mbrp_tree.bind('<Motion>', on_mbrp_hover)
-    app.mbrp_tree.bind('<Leave>', on_mbrp_leave)
+    app.mbrp_tree.bind('<Button-1>', on_mbrp_click)
     app.mbrp_tree.bind('<<TreeviewSelect>>', on_mbrp_select)
     
     # Layout
@@ -216,22 +222,36 @@ def setup_mbrp_tab(app):
     def _on_mbrp_dept_selected(event=None):
         desc = app.mbrp_dept_var.get()
         dept_cod = app.mbrp_dept_dict.get(desc)
-        app.mbrp_group_dict = {}
-        app.mbrp_sub_dict = {}
-        # Solo consultar BD si hay conexión activa
-        if dept_cod and hasattr(app.db_manager, 'conn') and app.db_manager.conn:
+        
+        # Resetear combos de grupo y subgrupo
+        app.mbrp_group_combo['values'] = ['Todos']
+        app.mbrp_group_var.set('Todos')
+        app.mbrp_sub_combo['values'] = ['Todos']
+        app.mbrp_sub_var.set('Todos')
+        
+        # Si no hay departamento seleccionado o es 'Todos', no cargar grupos
+        if not dept_cod or desc == 'Todos':
+            if hasattr(app, 'aplicar_filtro_mbrp'):
+                app.aplicar_filtro_mbrp()
+            return
+        
+        # Cargar grupos del departamento seleccionado
+        if hasattr(app.db_manager, 'conn') and app.db_manager.conn:
             try:
                 grupos = app.db_manager.fetch_data(
                     "SELECT C_CODIGO, C_DESCRIPCIO FROM MA_GRUPOS WHERE C_DEPARTAMENTO = ?",
                     (dept_cod,)
                 )
-                app.mbrp_group_dict = {desc: cod for cod, desc in grupos if cod and desc}
-            except Exception:
-                app.mbrp_group_dict = {}
-        app.mbrp_group_combo['values'] = ['Todos'] + list(app.mbrp_group_dict.keys())
-        app.mbrp_group_var.set('Todos')
-        app.mbrp_sub_combo['values'] = ['Todos']
-        app.mbrp_sub_var.set('Todos')
+                # Usar estructura anidada como TRA: mbrp_group_dict[dept_cod][desc] = cod
+                if dept_cod not in app.mbrp_group_dict:
+                    app.mbrp_group_dict[dept_cod] = {}
+                app.mbrp_group_dict[dept_cod] = {desc: cod for cod, desc in grupos if cod and desc}
+                app.mbrp_group_combo['values'] = ['Todos'] + list(app.mbrp_group_dict[dept_cod].keys())
+            except Exception as e:
+                app.log(f"Error cargando grupos MBRP: {e}", "ERROR")
+                if dept_cod not in app.mbrp_group_dict:
+                    app.mbrp_group_dict[dept_cod] = {}
+        
         if hasattr(app, 'aplicar_filtro_mbrp'):
             app.aplicar_filtro_mbrp()
 
@@ -239,20 +259,39 @@ def setup_mbrp_tab(app):
         dept_desc = app.mbrp_dept_var.get()
         dept_cod = app.mbrp_dept_dict.get(dept_desc)
         group_desc = app.mbrp_group_var.get()
-        group_cod = app.mbrp_group_dict.get(group_desc)
-        app.mbrp_sub_dict = {}
-        # Solo consultar BD si hay conexión activa
-        if dept_cod and group_cod and hasattr(app.db_manager, 'conn') and app.db_manager.conn:
+        
+        # Resetear combo de subgrupos
+        app.mbrp_sub_combo['values'] = ['Todos']
+        app.mbrp_sub_var.set('Todos')
+        
+        # Si no hay dept o group, o es 'Todos', no cargar subgrupos
+        if not dept_cod or not group_desc or group_desc == 'Todos':
+            if hasattr(app, 'aplicar_filtro_mbrp'):
+                app.aplicar_filtro_mbrp()
+            return
+        
+        # Obtener código de grupo desde estructura anidada
+        group_cod = app.mbrp_group_dict.get(dept_cod, {}).get(group_desc)
+        
+        if not group_cod:
+            if hasattr(app, 'aplicar_filtro_mbrp'):
+                app.aplicar_filtro_mbrp()
+            return
+        
+        # Cargar subgrupos
+        if hasattr(app.db_manager, 'conn') and app.db_manager.conn:
             try:
                 subs = app.db_manager.fetch_data(
                     "SELECT C_CODIGO, C_DESCRIPCIO FROM MA_SUBGRUPOS WHERE C_IN_DEPARTAMENTO = ? AND C_IN_GRUPO = ?",
                     (dept_cod, group_cod)
                 )
-                app.mbrp_sub_dict = {desc: cod for cod, desc in subs if cod and desc}
-            except Exception:
-                app.mbrp_sub_dict = {}
-        app.mbrp_sub_combo['values'] = ['Todos'] + list(app.mbrp_sub_dict.keys())
-        app.mbrp_sub_var.set('Todos')
+                # Usar key compuesta como TRA: "dept|group"
+                key = f"{dept_cod}|{group_cod}"
+                app.mbrp_sub_dict[key] = {desc: cod for cod, desc in subs if cod and desc}
+                app.mbrp_sub_combo['values'] = ['Todos'] + list(app.mbrp_sub_dict[key].keys())
+            except Exception as e:
+                app.log(f"Error cargando subgrupos MBRP: {e}", "ERROR")
+        
         if hasattr(app, 'aplicar_filtro_mbrp'):
             app.aplicar_filtro_mbrp()
 
@@ -289,6 +328,22 @@ def setup_mbrp_tab(app):
         app.mbrp_fecha_inicio_entry.set_date(fecha_inicio)
         app.mbrp_fecha_fin_entry.set_date(ayer)
     
+    # Función para verificar y recargar filtros MBRP si están vacíos
+    def _verificar_y_recargar_filtros_mbrp(event=None):
+        """Verifica si los filtros MBRP están vacíos y los recarga automáticamente"""
+        if len(app.mbrp_dept_combo['values']) <= 1:  # Solo tiene 'Todos'
+            try:
+                app.log("Filtros MBRP vacíos detectados, recargando...", "WARNING")
+                # Intentar cargar desde cache o BD
+                if hasattr(app, 'cargar_jerarquia_unificada'):
+                    app.cargar_jerarquia_unificada()
+                elif hasattr(app, 'cargar_jerarquia_mbrp'):
+                    app.cargar_jerarquia_mbrp()
+            except Exception as e:
+                app.log(f"Error recargando filtros MBRP: {e}", "ERROR")
+    
+    # Eventos con verificación automática
+    app.mbrp_dept_combo.bind('<Button-1>', _verificar_y_recargar_filtros_mbrp)  # Antes de abrir
     rango_combo.bind('<<ComboboxSelected>>', _on_mbrp_rango_selected)
     app.mbrp_dept_combo.bind('<<ComboboxSelected>>', _on_mbrp_dept_selected)
     app.mbrp_group_combo.bind('<<ComboboxSelected>>', _on_mbrp_group_selected)

@@ -1,0 +1,8 @@
+pyodbc
+cryptography
+keyring
+tkcalendar
+requests
+matplotlib
+win10toast
+Pillow

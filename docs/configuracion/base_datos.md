@@ -1,71 +1,53 @@
-# Configuración de Base de Datos SQL Server
+# Configuración de Base de Datos (SQL Server)
 
-## Versión y Edición
-
-- SQL Server 2019 o posterior (Standard o Enterprise, gestor de base de datos relacional de Microsoft)
-- Compatibilidad con SQL Server Express para entornos de desarrollo (versión gratuita con funcionalidades limitadas)
-
-## Esquema de Base de Datos
-
-La base de datos principal (`GestionClientes`) contiene las siguientes tablas principales:
+## Esquema utilizado por la app
+Tablas internas creadas automáticamente por `DatabaseManager`:
 
 ```sql
--- Estructura simplificada de las tablas principales
-CREATE TABLE Clientes (
-    ClienteID INT PRIMARY KEY IDENTITY(1,1),
-    Nombre NVARCHAR(100) NOT NULL,
-    Apellido NVARCHAR(100) NOT NULL,
-    Email NVARCHAR(150) UNIQUE,
-    Telefono NVARCHAR(15),
-    FechaRegistro DATETIME DEFAULT GETDATE(),
-    UltimaActualizacion DATETIME,
-    Activo BIT DEFAULT 1
+CREATE TABLE clientes (
+    id INT IDENTITY(1,1) PRIMARY KEY,
+    numero_cliente NVARCHAR(50) NOT NULL,
+    C_CODIGO NVARCHAR(15) NOT NULL
+);
+CREATE INDEX idx_clientes_numero ON clientes (numero_cliente);
+CREATE INDEX idx_clientes_codigo ON clientes (C_CODIGO);
+
+CREATE TABLE favoritos_productos (
+    codigo NVARCHAR(15) PRIMARY KEY,
+    favorito BIT DEFAULT 0,
+    fecha_creacion DATETIME DEFAULT GETDATE()
 );
 
-CREATE TABLE MensajesWhatsApp (
-    MensajeID INT PRIMARY KEY IDENTITY(1,1),
-    ClienteID INT FOREIGN KEY REFERENCES Clientes(ClienteID),
-    Contenido NVARCHAR(MAX),
-    FechaEnvio DATETIME,
-    Estado NVARCHAR(20),
-    IDMensajeWhatsApp NVARCHAR(100)
+CREATE TABLE envios_programados (
+    id INT IDENTITY(1,1) PRIMARY KEY,
+    numero_cliente NVARCHAR(50) NOT NULL,
+    fecha_programada DATETIME NOT NULL,
+    fecha_creacion DATETIME DEFAULT GETDATE(),
+    estado NVARCHAR(20) DEFAULT 'PENDIENTE'
 );
+CREATE INDEX idx_envios_fecha_estado ON envios_programados (fecha_programada, estado);
+CREATE INDEX idx_envios_numero ON envios_programados (numero_cliente);
 
-CREATE TABLE LogAuditoria (
-    LogID INT PRIMARY KEY IDENTITY(1,1),
-    UsuarioID INT,
-    Accion NVARCHAR(50),
-    Tabla NVARCHAR(50),
-    Detalle NVARCHAR(MAX),
-    FechaHora DATETIME DEFAULT GETDATE(),
-    DireccionIP NVARCHAR(50)
+CREATE TABLE TEMP_ENVIO (
+    numero_cliente NVARCHAR(50),
+    codigo_producto NVARCHAR(15),
+    descripcion NVARCHAR(255),
+    timestamp DATETIME DEFAULT GETDATE()
 );
 ```
 
-## Procedimientos Almacenados
+Tablas externas (solo lectura) esperadas en el ERP:
+- `MA_PRODUCTOS (C_CODIGO, C_DESCRI)`
+- `MA_DEPOPROD (c_codarticulo, c_coddeposito, n_cantidad)`
+- `TR_INVENTARIO (c_Codarticulo, f_fecha, c_Concepto, n_Cantidad, c_Deposito)`
 
-Se utilizan procedimientos almacenados para todas las operaciones CRUD principales, incluyendo:
+## Conexión
+- Conector: pyodbc + ODBC Driver de SQL Server (instalar el driver oficial de Microsoft).
+- Autenticación: SQL o Windows. Credenciales cifradas con keyring + Fernet.
+- Consultas: siempre parametrizadas; commit/rollback automáticos.
 
-- `sp_InsertarCliente`
-- `sp_ActualizarCliente`
-- `sp_EliminarCliente`
-- `sp_ConsultarCliente`
-- `sp_RegistrarMensajeWhatsApp`
-
-## Configuración de Conexión
-
-La cadena de conexión (string de configuración para conectar con la base de datos) se estructura de la siguiente manera:
-
-```
-Server=nombreServidor;Database=GestionClientes;User Id=usuario;Password=contraseña;Trusted_Connection=False;Encrypt=True;
-```
-
-Los parámetros principales son:
-- Server: nombre del servidor de base de datos
-- Database: nombre de la base de datos a utilizar
-- User Id/Password: credenciales de acceso
-- Trusted_Connection: indica si se usa autenticación de Windows
-- Encrypt: activa el cifrado de conexión
-
-Las credenciales de conexión se almacenan cifradas en el archivo de configuración y se descifran en tiempo de ejecución.
+## Recomendaciones
+- Índices arriba incluidos; añadir índices adicionales según volumen real.
+- Usar WITH (NOLOCK) solo en lecturas no críticas si aplica a tu entorno.
+- Separar base operativa ERP de la base local de la app si es posible.
 

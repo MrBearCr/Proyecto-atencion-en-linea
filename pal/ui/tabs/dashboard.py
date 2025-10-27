@@ -391,13 +391,11 @@ def _switch_to_tab(app, tab_name):
 def _update_dashboard_info(app):
     """Actualizar información del dashboard periódicamente"""
     try:
-        # Actualizar estado de conexión
-        if hasattr(app, 'db_manager') and app.db_manager.conn:
-            app.dashboard_connection_status.config(text="Conectado ✓", foreground="#10B981")
-        else:
-            app.dashboard_connection_status.config(text="Desconectado ✗", foreground="#EF4444")
+        # Actualizar estado de conexión - sincronizado con el estado global
+        # NO verificar directamente db_manager.conn para evitar inconsistencias
+        # El estado se actualiza a través de update_status() que sincroniza ambos labels
         
-        # Actualizar tiempo de sesión
+        # Solo actualizar tiempo de sesión (el estado de conexión ya se maneja en update_status)
         if hasattr(app, 'session') and hasattr(app.session, 'start_time'):
             elapsed = datetime.now() - app.session.start_time
             hours = int(elapsed.total_seconds() // 3600)

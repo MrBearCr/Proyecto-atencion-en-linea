@@ -1,3 +1,8 @@
+# ARCHIVO ARCHIVADO
+Este documento ha sido unificado en `docs/README.md`.
+
+Contenido original:
+
 # Arquitectura del Sistema
 
 ## Introducción
@@ -25,7 +30,4 @@ Aplicación de escritorio en Python (Tkinter) para gestión de clientes, monitor
 - Service layer, Strategy (filtros), Caching, Logging centralizado, Threading para tareas en segundo plano.
 
 ## Documentación Relacionada
-- [Componentes del Sistema](./componentes.md)
-- [Configuración de Base de Datos](../configuracion/base_datos.md)
-- [Integración con WhatsApp](../configuracion/whatsapp.md)
-
+- Ver `docs/README.md`.

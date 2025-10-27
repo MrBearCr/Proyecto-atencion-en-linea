@@ -1,46 +1,24 @@
 # Sistema de Auditoría
 
-## Eventos Auditados
+## Eventos auditados
+- Conexión/Desconexión a BD y operaciones de datos.
+- Envíos (éxito/error) a WhatsApp.
+- Cambios de configuración y acciones del usuario.
+- Errores con códigos `ErrorCode`.
 
-El sistema registra los siguientes tipos de eventos:
+## Implementación (Python)
+```python
+from pal.core.audit import AuditLogger
+from pal.core.errors import ErrorCode
 
-- Inicios y cierres de sesión
-- Operaciones CRUD sobre datos de clientes
-- Envío de mensajes por WhatsApp
-- Cambios en la configuración
-- Errores y excepciones del sistema
-
-## Implementación
-
-La auditoría se implementa mediante el patrón de interceptores y aspecto:
-
-```csharp
-// Atributo para auditar operaciones
-[AttributeUsage(AttributeTargets.Method)]
-public class AuditarOperacionAttribute : Attribute, IActionFilter
-{
-    public void OnActionExecuting(ActionExecutingContext context)
-    {
-        // Registrar inicio de operación
-    }
-    
-    public void OnActionExecuted(ActionExecutedContext context)
-    {
-        // Registrar resultado de operación
-        var usuario = context.HttpContext.User.Identity.Name;
-        var accion = context.ActionDescriptor.DisplayName;
-        var ip = context.HttpContext.Connection.RemoteIpAddress.ToString();
-        
-        // Almacenar log en la base de datos
-        var servicioAuditoria = context.HttpContext.RequestServices.GetService<IServicioAuditoria>();
-        servicioAuditoria.RegistrarEvento(usuario, accion, ip, context.Result);
-    }
-}
+audit = AuditLogger()
+audit.log_event("LOGIN", user="admin", status="SUCCESS")
+audit.log_event("DATABASE_QUERY", user="user", status="FAILED", error_code=ErrorCode.DB_QUERY_EXECUTION)
 ```
 
-## Consulta y Retención de Logs
+- Logger rotativo: archivo `audit.log`, 5MB, 3 backups, UTF-8.
+- Formato estándar: fecha | nivel | mensaje.
 
-- Los logs se retienen por un período de 12 meses
-- Existe una interfaz administrativa para consultar y filtrar registros
-- Los logs antiguos se archivan automáticamente en almacenamiento secundario
+## Retención
+- Rotación local por tamaño. Para retención extendida, enviar a sistema externo de logs.
 

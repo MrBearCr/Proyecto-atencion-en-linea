@@ -1,3 +1,8 @@
+# ARCHIVO ARCHIVADO
+Este documento ha sido unificado en `docs/README.md`.
+
+Contenido original (última versión previa a la unificación):
+
 # Componentes del Sistema (actual)
 
 ## Capa de Presentación (Tkinter)
@@ -29,5 +34,4 @@
 ## Integraciones Externas
 - WhatsApp Business (Graph API) vía `requests` y token almacenado en keyring.
 
-Para detalles de configuración y seguridad, ver [Base de Datos](../configuracion/base_datos.md) y [Seguridad](../configuracion/seguridad.md).
-
+Para detalles de configuración y seguridad, ver `docs/README.md`.

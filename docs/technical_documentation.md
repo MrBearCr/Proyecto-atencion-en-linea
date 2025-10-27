@@ -1006,9 +1006,9 @@ audit_log.log_event(
 )
 
 # Log failed action with error code
-from app import ErrorCode
+from pal.core.errors import ErrorCode
 audit_log.log_event(
-    "DATABASE_QUERY", 
+    "DATABASE_OPERATION", 
     "regular_user", 
     "FAILED",
     ErrorCode.DB_QUERY_EXECUTION

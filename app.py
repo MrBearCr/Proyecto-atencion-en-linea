@@ -3879,28 +3879,53 @@ class DatabaseApp:
             self.user_entry.insert(0, settings['user'])
     
     def update_status(self, status_type: str, message: str = "", server: str = "", api_token: Optional[str] = None):
-        """Actualizar la barra de estado principal"""
+        """Actualizar la barra de estado principal Y el dashboard"""
         status_config = {
             'connected': {
                 'text': f"BD: Conectado" if server else "BD: Conectado",
-                'color': "green"
+                'color': "green",
+                'dashboard_text': "Conectado ✓",
+                'dashboard_color': "#10B981"
             },
             'error': {
                 'text': f"Error: {message[:50]}..." if len(message) > 50 else f"Error: {message}",
-                'color': "red"
+                'color': "red",
+                'dashboard_text': "Error ✗",
+                'dashboard_color': "#EF4444"
             },
             'action': {
                 'text': message,
-                'color': "blue"
+                'color': "blue",
+                'dashboard_text': "Procesando...",
+                'dashboard_color': "#3B82F6"
             },
             'disconnected': {
                 'text': "BD: Desconectado",
-                'color': "orange"
+                'color': "orange",
+                'dashboard_text': "Desconectado ✗",
+                'dashboard_color': "#EF4444"
             }
         }
         
-        config = status_config.get(status_type, {'text': "Estado desconocido", 'color': "gray"})
+        config = status_config.get(status_type, {
+            'text': "Estado desconocido", 
+            'color': "gray",
+            'dashboard_text': "Desconocido",
+            'dashboard_color': "#6B7280"
+        })
+        
+        # Actualizar footer status
         self.db_status.config(text=config['text'], foreground=config['color'])
+        
+        # Actualizar dashboard status (si existe)
+        try:
+            if hasattr(self, 'dashboard_connection_status'):
+                self.dashboard_connection_status.config(
+                    text=config['dashboard_text'], 
+                    foreground=config['dashboard_color']
+                )
+        except Exception:
+            pass  # Dashboard aún no está inicializado
         
         # Mantener estado API independiente
         if not hasattr(self, 'api_state'):

@@ -1,52 +1,37 @@
-# Integración con WhatsApp
+# Integración con WhatsApp (Graph API)
 
-## Flujo de Envío de Mensajes
+## Configuración
+1. Obtener token en Meta Developer → WhatsApp Business.
+2. Guardarlo en la app: Settings → API WhatsApp (se almacena cifrado en keyring).
 
-El siguiente diagrama muestra el proceso de envío de mensajes tanto individuales como masivos a través de WhatsApp:
+## Envío de mensajes (plantillas)
+```python
+import requests
+from pal.core.credentials import SecureCredentialsManager
 
-![Diagrama de Flujo de Mensajes](../../recursos/mensajes_flujo_diagrama.png)
+API_ENDPOINT = "https://graph.facebook.com/v21.0/<PHONE_NUMBER_ID>/messages"
+cred = SecureCredentialsManager()
+whatsapp_token = cred.get_whatsapp_token()
 
-## Configuración de API
-
-La integración con WhatsApp Business API (Interfaz de Programación de Aplicaciones para WhatsApp Empresarial) requiere los siguientes pasos de configuración:
-
-1. Obtener una cuenta de WhatsApp Business API desde Facebook Developers (Portal de Desarrolladores de Facebook)
-2. Configurar un número de teléfono para envío de mensajes
-3. Generar y almacenar de forma segura el token de acceso (clave de autenticación)
-4. Configurar webhooks para recepción de eventos (opcional, puntos de enlace web para notificaciones automáticas)
-
-## Implementación de Envío de Mensajes
-
-```csharp
-// Ejemplo de implementación de envío de mensaje
-public async Task<bool> EnviarMensajeWhatsApp(string numeroTelefono, string mensaje)
-{
-    try
-    {
-        var client = new WhatsAppApiClient(_configuracion.TokenAcceso);
-        
-        var respuesta = await client.EnviarMensajeAsync(new MensajeWhatsApp
-        {
-            NumeroDestinatario = numeroTelefono,
-            Contenido = mensaje,
-            TipoMensaje = TipoMensajeWhatsApp.Texto
-        });
-        
-        await _repositorioMensajes.RegistrarMensaje(respuesta.IdMensaje, numeroTelefono, mensaje);
-        return respuesta.Exitoso;
-    }
-    catch (Exception ex)
-    {
-        _logger.Error($"Error al enviar mensaje WhatsApp: {ex.Message}");
-        return false;
-    }
+payload = {
+  "messaging_product": "whatsapp",
+  "to": "58XXXXXXXXXX",
+  "type": "template",
+  "template": {
+    "name": "alerta_stock",
+    "language": {"code": "es"},
+    "components": [{
+      "type": "body",
+      "parameters": [{"type": "text", "text": "1. Prod A • 2. Prod B"}]
+    }]
+  }
 }
+headers = {"Authorization": f"Bearer {whatsapp_token}", "Content-Type": "application/json"}
+resp = requests.post(API_ENDPOINT, headers=headers, json=payload)
 ```
 
-## Limitaciones y Consideraciones
-
-- Respetar las políticas de uso de WhatsApp Business API
-- Limitación en el número de mensajes según plan contratado
-- Restricciones de formato y contenido en mensajes
-- Validación de números de teléfono en formato internacional
+## Consideraciones
+- Respetar límites de tasa de la API; la app espacía envíos masivos (~7s).
+- Plantillas deben estar aprobadas previamente.
+- Nunca registrar el token en logs.
 

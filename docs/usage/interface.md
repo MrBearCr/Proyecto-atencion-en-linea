@@ -1,17 +1,15 @@
 # Diseño de la Interfaz
 
 ## Componentes Principales
+- Barra superior y estilos: `pal/ui/header.py`.
+- Barra lateral: `pal/ui/sidebar.py`.
+- Pestañas: `pal/ui/tabs/*.py` (records, messaging, stats, calendar, stock, tra, mbrp).
+
 ```python
-class DatabaseApp:
-    def setup_modern_ui(self):
-        # Configuración inicial de Tkinter
-        self.root.geometry("1200x800")
-        self.style = ttk.Style()
-        self.style.theme_use("modern")
-        
-        # Jerarquía de widgets
-        self.create_header()       # Barra superior
-        self.create_sidebar()      # Navegación izquierda
-        self.create_main_workspace() # Area de trabajo con pestañas
-        self.create_status_panel() # Barra de estado inferior
+# Inicialización (simplificada)
+ui_setup_styles(app)   # estilos ttk
+app.setup_modern_ui()  # crea header, sidebar, tabs y barra de estado
 ```
+
+- Las pestañas de Stock/TRA usan filtros jerárquicos y paginación.
+- La UI deshabilita acciones dependientes de BD hasta conectar.

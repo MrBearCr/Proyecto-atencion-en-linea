@@ -1,17 +1,9 @@
+# ARCHIVO ARCHIVADO
+Este documento ha sido unificado en `docs/README.md`.
+
+Contenido original (tabla y códigos vigente en el código):
+
 # Sistema de Gestión de Errores
-
-## Uso de ErrorCode
-```python
-from pal.core.errors import ErrorCode
-
-# Ejemplo de logging con código de error
-self.audit_log.log_event(
-    "DATABASE_OPERATION",
-    user="admin",
-    status="FAILED",
-    error_code=ErrorCode.DB_QUERY_EXECUTION,
-)
-```
 
 | Código | Categoría            | Descripción                                 |
 |-------:|----------------------|---------------------------------------------|

@@ -1,19 +1,19 @@
 # Gestión de Registros
 
-Módulo para administrar clientes y sus productos asociados.
+Módulo para administrar clientes y sus productos asociados (tabla `clientes`).
 
 ## Operaciones Básicas
-### Crear Registro
-1. Ingresar número de cliente (1-11 dígitos)
-2. Ingresar código de producto
-3. Validación automática:
-   - Formato numérico
-   - Prevención de SQL injection
-4. Click en **💾 Guardar**
+- Crear: número de cliente (1-11 dígitos) + código de producto.
+- Buscar/Actualizar/Eliminar con filtros por número/código.
 
 ```python
-# Ejemplo de validación
-def validate_input(self):
-    if not re.match(r'^\d{1,11}$', self.num_cliente.get()):
-        raise ValueError(ErrorCode.INVALID_CLIENT_NUMBER) 
+import re
+from pal.core.errors import ErrorCode
+
+# Validación de número de cliente
+def validate_num(num: str):
+    if not re.match(r"^\d{1,11}$", num):
+        raise ValueError(ErrorCode.INVALID_CLIENT_NUMBER)
 ```
+
+- Todas las consultas usan parámetros; la UI evita entradas peligrosas.

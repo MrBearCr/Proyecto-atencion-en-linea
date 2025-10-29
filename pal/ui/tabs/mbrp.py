@@ -203,20 +203,22 @@ def setup_mbrp_tab(app):
     tree_frame.grid_rowconfigure(0, weight=1)
     tree_frame.grid_columnconfigure(0, weight=1)
 
-    # Inicializar diccionarios vacíos - se cargarán cuando se conecte a BD
-    app.mbrp_dept_dict = {}
-    app.mbrp_group_dict = {}
-    app.mbrp_sub_dict = {}
-    app.mbrp_dept_combo['values'] = ['Todos']
+    # Inicializar diccionarios vacíos SOLO si no existen aún
+    # NOTA: La jerarquía se carga en create_main_workspace() ANTES de crear esta pestaña
+    # No volver a cargar aquí para evitar duplicados y conflictos de hilo
+    if not hasattr(app, 'mbrp_dept_dict') or not app.mbrp_dept_dict:
+        app.mbrp_dept_dict = {}
+    if not hasattr(app, 'mbrp_group_dict') or not app.mbrp_group_dict:
+        app.mbrp_group_dict = {}
+    if not hasattr(app, 'mbrp_sub_dict') or not app.mbrp_sub_dict:
+        app.mbrp_sub_dict = {}
+    
+    # Actualizar combo con datos existentes o inicializar con 'Todos'
+    if app.mbrp_dept_dict:
+        app.mbrp_dept_combo['values'] = ['Todos'] + list(app.mbrp_dept_dict.keys())
+    else:
+        app.mbrp_dept_combo['values'] = ['Todos']
     app.mbrp_dept_var.set('Todos')
-
-    # Si hay conexión y combos vacíos, disparar carga unificada (reutiliza misma jerarquía que TRA)
-    try:
-        if hasattr(app, 'db_manager') and getattr(app.db_manager, 'ensure_connection', lambda: False)():
-            if not app.mbrp_dept_dict:
-                app.cargar_jerarquia_unificada()
-    except Exception:
-        pass
 
     # Bindings de filtros (idénticos a TRA, pero con prefijo mbrp_)
     def _on_mbrp_dept_selected(event=None):
@@ -329,18 +331,21 @@ def setup_mbrp_tab(app):
         app.mbrp_fecha_fin_entry.set_date(ayer)
     
     # Función para verificar y recargar filtros MBRP si están vacíos
+    # Esta se ejecuta al hacer clic en el dropdown para intentar rellenarlo
     def _verificar_y_recargar_filtros_mbrp(event=None):
         """Verifica si los filtros MBRP están vacíos y los recarga automáticamente"""
+        # SOLO rellenar la jerar quía, NO cargar datos
         if len(app.mbrp_dept_combo['values']) <= 1:  # Solo tiene 'Todos'
             try:
-                app.log("Filtros MBRP vacíos detectados, recargando...", "WARNING")
-                # Intentar cargar desde cache o BD
-                if hasattr(app, 'cargar_jerarquia_unificada'):
-                    app.cargar_jerarquia_unificada()
-                elif hasattr(app, 'cargar_jerarquia_mbrp'):
-                    app.cargar_jerarquia_mbrp()
+                # Intentar actualizar solo los combos de jerar quía desde datos ya cargados
+                if hasattr(app, '_update_hierarchy_combos'):
+                    app._update_hierarchy_combos()
+                
+                # Si TODAVIA están vacíos, logear advertencia pero NO cargar datos
+                if len(app.mbrp_dept_combo['values']) <= 1:
+                    app.log("[MBRP] Filtros vacíos. Presione 'Cargar' para obtener datos.", "WARNING")
             except Exception as e:
-                app.log(f"Error recargando filtros MBRP: {e}", "ERROR")
+                app.log(f"Error actualizando filtros MBRP: {e}", "ERROR")
     
     # Eventos con verificación automática
     app.mbrp_dept_combo.bind('<Button-1>', _verificar_y_recargar_filtros_mbrp)  # Antes de abrir

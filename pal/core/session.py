@@ -27,10 +27,14 @@ class SessionManager:
         root.bind("<Motion>", self.update_activity)
 
     def update_activity(self, event=None):
-        self.last_activity = time.time()
-        if not self.session_active:
-            self.start_session()
-        return 0  # Valor entero apropiado para WNDPROC en Windows
+        try:
+            self.last_activity = time.time()
+            if not self.session_active:
+                self.start_session()
+        except Exception:
+            pass
+        # Siempre retornar None para que Tkinter propague el evento correctamente
+        # No retornar enteros explícitamente ya que puede causar problemas en Windows
 
     def start_session(self):
         self.session_active = True   

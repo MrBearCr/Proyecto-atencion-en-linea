@@ -15,7 +15,7 @@ class EnvioProgramado:
     def programar_envio(self, numero_cliente, fecha):
         try:
             self.db_manager.execute_query(
-                "INSERT INTO envios_programados (numero_cliente, fecha_programada, estado) VALUES (?, ?, 'PENDIENTE')",
+                "INSERT INTO pal_envios_programados (numero_cliente, fecha_programada, estado) VALUES (?, ?, 'PENDIENTE')",
                 (numero_cliente, fecha)
             )
             return True
@@ -39,7 +39,7 @@ class ProgramadorEnvios:
 
                 ahora = datetime.now()
                 pendientes = self.db_manager.fetch_data_threadsafe(
-                    "SELECT id, numero_cliente FROM envios_programados "
+                    "SELECT id, numero_cliente FROM pal_envios_programados "
                     "WHERE fecha_programada <= ? AND estado = 'PENDIENTE'",
                     (ahora,),
                     thread_name="envios"
@@ -62,7 +62,7 @@ class ProgramadorEnvios:
         
         ahora = datetime.now()
         recordatorios = self.db_manager.fetch_data_threadsafe(
-        "SELECT id, numero_cliente, tipo_envio FROM envios_programados "
+        "SELECT id, numero_cliente, tipo_envio FROM pal_envios_programados "
         "WHERE fecha_programada BETWEEN ? AND ? AND estado = 'PENDIENTE'",
         (ahora, ahora + timedelta(hours=24)),
         thread_name="envios")

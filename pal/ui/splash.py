@@ -1,60 +1,88 @@
 """
-Pantalla de splash para la aplicación PAL
+Pantalla de splash para la aplicación PAL con login integrado.
 """
 import tkinter as tk
 from tkinter import ttk
-from threading import Event
+from threading import Event, Thread
 
 class SplashScreen(tk.Toplevel):
     def __init__(self, parent):
         super().__init__(parent)
         self.title("Cargando...")
-        self.geometry("715x315")
+        # Tamaño del splash ampliado para acomodar el login cómodamente
+        self.splash_width = 900
+        self.splash_height = 520
+        self.geometry(f"{self.splash_width}x{self.splash_height}")
+        self.minsize(self.splash_width, self.splash_height)
         self.configure(bg="#000000")
         self.overrideredirect(True)
         
         # Centrar en pantalla
         screen_width = self.winfo_screenwidth()
         screen_height = self.winfo_screenheight()
-        x = (screen_width - 715) // 2
-        y = (screen_height - 315) // 2
+        x = (screen_width - self.splash_width) // 2
+        y = (screen_height - self.splash_height) // 2
         self.geometry(f"+{x}+{y}")
         
         # Contenedor principal
         self.container = ttk.Frame(self)
-        self.container.pack(expand=True, fill="both", padx=20, pady=20)
+        self.container.pack(expand=True, fill="both", padx=24, pady=24)
         
         try:
             self.logo = tk.PhotoImage(file="casapro-icono.png").subsample(2, 2)
-            ttk.Label(self.container, image=self.logo).pack(pady=30)
-        except Exception as e:
-            tk.Label(self, text="[Imagen no disponible]", bg='black').pack(pady=10)
+            ttk.Label(self.container, image=self.logo).pack(pady=16)
+        except Exception:
+            tk.Label(self, text="[Imagen no disponible]", bg='black', fg='white').pack(pady=10)
         
         # Texto de carga
         ttk.Label(self.container, 
-                text="CPCapp 1.0BETA", 
-                font=("Segoe UI", 12)).pack(pady=5)
+                  text="CPCapp 1.0BETA", 
+                  font=("Segoe UI", 13)).pack(pady=4)
         
         # Barra de progreso
         self.progress = ttk.Progressbar(self.container, 
-                                      orient="horizontal",
-                                      length=300,
-                                      mode="determinate")
+                                        orient="horizontal",
+                                        length=420,
+                                        mode="determinate")
         self.progress.pack(pady=10)
+        
+        # Panel de login (inicialmente oculto hasta que la app habilite)
+        self.login_frame = ttk.Frame(self.container)
+        # Configurar grid para que las entradas se expandan
+        self.login_frame.columnconfigure(0, weight=0)
+        self.login_frame.columnconfigure(1, weight=1)
+        # Campos
+        row = 0
+        ttk.Label(self.login_frame, text="Usuario:").grid(row=row, column=0, sticky="e", padx=8, pady=6)
+        self.username = ttk.Entry(self.login_frame)
+        self.username.grid(row=row, column=1, sticky="ew", pady=6)
+        row += 1
+        ttk.Label(self.login_frame, text="Contraseña:").grid(row=row, column=0, sticky="e", padx=8, pady=6)
+        self.password = ttk.Entry(self.login_frame, show="*")
+        self.password.grid(row=row, column=1, sticky="ew", pady=6)
+        row += 1
+        self.btn_login = ttk.Button(self.login_frame, text="Entrar", command=self._on_login_click, state=tk.DISABLED)
+        self.btn_login.grid(row=row, column=1, sticky="e", pady=10)
+        row += 1
+        self.login_status = ttk.Label(self.login_frame, text="Esperando conexión...", foreground="#888")
+        self.login_status.grid(row=row, column=0, columnspan=2, sticky="w", padx=8)
         
         # Variables de control
         self.minimum_time_elapsed = Event()
         self.app_initialized = Event()
+        self.login_success = Event()
         self.progress_value = 0
+        self._login_handler = None
+        
+        # Asegurar buen layout del panel de login dentro del contenedor
+        # (se mostrará con enable_login)
 
     def start_animation(self):
-        # Iniciar temporizador mínimo de 3 segundos
+        # Temporizador mínimo de 3 segundos
         self.after(3000, self.minimum_time_elapsed.set)
-        
-        # Iniciar animación de progreso
+        # Animación de progreso
         self._update_progress()
-        
-        # Verificar estado combinado
+        # Verificación periódica
         self._check_loading_status()
 
     def _update_progress(self):
@@ -64,7 +92,66 @@ class SplashScreen(tk.Toplevel):
             self.after(30, self._update_progress)
 
     def _check_loading_status(self):
-        if self.minimum_time_elapsed.is_set() and self.app_initialized.is_set():
-            self.destroy()
+        # Cerrar solo cuando: tiempo mínimo + app inicializada + login OK
+        if self.minimum_time_elapsed.is_set() and self.app_initialized.is_set() and self.login_success.is_set():
+            try:
+                # Ocultar barra de progreso antes de cerrar
+                self.progress.pack_forget()
+                # Pequeña pausa para suavizar transición
+                self.after(300, self._finalize_splash)
+            except Exception:
+                self.destroy()
         else:
             self.after(100, self._check_loading_status)
+    
+    def _finalize_splash(self):
+        """Finaliza el splash y muestra la ventana principal"""
+        try:
+            # Mostrar la ventana principal al cerrar el splash
+            if hasattr(self, 'master') and self.master:
+                self.master.deiconify()
+        except Exception:
+            pass
+        self.destroy()
+
+    def enable_login(self, login_handler):
+        """Habilita el panel de login y asigna el handler de verificación."""
+        self._login_handler = login_handler
+        try:
+            # Asegurar que el frame ocupe buen ancho
+            self.login_frame.pack(pady=12, padx=24, fill="x")
+            self.btn_login.config(state=tk.NORMAL)
+            self.username.focus_set()
+            self.login_status.config(text="Ingrese sus credenciales", foreground="#004C97")
+        except Exception:
+            pass
+
+    def _on_login_click(self):
+        if not self._login_handler:
+            return
+        user = self.username.get().strip()
+        pwd = self.password.get().strip()
+        if not user or not pwd:
+            self.login_status.config(text="Complete usuario y contraseña", foreground="red")
+            return
+        # Deshabilitar botón y mostrar estado
+        self.btn_login.config(state=tk.DISABLED)
+        self.login_status.config(text="Verificando...", foreground="#004C97")
+        
+        def _run():
+            try:
+                ok, msg = self._login_handler(user, pwd)
+                def _done():
+                    if ok:
+                        self.login_status.config(text="Login exitoso", foreground="green")
+                        self.login_success.set()
+                    else:
+                        self.login_status.config(text=msg or "Credenciales inválidas", foreground="red")
+                        self.btn_login.config(state=tk.NORMAL)
+                self.after(0, _done)
+            except Exception as e:
+                def _err():
+                    self.login_status.config(text=f"Error: {e}", foreground="red")
+                    self.btn_login.config(state=tk.NORMAL)
+                self.after(0, _err)
+        Thread(target=_run, daemon=True).start()

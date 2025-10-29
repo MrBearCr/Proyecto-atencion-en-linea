@@ -23,7 +23,7 @@ En primer arranque, configure Conexión (servidor/BD/usuario) y, si aplica, el t
 ## Configuración
 - Base de datos: pyodbc con consultas parametrizadas y commit/rollback.
 - Credenciales y token: almacenados en Windows Credential Manager (keyring) y cifrados con Fernet.
-- Tablas internas creadas por la app: `clientes`, `favoritos_productos`, `envios_programados`, `TEMP_ENVIO`.
+- Tablas internas creadas por la app: `pal_clientes`, `pal_envios_programados`, `pal_temp_envio`.
 - Tablas externas esperadas: `MA_PRODUCTOS`, `MA_DEPOPROD`, `TR_INVENTARIO` (solo lectura).
 
 Esquema interno (resumen):

@@ -1,7 +1,7 @@
 import pyodbc
 import tkinter as tk
 import csv
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, simpledialog
 from tkinter import font 
 from cryptography.fernet import Fernet
 import keyring
@@ -23,6 +23,7 @@ import math
 from tkcalendar import Calendar, DateEntry
 from datetime import datetime, timedelta
 import requests
+import bcrypt
 from enum import Enum
 from pal.core.errors import ErrorCode
 from pal.core.credentials import SecureCredentialsManager
@@ -32,6 +33,7 @@ from pal.ui.splash import SplashScreen
 from pal.ui.header import setup_styles as ui_setup_styles, create_header
 from pal.ui.debug_console import DebugConsole
 from pal.core.session import SessionManager
+from pal.core.auth import AuthManager
 from pal.services.cache import CacheDescripciones
 from pal.services.envios import EnvioProgramado, ProgramadorEnvios
 import matplotlib.pyplot as plt
@@ -50,6 +52,18 @@ LOCATION_GROUPS = {
     'GUANARE': ['0401', '0402'],
     'CDT': ['0106'],
 }
+
+# Mapeo de módulos entre BD (mayúsculas) y flags de la app (minúsculas)
+DB_MODULE_TO_FLAG = {
+    'STOCK': 'stock',
+    'TRA': 'tra',
+    'MBRP': 'mbrp',
+    'MENSAJES': 'envio_mensajes',
+    'ESTADISTICAS': 'estadisticas',
+    'CALENDARIO': 'calendario',
+    'ADMIN': 'admin',
+}
+FLAG_TO_DB_MODULE = {v: k for k, v in DB_MODULE_TO_FLAG.items()}
 
 def load_modules_config():
         """Lee la sección [Modules] de db_config.ini o crea valores por defecto."""
@@ -146,6 +160,7 @@ class DatabaseApp:
         try:
             # Tu lógica de inicialización original
             self.ultimas_notificaciones = set()
+            print("[DEBUG] Iniciando carga de la aplicación...", flush=True)
             
             # Inicialización de componentes críticos
             self.cred_manager = SecureCredentialsManager()
@@ -156,6 +171,10 @@ class DatabaseApp:
             self.modules_enabled = load_modules_config()
             self.audit_log = AuditLogger()
             self.db_manager = DatabaseManager()
+            self.auth = None
+            self.permissions = None
+            self.current_user = None
+            self.session_token = None
             self.settings_window = None
             self.show_pwd_var = None
             self.httpd = None
@@ -208,6 +227,8 @@ class DatabaseApp:
                 self.envios_programados = EnvioProgramado(self.db_manager)
 
             if self.modules_enabled.get("stock", False):
+                # Inicializar el notificador antes de iniciar el hilo que lo usa
+                self.toaster = ToastNotifier()
                 self.monitor_thread = threading.Thread(target=self.monitorear_favoritos, daemon=True)
                 self.monitor_thread.start()
 
@@ -226,13 +247,6 @@ class DatabaseApp:
                 self.tra_fecha_inicio = None
                 self.tra_fecha_fin = None
                 self.tra_sede_codigo = None
-                
-                self.tra_tab = ttk.Frame(self.main_notebook)
-                self.main_notebook.add(self.tra_tab, text="📈 T.R.A")
-                from pal.ui.tabs.tra import setup_tra_tab as setup_tra_tab_ui
-                setup_tra_tab_ui(self)
-                # Programar actualización de combos después de que todo esté listo
-                self.root.after(500, self._update_hierarchy_combos)
             
             # MBRP - Movimiento de Baja Rotación de Producto
             if self.modules_enabled.get("mbrp", False):
@@ -249,13 +263,6 @@ class DatabaseApp:
                 self.mbrp_fecha_inicio = None
                 self.mbrp_fecha_fin = None
                 self.mbrp_sede_codigo = None
-                
-                self.mbrp_tab = ttk.Frame(self.main_notebook)
-                self.main_notebook.add(self.mbrp_tab, text="📉 MBRP")
-                from pal.ui.tabs.mbrp import setup_mbrp_tab as setup_mbrp_tab_ui
-                setup_mbrp_tab_ui(self)
-                # Programar actualización de combos después de que todo esté listo
-                self.root.after(500, self._update_hierarchy_combos)
             
             # Sistema de Paginacion ya inicializado arriba
             # Sistema de notificaciones y ayuda (inicializar antes de auto-connect)
@@ -266,22 +273,22 @@ class DatabaseApp:
             self.attempt_auto_connect()
             self.programar_actualizaciones_stock()
             
-            # Notificaciones de Win10
-            self.toaster = ToastNotifier()
-            
             # Verificar hilos activos en segundo plano
             self.listar_hilos_activos()
             
+            print("[DEBUG] Inicialización completada exitosamente", flush=True)
+            
+        except Exception as e:
+            print(f"[ERROR] Fallo durante la inicialización: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            
         finally:
-            # Marcar inicialización como completada
+            # Marcar inicialización como completada siempre
             self.splash.app_initialized.set()
             
-            # Mostrar ventana principal si ya pasó el tiempo mínimo
-            if self.splash.minimum_time_elapsed.is_set():
-                self.root.after(0, self.root.deiconify)
-            else:
-                # Programar para mostrar cuando termine el tiempo mínimo
-                self.root.after(3000 - self.splash.progress_value*30, self.root.deiconify)
+            # No deiconificar la ventana principal aquí.
+            # La ventana principal se mostrará cuando el splash complete login exitoso.
 
     def _inicializacion_completa(self):
         # Destruir el splash screen
@@ -354,7 +361,7 @@ class DatabaseApp:
         """Obtiene el código de producto asociado a un cliente."""
         try:
             result = self.db_manager.fetch_data(
-                "SELECT C_CODIGO FROM clientes WHERE numero_cliente = ?", 
+                "SELECT C_CODIGO FROM pal_clientes WHERE numero_cliente = ?", 
                 (numero_cliente,)
             )
             return result[0][0] if result else None
@@ -1626,7 +1633,7 @@ class DatabaseApp:
         fecha_inicio = datetime.combine(self.fecha_inicio.get_date(), datetime.min.time())
         fecha_fin = datetime.combine(self.fecha_fin.get_date(), datetime.max.time())
 
-        query = "SELECT * FROM envios_programados WHERE fecha_programada BETWEEN ? AND ?"
+        query = "SELECT * FROM pal_envios_programados WHERE fecha_programada BETWEEN ? AND ?"
         params = (fecha_inicio, fecha_fin)  # Ahora son datetime.datetime
 
         records = self.db_manager.fetch_data(query, params)
@@ -2165,7 +2172,7 @@ class DatabaseApp:
         self.main_notebook = ttk.Notebook(self.root)
         self.main_notebook.pack(expand=True, fill=tk.BOTH, padx=10, pady=10)
         
-        # Pestaña de Dashboard (Pantalla Principal)
+        # Pestaña de Dashboard (Pantalla Principal) - siempre visible
         self.dashboard_tab = ttk.Frame(self.main_notebook)
         self.main_notebook.add(self.dashboard_tab, text="🏠 Inicio")
         from pal.ui.tabs.dashboard import setup_dashboard_tab
@@ -2200,12 +2207,39 @@ class DatabaseApp:
             from pal.ui.tabs.calendar import setup_calendar_tab as setup_calendar_tab_ui
             setup_calendar_tab_ui(self)
 
+        # Pestaña T.R.A (Rotación de Ventas)
+        if self.modules_enabled.get("tra", False):
+            self.tra_tab = ttk.Frame(self.main_notebook)
+            self.main_notebook.add(self.tra_tab, text="📈 T.R.A")
+            from pal.ui.tabs.tra import setup_tra_tab as setup_tra_tab_ui
+            setup_tra_tab_ui(self)
+            self.root.after(500, self._update_hierarchy_combos)
+        # Pe staña MBRP (Movimiento de Baja Rotación)
+        if self.modules_enabled.get("mbrp", False):
+            self.mbrp_tab = ttk.Frame(self.main_notebook)
+            self.main_notebook.add(self.mbrp_tab, text="📉 MBRP")
+            from pal.ui.tabs.mbrp import setup_mbrp_tab as setup_mbrp_tab_ui
+            setup_mbrp_tab_ui(self)
+            # Actualizar combos MBRP inmediatamente si ya hay datos cargados
+            if hasattr(self, 'mbrp_dept_dict') and self.mbrp_dept_dict:
+                self.mbrp_dept_combo['values'] = ['Todos'] + list(self.mbrp_dept_dict.keys())
+                self.mbrp_dept_var.set('Todos')
+            # Programar actualización adicional en caso de que se carguen después
+            self.root.after(500, self._update_hierarchy_combos)
+            self.root.after(500, self._update_hierarchy_combos)
+
         # Alerta de stock Supervisores
         if self.modules_enabled.get("stock", False):
             self.stock_tab = ttk.Frame(self.main_notebook)
             self.main_notebook.add(self.stock_tab, text="🚨 Alertas Stock")
             from pal.ui.tabs.stock import setup_stock_tab as setup_stock_tab_ui
             setup_stock_tab_ui(self)
+        
+        # Pestaña de Gestión de Usuarios (solo admin)
+        if self.modules_enabled.get("admin", False):
+            self.admin_tab = ttk.Frame(self.main_notebook)
+            self.main_notebook.add(self.admin_tab, text="🔓 Gestión de Usuarios")
+            self._create_admin_users_tab(self.admin_tab)
     
     def mostrar_tra_filtrado(self, datos_filtrados):
         """Muestra datos filtrados TRA en el Treeview con colores, stock actual e ideal, y días restantes"""
@@ -2725,8 +2759,7 @@ class DatabaseApp:
                     if key not in tra_sub_dict:
                         tra_sub_dict[key] = {}
                     tra_sub_dict[key][sub_desc.strip()] = sub_cod.strip()
-            
-            # Asignar a ambos módulos (TRA y MBRP comparten la misma jerarquía)
+            # Asignar a ambos módulos (TRA y MBRP comparten la misma jerar quía)
             self.tra_dept_dict = tra_dept_dict
             self.tra_group_dict = tra_group_dict
             self.tra_sub_dict = tra_sub_dict
@@ -2741,12 +2774,22 @@ class DatabaseApp:
 
             if total_items == 0:
                 # Fallback explícito si la consulta no devolvió datos útiles
-                self.log("Jerarquía unificada vacía, aplicando fallback por módulos", "WARNING")
+                self.log("Jerar quía unificada vacía, aplicando fallback por módulos", "WARNING")
                 self.cargar_jerarquia_tra()
                 self.cargar_jerarquia_mbrp()
                 return
             
+            # Actualizar combos MBRP inmediatamente si la pestaña ya existe
+            if hasattr(self, 'mbrp_dept_combo') and self.mbrp_dept_dict:
+                try:
+                    self.mbrp_dept_combo['values'] = ['Todos'] + list(self.mbrp_dept_dict.keys())
+                    if hasattr(self, 'mbrp_dept_var'):
+                        self.mbrp_dept_var.set('Todos')
+                except Exception:
+                    pass
+            
             # Actualizar combos si están disponibles
+            self._update_hierarchy_combos()
             self._update_hierarchy_combos()
             
             # Marcar como cargado para evitar duplicados
@@ -2780,24 +2823,44 @@ class DatabaseApp:
             self.cargar_jerarquia_mbrp()
     
     def _update_hierarchy_combos(self):
-        """Actualiza los combos de jerarquía para ambos módulos"""
+        """Actualiza los combos de jerar quía para ambos módulos"""
         try:
             tra_actualizado = False
             mbrp_actualizado = False
             
-            # TRA combos
-            if hasattr(self, 'tra_dept_combo') and hasattr(self, 'tra_dept_dict') and self.tra_dept_dict:
-                valores_tra = ['Todos'] + list(self.tra_dept_dict.keys())
-                self.tra_dept_combo['values'] = valores_tra
-                self.tra_dept_var.set('Todos')
-                tra_actualizado = True
+            # Debug: verificar estado
+            has_tra_combo = hasattr(self, 'tra_dept_combo')
+            has_mbrp_combo = hasattr(self, 'mbrp_dept_combo')
+            has_tra_dict = hasattr(self, 'tra_dept_dict') and self.tra_dept_dict
+            has_mbrp_dict = hasattr(self, 'mbrp_dept_dict') and self.mbrp_dept_dict
+            
+            # TRA combos - con validación exhaustiva del widget
+            if (has_tra_combo and has_tra_dict):
+                try:
+                    # Validar que el widget existe y es accesible
+                    if self.tra_dept_combo.winfo_exists():
+                        valores_tra = ['Todos'] + list(self.tra_dept_dict.keys())
+                        self.tra_dept_combo['values'] = valores_tra
+                        if hasattr(self, 'tra_dept_var'):
+                            self.tra_dept_var.set('Todos')
+                        tra_actualizado = True
+                except (tk.TclError, AttributeError):
+                    # Widget destruido o no accesible
+                    pass
                 
-            # MBRP combos
-            if hasattr(self, 'mbrp_dept_combo') and hasattr(self, 'mbrp_dept_dict') and self.mbrp_dept_dict:
-                valores_mbrp = ['Todos'] + list(self.mbrp_dept_dict.keys())
-                self.mbrp_dept_combo['values'] = valores_mbrp
-                self.mbrp_dept_var.set('Todos')
-                mbrp_actualizado = True
+            # MBRP combos - con validación exhaustiva del widget
+            if (has_mbrp_combo and has_mbrp_dict):
+                try:
+                    # Validar que el widget existe y es accesible
+                    if self.mbrp_dept_combo.winfo_exists():
+                        valores_mbrp = ['Todos'] + list(self.mbrp_dept_dict.keys())
+                        self.mbrp_dept_combo['values'] = valores_mbrp
+                        if hasattr(self, 'mbrp_dept_var'):
+                            self.mbrp_dept_var.set('Todos')
+                        mbrp_actualizado = True
+                except (tk.TclError, AttributeError):
+                    # Widget destruido o no accesible
+                    pass
             
             # Log consolidado - solo una línea
             if tra_actualizado or mbrp_actualizado:
@@ -2807,13 +2870,12 @@ class DatabaseApp:
                 if mbrp_actualizado:
                     modulos.append(f"MBRP({len(self.mbrp_dept_dict)} depts)")
                 self.log(f"✅ Filtros actualizados: {', '.join(modulos)}", "SUCCESS")
-            else:
-                # Solo mostrar advertencia si ambos fallaron Y los diccionarios tienen datos
-                if (getattr(self, 'tra_dept_dict', {}) or getattr(self, 'mbrp_dept_dict', {})):
-                    self.log("⚠️ Filtros no actualizados - combos aún no creados", "WARNING")
+            elif has_mbrp_dict and not mbrp_actualizado:
+                # Debug: MBRP tiene datos pero combo no se actualizó
+                self.log(f"⚠️ MBRP tiene {len(self.mbrp_dept_dict)} depts pero combo aún no creado (has_combo={has_mbrp_combo})", "DEBUG")
                 
         except Exception as e:
-            self.log(f"Error actualizando combos de jerarquía: {e}", "ERROR")
+            self.log(f"Error actualizando combos de jerar quía: {e}", "ERROR")
     
     def _inicializar_modulos_paralelo(self):
         """Inicializa módulos en paralelo real usando ThreadPoolExecutor"""
@@ -3617,20 +3679,80 @@ class DatabaseApp:
             self.notification_manager.show_error("Error", f"No se pudo cargar la configuración: {str(e)}")
             return None
     
+
+    def _ensure_admin_user(self):
+        """Crea el usuario 'admin' si no existe con contraseña predeterminada '123' y habilita módulos."""
+        try:
+            rows = self.db_manager.fetch_data("SELECT id FROM pal_usuarios WHERE username = ?", ("admin",))
+            if rows:
+                return  # Ya existe
+            # Crear con contraseña por defecto '123'
+            salt = bcrypt.gensalt(rounds=12)
+            pwd_hash = bcrypt.hashpw(b"123", salt).decode('utf-8')
+            self.db_manager.execute_query(
+                "INSERT INTO pal_usuarios (username, password_hash, nombre_completo, email, activo) VALUES (?, ?, ?, ?, 1)",
+                ("admin", pwd_hash, "Administrador del Sistema", None)
+            )
+            user_id = int(self.db_manager.fetch_data("SELECT id FROM pal_usuarios WHERE username = ?", ("admin",))[0][0])
+            for modulo_db in DB_MODULE_TO_FLAG.keys():
+                self.db_manager.execute_query(
+                    """
+                    IF NOT EXISTS (SELECT 1 FROM pal_usuarios_modulos WHERE usuario_id = ? AND modulo = ?)
+                        INSERT INTO pal_usuarios_modulos (usuario_id, modulo, habilitado) VALUES (?, ?, 1)
+                    ELSE
+                        UPDATE pal_usuarios_modulos SET habilitado = 1 WHERE usuario_id = ? AND modulo = ?
+                    """,
+                    (user_id, modulo_db, user_id, modulo_db, user_id, modulo_db)
+                )
+            self.log("Usuario 'admin' creado con contraseña predeterminada y módulos habilitados", "SUCCESS")
+        except Exception as e:
+            self.log(f"No se pudo crear usuario admin: {e}", "ERROR")
+
+    def _ensure_admin_password_interactive(self):
+        """Verifica el hash del usuario admin y permite definir una contraseña si es placeholder o inválido."""
+        try:
+            rows = self.db_manager.fetch_data("SELECT id, password_hash FROM pal_usuarios WHERE username = ?", ("admin",))
+            if not rows:
+                return
+            user_id, pwd_hash = rows[0]
+            pwd_hash = str(pwd_hash) if pwd_hash is not None else ""
+            needs_set = (not pwd_hash) or ("PLACEHOLDER" in pwd_hash) or (not pwd_hash.startswith("$2")) or (len(pwd_hash) < 55)
+            if not needs_set:
+                return
+            # Pedir nueva contraseña
+            while True:
+                p1 = simpledialog.askstring("Configurar contraseña", "Ingrese nueva contraseña para admin:", show='*', parent=self.root)
+                if p1 is None:
+                    # Cancelado
+                    break
+                p2 = simpledialog.askstring("Confirmar contraseña", "Confirme la contraseña:", show='*', parent=self.root)
+                if p2 is None:
+                    break
+                if p1 != p2:
+                    messagebox.showerror("Error", "Las contraseñas no coinciden")
+                    continue
+                # Generar hash y guardar
+                salt = bcrypt.gensalt(rounds=12)
+                new_hash = bcrypt.hashpw(p1.encode("utf-8"), salt).decode("utf-8")
+                self.db_manager.execute_query("UPDATE pal_usuarios SET password_hash = ? WHERE id = ?", (new_hash, int(user_id)))
+                self.log("Contraseña de admin actualizada", "SUCCESS")
+                messagebox.showinfo("Listo", "Se actualizó la contraseña de admin")
+                break
+        except Exception as e:
+            self.log(f"No se pudo configurar contraseña de admin: {e}", "WARNING")
+
     def attempt_auto_connect(self):
-        """Intentar conexión automática con credenciales guardadas desencriptadas."""
+        """Intentar conexión automática y habilitar login integrado en el splash."""
         try:
             settings = self.load_connection_settings()
             if not settings:
-                self.show_settings()
+                self.root.after(0, self.show_settings)
                 return
 
             server = settings.get('server')
             database = settings.get('database')
             user = settings.get('user')
-            # Se asume que la contraseña temporal ya se guarda/encripta correctamente
             password = self.cred_manager.get_temp_password()
-            # Obtener token desde keyring
             api_token = self.cred_manager.get_whatsapp_token()
 
             if server and database:
@@ -3638,25 +3760,31 @@ class DatabaseApp:
                 if self.db_manager.connect(server, database, user, password):
                     self.update_status('connected', server=server, api_token=api_token)
                     self.log("Conexión a BD exitosa", "SUCCESS")
-                    self.search_records()
+                    # Inicializar auth y habilitar login en el splash
+                    self.auth = AuthManager(self.db_manager)
+                    # Crear admin si no existe (password predeterminada '123')
+                    self._ensure_admin_user()
+                    self.root.after(0, lambda: self.splash.enable_login(self._splash_login_submit))
 
-                    # ⚙️ Inicialización PARALELA de módulos para máxima velocidad
+                    # (Opcional) Verificar/crear esquema de seguridad luego del login
+                    # Se hará tras login exitoso para evitar prompts durante el splash
+
+                    # Continuar con carga del resto de módulos en paralelo
                     self._inicializar_modulos_paralelo()
 
                     total_elapsed = time.perf_counter() - total_start
-                    self.log(f"🏁 App inicializada en {total_elapsed:.2f}s", "INFO")
-
+                    self.log(f"🏁 App inicializada (parcial) en {total_elapsed:.2f}s", "INFO")
                 return
 
-            self.show_settings()
-        except Exception as e:
+            self.root.after(0, self.show_settings)
+        except Exception:
             self.audit_log.log_event(
                 "AUTO_CONNECT_FAILED",
                 os.getlogin(),
                 "FAILED",
                 ErrorCode.DB_CONNECTION_FAILED
             )
-            self.show_settings()
+            self.root.after(0, self.show_settings)
 
 
 
@@ -3673,6 +3801,20 @@ class DatabaseApp:
         self.api_status = ttk.Label(status_frame, text="API: Inactiva", foreground="orange")
         self.api_status.pack(side=tk.LEFT)
         
+        # Menú de usuario (Cerrar sesión, Configuración solo para admin)
+        self.user_menu = ttk.Menubutton(status_frame, text="Usuario")
+        user_menu_popup = tk.Menu(self.user_menu, tearoff=0)
+        user_menu_popup.add_command(label="Cerrar sesión", command=self.logout)
+        
+        # Agregar opción de configuración solo si el usuario actual es admin
+        is_admin = self.current_user and self.current_user.get('username', '').lower() == 'admin'
+        if is_admin:
+            user_menu_popup.add_separator()
+            user_menu_popup.add_command(label="⚙️ Configuración Avanzada", command=self.show_settings)
+        
+        self.user_menu['menu'] = user_menu_popup
+        self.user_menu.pack(side=tk.RIGHT, padx=10)
+
         # Barra de progreso global
         self.global_progress = ttk.Progressbar(
         status_frame, 
@@ -3718,30 +3860,10 @@ class DatabaseApp:
         notebook.add(api_frame, text="API WhatsApp")
         self.create_api_tab(api_frame)
     
+        # Pestaña de Módulos: gestionar usuarios y privilegios
         modules_frame = ttk.Frame(notebook)
-        notebook.add(modules_frame, text="Módulos")
-
-        self.mod_vars = {}
-        for idx, (key, label) in enumerate([
-            ("envio_mensajes", "Envío de Mensajes"),
-            ("estadisticas",   "Estadísticas"),
-            ("calendario",     "Calendario"),
-            ("stock",          "Alertas Stock"),
-            ("tra",          "T.R.A"),
-            ("pilot_ui",      "🚀 Piloto UI Moderna"),
-            ("mbrp",          "MBRP - Baja Rotación")
-        ]):
-            var = tk.BooleanVar(value=self.modules_enabled.get(key, False))
-            cb  = ttk.Checkbutton(modules_frame, text=label, variable=var)
-            cb.grid(row=idx, column=0, sticky="w", padx=10, pady=5)
-            self.mod_vars[key] = var
-
-        # Botón para guardar módulos
-        ttk.Button(
-            modules_frame,
-            text="Guardar Módulos",
-            command=self._save_modules_config
-        ).grid(row=len(self.mod_vars), column=0, sticky="e", pady=10, padx=10)
+        notebook.add(modules_frame, text="Gestión de Usuarios")
+        self._create_user_management_tab(modules_frame)
 
         # Pestaña de Depuración
         debug_frame = ttk.Frame(notebook)
@@ -3765,14 +3887,363 @@ class DatabaseApp:
             command=self._save_debug_config
         ).grid(row=4, column=0, sticky="e", pady=10, padx=10)
 
-    def _save_modules_config(self):
+    def _create_user_management_tab(self, parent):
+        """Pestaña para gestionar usuarios y sus módulos (sólo admin)."""
+        frame = ttk.Frame(parent, padding=15)
+        frame.pack(fill=tk.BOTH, expand=True)
+        
+        is_admin = self.current_user and self.current_user.get('username', '').lower() == 'admin'
+        
+        if not is_admin:
+            ttk.Label(frame, text="Solo el administrador puede gestionar usuarios y módulos.", foreground="orange").pack(pady=20)
+            return
+        
+        ttk.Label(frame, text="Gestionar módulos de usuarios", font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=10)
+        
+        # Selector de usuario
+        sel_frame = ttk.Frame(frame)
+        sel_frame.pack(fill=tk.X, padx=5, pady=10)
+        ttk.Label(sel_frame, text="Seleccionar usuario:").pack(side=tk.LEFT, padx=5)
+        
         try:
-            mods = {k: v.get() for k, v in self.mod_vars.items()}
-            save_modules_config(mods)
-            self.modules_enabled = mods
-            self.log("Configuración de módulos guardada", "SUCCESS")
+            rows = self.db_manager.fetch_data("SELECT id, username FROM pal_usuarios WHERE activo = 1 ORDER BY username")
+            self.usuarios_list = [(int(r[0]), str(r[1])) for r in (rows or [])]
+        except Exception:
+            self.usuarios_list = []
+        
+        self.user_combo = ttk.Combobox(sel_frame, values=[u[1] for u in self.usuarios_list], state="readonly", width=25)
+        self.user_combo.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        if self.usuarios_list:
+            self.user_combo.current(0)
+            self.user_combo.bind("<<ComboboxSelected>>", lambda e: self._refresh_modules_list())
+        
+        # Frame para módulos
+        modules_frame = ttk.LabelFrame(frame, text="Módulos habilitados", padding=10)
+        modules_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=10)
+        
+        self.user_mod_vars = {}
+        for idx, modulo_db in enumerate(sorted(DB_MODULE_TO_FLAG.keys())):
+            var = tk.BooleanVar(value=False)
+            cb = ttk.Checkbutton(modules_frame, text=f"{modulo_db}", variable=var)
+            cb.grid(row=idx, column=0, sticky="w", padx=10, pady=5)
+            self.user_mod_vars[modulo_db] = var
+        
+        # Botones de acción
+        btn_frame = ttk.Frame(frame)
+        btn_frame.pack(fill=tk.X, padx=5, pady=10)
+        ttk.Button(btn_frame, text="Guardar Módulos", command=self._save_user_modules_admin).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Recargar", command=self._refresh_modules_list).pack(side=tk.LEFT, padx=5)
+        
+        # Cargar módulos del primer usuario
+        if self.usuarios_list:
+            self._refresh_modules_list()
+    
+    def _refresh_modules_list(self):
+        """Recarga los módulos del usuario seleccionado desde la BD."""
+        try:
+            sel_username = self.user_combo.get()
+            user_id = next((u[0] for u in self.usuarios_list if u[1] == sel_username), None)
+            if not user_id:
+                return
+            
+            # Obtener módulos habilitados del usuario
+            rows = self.db_manager.fetch_data(
+                "SELECT modulo FROM pal_usuarios_modulos WHERE usuario_id = ? AND habilitado = 1",
+                (user_id,)
+            )
+            enabled = {str(r[0]) for r in (rows or [])}
+            
+            # Actualizar checkboxes
+            for modulo_db, var in self.user_mod_vars.items():
+                var.set(modulo_db in enabled)
         except Exception as e:
+            self.log(f"Error recargando módulos: {e}", "WARNING")
+    
+    def _save_user_modules_admin(self):
+        """Guarda los módulos del usuario seleccionado en la BD."""
+        try:
+            sel_username = self.user_combo.get()
+            user_id = next((u[0] for u in self.usuarios_list if u[1] == sel_username), None)
+            if not user_id:
+                messagebox.showwarning("Error", "Selecciona un usuario")
+                return
+            
+            # Guardar cada módulo
+            for modulo_db, var in self.user_mod_vars.items():
+                habilitado = 1 if var.get() else 0
+                # Upsert
+                self.db_manager.execute_query(
+                    """
+                    IF NOT EXISTS (SELECT 1 FROM pal_usuarios_modulos WHERE usuario_id = ? AND modulo = ?)
+                        INSERT INTO pal_usuarios_modulos (usuario_id, modulo, habilitado) VALUES (?, ?, ?)
+                    ELSE
+                        UPDATE pal_usuarios_modulos SET habilitado = ? WHERE usuario_id = ? AND modulo = ?
+                    """,
+                    (user_id, modulo_db, user_id, modulo_db, habilitado, habilitado, user_id, modulo_db)
+                )
+            
+            messagebox.showinfo("Listo", f"Módulos de '{sel_username}' guardados")
+            self.log(f"Módulos de '{sel_username}' actualizados", "SUCCESS")
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo guardar: {e}")
             self.log(f"Error guardando módulos: {e}", "ERROR")
+    
+    def _create_admin_users_tab(self, parent):
+        """Pestaña de administración de usuarios con crear/editar/eliminar."""
+        main_frame = ttk.Frame(parent, padding=10)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Secciones: Left (listado) y Right (formulario)
+        left_frame = ttk.Frame(main_frame)
+        left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 10))
+        
+        right_frame = ttk.Frame(main_frame)
+        right_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+        
+        # LEFT: Listado de usuarios
+        ttk.Label(left_frame, text="Usuarios del Sistema", font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=5)
+        
+        # Treeview con usuarios
+        tree_frame = ttk.Frame(left_frame)
+        tree_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+        
+        scrollbar = ttk.Scrollbar(tree_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        self.admin_users_tree = ttk.Treeview(
+            tree_frame,
+            columns=("id", "username", "nombre", "activo"),
+            height=12,
+            yscrollcommand=scrollbar.set
+        )
+        scrollbar.config(command=self.admin_users_tree.yview)
+        
+        self.admin_users_tree.column("#0", width=0)
+        self.admin_users_tree.column("id", width=30)
+        self.admin_users_tree.column("username", width=100)
+        self.admin_users_tree.column("nombre", width=150)
+        self.admin_users_tree.column("activo", width=60)
+        
+        self.admin_users_tree.heading("#0", text="")
+        self.admin_users_tree.heading("id", text="ID")
+        self.admin_users_tree.heading("username", text="Usuario")
+        self.admin_users_tree.heading("nombre", text="Nombre Completo")
+        self.admin_users_tree.heading("activo", text="Activo")
+        
+        self.admin_users_tree.pack(fill=tk.BOTH, expand=True)
+        self.admin_users_tree.bind("<<TreeviewSelect>>", lambda e: self._load_user_details())
+        
+        # Botones de acción
+        btn_frame = ttk.Frame(left_frame)
+        btn_frame.pack(fill=tk.X, pady=10)
+        ttk.Button(btn_frame, text="Recargar", command=self._reload_users_list).pack(side=tk.LEFT, padx=5)
+        
+        # RIGHT: Formulario de usuario
+        ttk.Label(right_frame, text="Detalles del Usuario", font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=5)
+        
+        form_frame = ttk.LabelFrame(right_frame, text="Información", padding=10)
+        form_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+        
+        ttk.Label(form_frame, text="Usuario:").grid(row=0, column=0, sticky="w", padx=5, pady=5)
+        self.admin_user_username = ttk.Entry(form_frame, width=25)
+        self.admin_user_username.grid(row=0, column=1, sticky="ew", padx=5, pady=5)
+        
+        ttk.Label(form_frame, text="Nombre Completo:").grid(row=1, column=0, sticky="w", padx=5, pady=5)
+        self.admin_user_nombre = ttk.Entry(form_frame, width=25)
+        self.admin_user_nombre.grid(row=1, column=1, sticky="ew", padx=5, pady=5)
+        
+        ttk.Label(form_frame, text="Email:").grid(row=2, column=0, sticky="w", padx=5, pady=5)
+        self.admin_user_email = ttk.Entry(form_frame, width=25)
+        self.admin_user_email.grid(row=2, column=1, sticky="ew", padx=5, pady=5)
+        
+        ttk.Label(form_frame, text="Contraseña:").grid(row=3, column=0, sticky="w", padx=5, pady=5)
+        self.admin_user_password = ttk.Entry(form_frame, width=25, show="*")
+        self.admin_user_password.grid(row=3, column=1, sticky="ew", padx=5, pady=5)
+        
+        ttk.Label(form_frame, text="(dejar en blanco para no cambiar)", foreground="gray").grid(row=4, column=1, sticky="w", padx=5)
+        
+        ttk.Label(form_frame, text="Activo:").grid(row=5, column=0, sticky="w", padx=5, pady=5)
+        self.admin_user_activo = tk.BooleanVar(value=True)
+        ttk.Checkbutton(form_frame, variable=self.admin_user_activo).grid(row=5, column=1, sticky="w", padx=5, pady=5)
+        
+        form_frame.columnconfigure(1, weight=1)
+        
+        # Módulos
+        modules_frame = ttk.LabelFrame(right_frame, text="Módulos Habilitados", padding=10)
+        modules_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+        
+        self.admin_user_mod_vars = {}
+        for idx, modulo_db in enumerate(sorted(DB_MODULE_TO_FLAG.keys())):
+            var = tk.BooleanVar(value=False)
+            cb = ttk.Checkbutton(modules_frame, text=modulo_db, variable=var)
+            cb.grid(row=idx, column=0, sticky="w", padx=5, pady=2)
+            self.admin_user_mod_vars[modulo_db] = var
+        
+        # Botones de acción
+        action_frame = ttk.Frame(right_frame)
+        action_frame.pack(fill=tk.X, pady=10)
+        
+        ttk.Button(action_frame, text="Nuevo Usuario", command=self._new_admin_user).pack(side=tk.LEFT, padx=5)
+        ttk.Button(action_frame, text="Guardar", command=self._save_admin_user).pack(side=tk.LEFT, padx=5)
+        ttk.Button(action_frame, text="Eliminar", command=self._delete_admin_user).pack(side=tk.LEFT, padx=5)
+        
+        # Cargar lista inicial
+        self._reload_users_list()
+    
+    def _reload_users_list(self):
+        """Recarga la lista de usuarios desde la BD."""
+        try:
+            self.admin_users_tree.delete(*self.admin_users_tree.get_children())
+            rows = self.db_manager.fetch_data("SELECT id, username, nombre_completo, activo FROM pal_usuarios ORDER BY username")
+            for r in (rows or []):
+                user_id, username, nombre, activo = r
+                activo_str = "✓" if activo else "❌"
+                self.admin_users_tree.insert("", tk.END, values=(user_id, username, nombre, activo_str))
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo cargar usuarios: {e}")
+    
+    def _load_user_details(self):
+        """Carga detalles del usuario seleccionado en el formulario."""
+        try:
+            sel = self.admin_users_tree.selection()
+            if not sel:
+                self._clear_user_form()
+                return
+            
+            item = sel[0]
+            values = self.admin_users_tree.item(item, "values")
+            user_id = int(values[0])
+            
+            # Obtener datos del usuario
+            rows = self.db_manager.fetch_data(
+                "SELECT username, nombre_completo, email, activo FROM pal_usuarios WHERE id = ?",
+                (user_id,)
+            )
+            if rows:
+                username, nombre, email, activo = rows[0]
+                self.admin_user_username.delete(0, tk.END)
+                self.admin_user_username.insert(0, username)
+                self.admin_user_nombre.delete(0, tk.END)
+                self.admin_user_nombre.insert(0, nombre or "")
+                self.admin_user_email.delete(0, tk.END)
+                self.admin_user_email.insert(0, email or "")
+                self.admin_user_password.delete(0, tk.END)  # No cargar password
+                self.admin_user_activo.set(bool(activo))
+                
+                # Cargar módulos
+                mod_rows = self.db_manager.fetch_data(
+                    "SELECT modulo FROM pal_usuarios_modulos WHERE usuario_id = ? AND habilitado = 1",
+                    (user_id,)
+                )
+                enabled_mods = {str(r[0]) for r in (mod_rows or [])}
+                for modulo_db, var in self.admin_user_mod_vars.items():
+                    var.set(modulo_db in enabled_mods)
+                
+                self.current_admin_user_id = user_id
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo cargar detalles: {e}")
+    
+    def _clear_user_form(self):
+        """Limpia el formulario de usuario."""
+        self.admin_user_username.delete(0, tk.END)
+        self.admin_user_nombre.delete(0, tk.END)
+        self.admin_user_email.delete(0, tk.END)
+        self.admin_user_password.delete(0, tk.END)
+        self.admin_user_activo.set(True)
+        for var in self.admin_user_mod_vars.values():
+            var.set(False)
+        self.current_admin_user_id = None
+    
+    def _new_admin_user(self):
+        """Prepara formulario para crear nuevo usuario."""
+        self._clear_user_form()
+        self.admin_users_tree.selection_remove(self.admin_users_tree.selection())
+        self.admin_user_username.focus()
+    
+    def _save_admin_user(self):
+        """Guarda o crea usuario según lo indicado en el formulario."""
+        try:
+            username = self.admin_user_username.get().strip()
+            nombre = self.admin_user_nombre.get().strip()
+            email = self.admin_user_email.get().strip() or None
+            password = self.admin_user_password.get().strip()
+            activo = 1 if self.admin_user_activo.get() else 0
+            
+            if not username or not nombre:
+                messagebox.showwarning("Error", "Usuario y nombre son obligatorios")
+                return
+            
+            is_new = not hasattr(self, 'current_admin_user_id') or self.current_admin_user_id is None
+            
+            if is_new:
+                # Crear nuevo usuario
+                if not password:
+                    messagebox.showwarning("Error", "La contraseña es obligatoria para nuevos usuarios")
+                    return
+                from pal.core.user_management import UserManager
+                um = UserManager(self.db_manager)
+                user_id = um.crear_usuario(username, password, nombre, email)
+                messagebox.showinfo("Listo", f"Usuario '{username}' creado exitosamente")
+            else:
+                # Actualizar usuario existente
+                user_id = self.current_admin_user_id
+                self.db_manager.execute_query(
+                    "UPDATE pal_usuarios SET nombre_completo = ?, email = ?, activo = ? WHERE id = ?",
+                    (nombre, email, activo, user_id)
+                )
+                if password:
+                    # Actualizar contraseña
+                    salt = bcrypt.gensalt(rounds=12)
+                    pwd_hash = bcrypt.hashpw(password.encode('utf-8'), salt).decode('utf-8')
+                    self.db_manager.execute_query(
+                        "UPDATE pal_usuarios SET password_hash = ? WHERE id = ?",
+                        (pwd_hash, user_id)
+                    )
+                messagebox.showinfo("Listo", f"Usuario '{username}' actualizado exitosamente")
+            
+            # Guardar módulos
+            for modulo_db, var in self.admin_user_mod_vars.items():
+                habilitado = 1 if var.get() else 0
+                self.db_manager.execute_query(
+                    """
+                    IF NOT EXISTS (SELECT 1 FROM pal_usuarios_modulos WHERE usuario_id = ? AND modulo = ?)
+                        INSERT INTO pal_usuarios_modulos (usuario_id, modulo, habilitado) VALUES (?, ?, ?)
+                    ELSE
+                        UPDATE pal_usuarios_modulos SET habilitado = ? WHERE usuario_id = ? AND modulo = ?
+                    """,
+                    (user_id, modulo_db, user_id, modulo_db, habilitado, habilitado, user_id, modulo_db)
+                )
+            
+            self.log(f"Usuario '{username}' guardado", "SUCCESS")
+            self._reload_users_list()
+            self._clear_user_form()
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo guardar usuario: {e}")
+            self.log(f"Error guardando usuario: {e}", "ERROR")
+    
+    def _delete_admin_user(self):
+        """Elimina (desactiva) el usuario seleccionado."""
+        try:
+            if not hasattr(self, 'current_admin_user_id') or self.current_admin_user_id is None:
+                messagebox.showwarning("Error", "Selecciona un usuario para eliminar")
+                return
+            
+            username = self.admin_user_username.get()
+            if messagebox.askyesno("Confirmar", f"¿Desactivar usuario '{username}'?"):
+                self.db_manager.execute_query(
+                    "UPDATE pal_usuarios SET activo = 0 WHERE id = ?",
+                    (self.current_admin_user_id,)
+                )
+                messagebox.showinfo("Listo", f"Usuario '{username}' desactivado")
+                self.log(f"Usuario '{username}' desactivado", "INFO")
+                self._reload_users_list()
+                self._clear_user_form()
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo desactivar usuario: {e}")
+    
+    def _save_modules_config(self):
+        """Deprecated: módulos ahora se controlan por BD (pal_usuarios_modulos)."""
+        pass
 
     def _save_debug_config(self):
         try:
@@ -3803,6 +4274,67 @@ class DatabaseApp:
         """Alias for connect_db to maintain compatibility"""
         self.show_settings()
 
+    def _require_login(self) -> bool:
+        try:
+            if not self.auth:
+                return False
+            # Mostrar diálogo de login hasta éxito o cancelación
+            from pal.ui.login import LoginDialog
+            dlg = LoginDialog(self.root)
+            self.root.wait_window(dlg.top)
+            if not dlg.result:
+                self.update_status('error', message="Login cancelado")
+                return False
+            username, password = dlg.result
+            resp = self.auth.login(username, password, ip_address=None)
+            if not resp.get('success'):
+                from tkinter import messagebox
+                messagebox.showerror("Login fallido", resp.get('message', 'Error'))
+                return self._require_login()
+            self.session_token = resp['token']
+            self.current_user = resp['user']
+            self.log(f"Sesión iniciada como {self.current_user['username']}", "INFO")
+            return True
+        except Exception as e:
+            from tkinter import messagebox
+            messagebox.showerror("Error", f"Error durante login: {e}")
+            return False
+
+    def _ensure_security_schema_interactive(self):
+        """Verifica tablas pal_* y ofrece crearlas si faltan."""
+        try:
+            missing = []
+            try:
+                missing = self.db_manager.check_security_schema()
+            except Exception as e:
+                self.log(f"No se pudo verificar esquema de seguridad: {e}", "ERROR")
+                return
+
+            if missing:
+                from tkinter import messagebox
+                msg = (
+                    "¡Oh no!\n\n" 
+                    "No existen las tablas necesarias para el funcionamiento normal:\n\n"
+                    + "\n".join(f"• {t}" for t in missing)
+                    + "\n\n¿Quieres crearlas ahora?"
+                )
+                if messagebox.askyesno("Crear tablas necesarias", msg):
+                    try:
+                        self.update_status('action', message="Creando tablas PAL...")
+                        self.db_manager.ensure_security_tables()
+                        self.update_status('connected')
+                        messagebox.showinfo("Listo", "Tablas creadas correctamente.")
+                        self.log("Esquema pal_* creado/actualizado", "SUCCESS")
+                    except Exception as e:
+                        self.update_status('error', message=str(e))
+                        messagebox.showerror(
+                            "Error creando tablas",
+                            f"No se pudieron crear las tablas necesarias.\n\nDetalle: {e}"
+                        )
+                        self.log(f"Error creando esquema pal_*: {e}", "ERROR")
+        except Exception as e:
+            self.log(f"Error en verificación de esquema: {e}", "ERROR")
+
     def connect_db(self):
         try:
             
@@ -3825,6 +4357,12 @@ class DatabaseApp:
             if self.db_manager.connect(server, database, user, password):
                 self.save_connection_settings(server, database, user, token)
                 self.update_status('connected', server=server, api_token=token)
+                # Inicializar auth y verificar/esquema pal_* interactivo
+                self.auth = AuthManager(self.db_manager)
+                self._ensure_security_schema_interactive()
+                # Requerir login
+                if not self._require_login():
+                    return
                 self.settings_window.destroy()
                 self.log("Conexión a BD exitosa", "SUCCESS")
                 self.show_temp_notification("Conexión exitosa")
@@ -3998,6 +4536,216 @@ class DatabaseApp:
                 self.token_entry.insert(0, token)
         except Exception as e:
             self.notification_manager.show_error("Error cargando token")
+
+    def _splash_login_submit(self, username: str, password: str) -> tuple[bool, str]:
+        """
+        Validar credenciales desde el splash screen.
+        Retorna (success: bool, message: str)
+        """
+        try:
+            if not self.auth or not self.db_manager.conn:
+                return False, "Base de datos no conectada"
+            
+            # Validar credenciales
+            resp = self.auth.login(username, password, ip_address=None)
+            if not resp.get('success'):
+                return False, resp.get('message', 'Credenciales inválidas')
+            
+            # Guardar sesión
+            self.session_token = resp['token']
+            self.current_user = resp['user']
+            
+            self.log(f"✅ Sesión iniciada como {username}", "SUCCESS")
+            
+            # Forzar cambio de contraseña si admin usó la predeterminada (en hilo principal)
+            if username.lower() == 'admin' and password == '123':
+                # Programar en hilo principal después de que la UI esté lista
+                self.root.after(500, self._prompt_change_admin_password)
+            
+            # Verificar y crear esquema si es necesario
+            try:
+                missing = self.db_manager.check_security_schema()
+                if missing:
+                    self.db_manager.ensure_security_tables()
+            except Exception as e:
+                self.log(f"Nota: {e}", "INFO")
+            
+            # Cargar permisos del usuario y configurar UI
+            from pal.core.permissions import PermissionsManager
+            self.permissions = PermissionsManager(self.db_manager)
+            user_id = self.current_user['id']
+            db_mods = self.permissions.obtener_modulos_disponibles(user_id) or []
+            
+            # Mapear nombres de BD a flags de app
+            flags_enabled = {DB_MODULE_TO_FLAG[m] for m in db_mods if m in DB_MODULE_TO_FLAG}
+            
+            # Actualizar módulos habilitados según permisos del usuario
+            for flag in ['stock', 'tra', 'mbrp', 'envio_mensajes', 'calendario', 'estadisticas', 'admin']:
+                self.modules_enabled[flag] = flag in flags_enabled
+            
+            self.log(f"Módulos disponibles: {', '.join(db_mods) or 'ninguno'}", "INFO")
+            
+            # Recrear workspace con módulos actualizados (importante para que aparezcan nuevas tabs)
+            try:
+                if hasattr(self, 'main_notebook') and self.main_notebook.winfo_exists():
+                    self.main_notebook.destroy()
+                self.create_main_workspace()
+            except Exception as e:
+                self.log(f"Error recreando workspace: {e}", "WARNING")
+            
+            # Inicializar módulos en segundo plano
+            threading.Thread(target=self._inicializar_modulos_paralelo, daemon=True).start()
+            
+            return True, "Login exitoso"
+            
+        except Exception as e:
+            self.log(f"Error en login: {e}", "ERROR")
+            return False, f"Error: {str(e)[:50]}"
+    
+    def _prompt_change_admin_password(self):
+        """
+        Solicita cambio de contraseña para admin en el hilo principal.
+        Ejecutado mediante root.after() para evitar problemas de threading.
+        """
+        try:
+            while True:
+                p1 = simpledialog.askstring(
+                    "Cambiar contraseña", 
+                    "Nueva contraseña para admin (dejado en blanco cancela):", 
+                    show='*', 
+                    parent=self.root
+                )
+                if p1 is None or p1 == '':
+                    self.log("Cambio de contraseña cancelado", "INFO")
+                    return
+                
+                p2 = simpledialog.askstring(
+                    "Cambiar contraseña", 
+                    "Confirmar contraseña:", 
+                    show='*', 
+                    parent=self.root
+                )
+                if p2 is None or p2 == '':
+                    self.log("Cambio de contraseña cancelado", "INFO")
+                    return
+                
+                if p1 != p2:
+                    messagebox.showerror("Error", "Las contraseñas no coinciden. Intente nuevamente.")
+                    continue
+                
+                if len(p1) < 4:
+                    messagebox.showerror("Error", "La contraseña debe tener al menos 4 caracteres")
+                    continue
+                
+                # Intentar actualizar contraseña
+                if self.auth and self.current_user:
+                    ok = self.auth.cambiar_password(self.current_user['id'], '123', p1)
+                    if ok:
+                        messagebox.showinfo("Éxito", "Contraseña actualizada exitosamente")
+                        self.log("✅ Contraseña admin actualizada", "SUCCESS")
+                        return
+                    else:
+                        messagebox.showerror("Error", "No se pudo actualizar la contraseña. Intente nuevamente.")
+                        continue
+                else:
+                    messagebox.showerror("Error", "Sistema no listo para cambiar contraseña")
+                    return
+                    
+        except Exception as e:
+            self.log(f"Error en cambio de contraseña: {e}", "ERROR")
+            messagebox.showerror("Error", f"Error al cambiar contraseña: {str(e)[:100]}")
+    
+    def _inicializar_modulos_paralelo(self):
+        """
+        Carga los módulos habilitados en segundo plano después del login.
+        Se ejecuta en thread daemon para no bloquear la UI.
+        """
+        try:
+            # Stock
+            if self.modules_enabled.get("stock", False):
+                self.log("📦 Inicializando Stock...", "INFO")
+                self.root.after(100, lambda: self.actualizar_alertas_stock(force_refresh=True))
+            
+            # TRA
+            if self.modules_enabled.get("tra", False):
+                self.log("📈 Inicializando TRA...", "INFO")
+                # Se cargarán bajo demanda en la pestaña
+            
+            # MBRP
+            if self.modules_enabled.get("mbrp", False):
+                self.log("📉 Inicializando MBRP...", "INFO")
+                # Se cargarán bajo demanda en la pestaña
+            
+            # Habilitar UI dependiente
+            self.root.after(200, lambda: self._set_ui_connected(True))
+            self.log("✅ Módulos inicializados", "SUCCESS")
+            
+        except Exception as e:
+            self.log(f"Error inicializando módulos: {e}", "ERROR")
+    
+    def logout(self):
+        """Cierra la sesión actual y muestra pantalla de login."""
+        try:
+            # Cerrar sesión en BD
+            if self.auth and self.session_token:
+                self.auth.logout(self.session_token)
+            
+            self.session_token = None
+            self.current_user = None
+            self.permissions = None
+            
+            self.log("Sesión cerrada", "INFO")
+            
+            # Ocultar ventana principal
+            self.root.withdraw()
+            
+            # Crear pantalla de login similar al splash
+            self._show_login_screen()
+            
+        except Exception as e:
+            from tkinter import messagebox
+            self.log(f"Error durante logout: {e}", "ERROR")
+            messagebox.showerror("Error", f"No se pudo cerrar sesión: {e}")
+            self.root.deiconify()  # Mostrar ventana de nuevo en caso de error
+    
+    def _show_login_screen(self):
+        """Muestra una pantalla de login independiente después de logout."""
+        from pal.ui.splash import SplashScreen
+        
+        # Crear splash de login
+        login_splash = SplashScreen(self.root)
+        login_splash.title("Iniciar Sesión")
+        
+        # Configurar como pantalla de login (sin progreso ni loops)
+        login_splash.progress.pack_forget()  # Ocultar barra de progreso
+        login_splash.progress_value = 100  # Evitar que la animación se reinicie
+        
+        # Resetear eventos para que NO se cierre automáticamente
+        login_splash.minimum_time_elapsed.clear()
+        login_splash.app_initialized.clear()
+        login_splash.login_success.clear()
+        
+        # Habilitar login inmediatamente
+        def _handle_login(username, password):
+            success, message = self._splash_login_submit(username, password)
+            if success:
+                # Marcar login exitoso y cerrar
+                login_splash.login_success.set()
+                login_splash.after(100, lambda: [
+                    login_splash.destroy(),
+                    self.root.deiconify()
+                ])
+            return success, message
+        
+        login_splash.enable_login(_handle_login)
+        
+        # Esperar cierre del splash
+        self.root.wait_window(login_splash)
+        
+        # Si el usuario cerró la ventana sin hacer login, cerrar app
+        if not self.current_user:
+            self.log("Login cancelado - cerrando aplicación", "INFO")
+            self.root.quit()
 
     class NotificationManager:
         def __init__(self, root):
@@ -4191,7 +4939,7 @@ class DatabaseApp:
 
         try:
             self.db_manager.execute_query(
-                "INSERT INTO clientes (numero_cliente, C_CODIGO) VALUES (?, ?)",
+                "INSERT INTO pal_clientes (numero_cliente, C_CODIGO) VALUES (?, ?)",
                 (self.num_cliente.get(), self.cod_producto.get())
             )
             
@@ -4217,7 +4965,7 @@ class DatabaseApp:
             num = self.num_cliente.get().strip()
             cod = self.cod_producto.get().strip()
 
-            query = "SELECT id, numero_cliente, C_CODIGO FROM clientes"
+            query = "SELECT id, numero_cliente, C_CODIGO FROM pal_clientes"
             conditions = []
             params = []
             
@@ -4248,7 +4996,7 @@ class DatabaseApp:
             
     
         try:
-            records = self.db_manager.fetch_data("SELECT numero_cliente, C_CODIGO FROM clientes")
+            records = self.db_manager.fetch_data("SELECT numero_cliente, C_CODIGO FROM pal_clientes")
             
             # Agrupar clientes
             clientes_con_error = set()
@@ -4697,7 +5445,7 @@ class DatabaseApp:
                 # Restablecer el estado a 'Conectado' después de 3 segundos
                 self.root.after(3000, lambda: self.update_status('connected'))
 
-                self.db_manager.execute_query("DELETE FROM clientes WHERE id = ?", (record_id,))
+                self.db_manager.execute_query("DELETE FROM pal_clientes WHERE id = ?", (record_id,))
                 self.update_status('action', message="Registro eliminado")
                 self.search_records()
                 self.clear_inputs() 
@@ -4744,7 +5492,7 @@ class DatabaseApp:
         
 
             self.db_manager.execute_query(
-                "UPDATE clientes SET numero_cliente = ?, C_CODIGO = ? WHERE id = ?",
+                "UPDATE pal_clientes SET numero_cliente = ?, C_CODIGO = ? WHERE id = ?",
                 (self.num_cliente.get(), self.cod_producto.get(), record_id)
             )
             self.update_status('action', message="Registro actualizado")
@@ -4858,7 +5606,7 @@ class DatabaseApp:
             descripcion = result_descripcion[0][0]
     
             # Consultar número de cliente
-            query_numero_cliente = "SELECT numero_cliente FROM clientes WHERE C_CODIGO = ?"
+            query_numero_cliente = "SELECT numero_cliente FROM pal_clientes WHERE C_CODIGO = ?"
             result_numero_cliente = self.db_manager.fetch_data(query_numero_cliente, (clean_codigo,))
             if not result_numero_cliente:
                 messagebox.showinfo("Error", "Número de cliente no encontrado")
@@ -4877,7 +5625,7 @@ class DatabaseApp:
         try:
             # 1. Obtener datos extendidos del envío
             envio_data = self.db_manager.fetch_data(
-                "SELECT tipo_envio, codigo_producto FROM envios_programados WHERE id = ?", 
+                "SELECT tipo_envio, codigo_producto FROM pal_envios_programados WHERE id = ?", 
                 (id_envio,)
             )
             
@@ -4920,7 +5668,7 @@ class DatabaseApp:
                 tipo_envio=tipo_envio
             ):
                 self.db_manager.execute_query(
-                    "UPDATE envios_programados SET estado = 'ENVIADO' WHERE id = ?",
+                    "UPDATE pal_envios_programados SET estado = 'ENVIADO' WHERE id = ?",
                     (id_envio,)
                 )
                 return True
@@ -4945,8 +5693,8 @@ class DatabaseApp:
             if self.actual == 0:
                 # Crear tabla temporal si no existe
                 self.db_manager.execute_query("""
-                IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'TEMP_ENVIO')
-                CREATE TABLE TEMP_ENVIO (
+                IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'pal_temp_envio')
+                CREATE TABLE pal_temp_envio (
                     numero_cliente NVARCHAR(50),
                     codigo_producto NVARCHAR(15),  -- Nuevo campo
                     descripcion NVARCHAR(255),
@@ -4968,7 +5716,7 @@ class DatabaseApp:
                             )
                             if desc_result:
                                 self.db_manager.execute_query(
-                                    "INSERT INTO TEMP_ENVIO (numero_cliente, descripcion) VALUES (?, ?)",
+                                    "INSERT INTO pal_temp_envio (numero_cliente, descripcion) VALUES (?, ?)",
                                     (numero, desc_result[0][0])
                                 )
         finally:
@@ -4983,7 +5731,7 @@ class DatabaseApp:
     
         # Obtener todos los productos del cliente desde la tabla temporal
         productos_result = self.db_manager.fetch_data(
-            "SELECT descripcion FROM TEMP_ENVIO WHERE numero_cliente = ?", (numero,)
+            "SELECT descripcion FROM pal_temp_envio WHERE numero_cliente = ?", (numero,)
         )
         productos = [row[0] for row in productos_result]
     
@@ -4997,7 +5745,7 @@ class DatabaseApp:
             mensaje_estado = f"Omitido {self.actual + 1}/{self.total} | Sin stock: {numero}"
     
         # Eliminar los productos del cliente de la tabla temporal después de enviar el mensaje
-        self.db_manager.execute_query("DELETE FROM TEMP_ENVIO WHERE numero_cliente = ?", (numero,))
+        self.db_manager.execute_query("DELETE FROM pal_temp_envio WHERE numero_cliente = ?", (numero,))
     
         # Actualizar progreso
         self.actual += 1

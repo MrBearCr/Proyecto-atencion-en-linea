@@ -6,3 +6,4 @@ requests
 matplotlib
 win10toast
 Pillow
+bcrypt

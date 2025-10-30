@@ -18,7 +18,8 @@ def setup_calendar_tab(app):
         year=datetime.now().year,
         month=datetime.now().month,
         day=datetime.now().day,
-        date_pattern='y-mm-dd'
+        date_pattern='y-mm-dd',
+        showothermonthdays=False  # Evita clics en días fuera del mes actual (p. ej., 31 en noviembre)
     )
     app.cal.pack(fill=tk.BOTH, expand=True, pady=10)
 

@@ -29,6 +29,13 @@ def setup_records_tab(app):
     app.cod_producto = ttk.Entry(input_frame)
     app.cod_producto.pack(side=tk.RIGHT, expand=True, fill=tk.X)
     
+    # Trigger para buscar descripción al escribir o salir del campo
+    try:
+        app.cod_producto.bind('<KeyRelease>', lambda e: getattr(app, 'buscar_descripcion', lambda: None)() or 0)
+        app.cod_producto.bind('<FocusOut>', lambda e: getattr(app, 'buscar_descripcion', lambda: None)() or 0)
+    except Exception:
+        pass
+    
     # Descripción
     app.descripcion = ttk.Entry(form_frame, state="readonly")
     app.descripcion.pack(fill=tk.X, pady=5)
@@ -75,6 +82,11 @@ def setup_records_tab(app):
     tree_frame.pack(fill=tk.BOTH, expand=True)
     
     app.tree = ttk.Treeview(tree_frame, columns=("ID", "Número", "Código"), show="headings")
+    app.tree.configure(selectmode='browse')
+    try:
+        app.tree.configure(takefocus=True)
+    except Exception:
+        pass
     vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=app.tree.yview)
     app.tree.configure(yscrollcommand=vsb.set)
     
@@ -90,3 +102,18 @@ def setup_records_tab(app):
     # Layout
     app.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
     vsb.pack(side=tk.RIGHT, fill=tk.Y)
+
+    # Selección con un click (para facilitar eliminar/actualizar)
+    try:
+        app.tree.bind('<Button-1>', lambda e: getattr(app, '_records_on_click', lambda _e=None: 0)(e) or 0)
+        app.tree.bind('<<TreeviewSelect>>', lambda e: 0)
+        app.tree.bind('<Double-1>', lambda e: getattr(app, 'on_tree_double_click', lambda _e=None: 0)(e) or 0)
+    except Exception:
+        pass
+
+    # Cargar datos iniciales si existe el método
+    try:
+        if hasattr(app, 'search_records'):
+            app.search_records()
+    except Exception:
+        pass

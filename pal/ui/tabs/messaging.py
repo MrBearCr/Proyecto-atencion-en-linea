@@ -50,6 +50,9 @@ def setup_messaging_tab(app):
     programar_frame = ttk.Frame(frame)
     programar_frame.pack(fill=tk.X, pady=10)
 
-    ttk.Button(programar_frame, 
+    btn_prog = ttk.Button(programar_frame, 
                 text="⏰ Programar Envío", 
-                command=lambda: getattr(app, 'mostrar_ventana_programacion', lambda: None)()).pack(side=tk.LEFT)
+                command=lambda: getattr(app, 'mostrar_ventana_programacion', lambda: None)())
+    btn_prog.pack(side=tk.LEFT)
+    if hasattr(app, 'buttons'):
+        app.buttons['btn_programar_envio'] = btn_prog

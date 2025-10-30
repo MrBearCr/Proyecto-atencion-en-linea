@@ -17,6 +17,13 @@ class SplashScreen(tk.Toplevel):
         self.configure(bg="#000000")
         self.overrideredirect(True)
         
+        # Barra superior personalizada con botón de cierre
+        self.topbar = tk.Frame(self, bg="#111111", height=32)
+        self.topbar.pack(fill="x", side="top")
+        self.close_btn = tk.Label(self.topbar, text="✕", fg="white", bg="#111111", cursor="hand2", font=("Segoe UI", 12, "bold"))
+        self.close_btn.pack(side="right", padx=8, pady=4)
+        self.close_btn.bind("<Button-1>", lambda e: self._on_close())
+        
         # Centrar en pantalla
         screen_width = self.winfo_screenwidth()
         screen_height = self.winfo_screenheight()
@@ -56,16 +63,22 @@ class SplashScreen(tk.Toplevel):
         ttk.Label(self.login_frame, text="Usuario:").grid(row=row, column=0, sticky="e", padx=8, pady=6)
         self.username = ttk.Entry(self.login_frame)
         self.username.grid(row=row, column=1, sticky="ew", pady=6)
+        # Enter en usuario -> pasa a contraseña
+        self.username.bind("<Return>", self._username_enter)
         row += 1
         ttk.Label(self.login_frame, text="Contraseña:").grid(row=row, column=0, sticky="e", padx=8, pady=6)
         self.password = ttk.Entry(self.login_frame, show="*")
         self.password.grid(row=row, column=1, sticky="ew", pady=6)
+        # Enter en contraseña -> invoca login
+        self.password.bind("<Return>", self._password_enter)
         row += 1
         self.btn_login = ttk.Button(self.login_frame, text="Entrar", command=self._on_login_click, state=tk.DISABLED)
         self.btn_login.grid(row=row, column=1, sticky="e", pady=10)
         row += 1
         self.login_status = ttk.Label(self.login_frame, text="Esperando conexión...", foreground="#888")
         self.login_status.grid(row=row, column=0, columnspan=2, sticky="w", padx=8)
+        # Enter global -> si el foco no está en usuario/clave, enfocar usuario
+        self.bind("<Return>", self._on_enter)
         
         # Variables de control
         self.minimum_time_elapsed = Event()
@@ -113,6 +126,57 @@ class SplashScreen(tk.Toplevel):
         except Exception:
             pass
         self.destroy()
+
+    def _on_close(self):
+        """Cierra el splash y termina la aplicación durante la fase de login."""
+        try:
+            if hasattr(self, 'master') and self.master:
+                # Destruir aplicación completa si se cierra desde el splash
+                self.master.destroy()
+            else:
+                self.destroy()
+        except Exception:
+            try:
+                self.destroy()
+            except Exception:
+                pass
+
+    def _on_enter(self, event=None):
+        """Manejo global de Enter durante el login: enfoca el campo correcto."""
+        try:
+            w = self.focus_get()
+        except Exception:
+            w = None
+        try:
+            if w not in (self.username, self.password):
+                self.username.focus_set()
+                return "break"
+        except Exception:
+            return "break"
+
+    def _username_enter(self, event=None):
+        """Enter en usuario -> pasar a contraseña"""
+        try:
+            self.password.focus_set()
+        except Exception:
+            pass
+        return "break"
+
+    def _password_enter(self, event=None):
+        """Enter en contraseña -> intentar login"""
+        try:
+            # Solo si el botón está habilitado, para evitar dobles envíos
+            if str(self.btn_login['state']) != str(tk.DISABLED):
+                self._on_login_click()
+            else:
+                # Si está deshabilitado, no hacer nada
+                pass
+        except Exception:
+            try:
+                self._on_login_click()
+            except Exception:
+                pass
+        return "break"
 
     def enable_login(self, login_handler):
         """Habilita el panel de login y asigna el handler de verificación."""

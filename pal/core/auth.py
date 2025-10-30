@@ -77,6 +77,17 @@ class AuthManager:
             (username,)
         )
         if not rows:
+            # Registrar intento de login con usuario inexistente
+            try:
+                self.db.execute_query(
+                    """
+                    INSERT INTO pal_auditoria_accesos (usuario_id, accion, modulo, detalle, ip_address, exitoso, fecha)
+                    VALUES (NULL, 'LOGIN_FAILED', 'ADMIN', ?, ?, 0, GETDATE())
+                    """,
+                    (f"Usuario no existe: {username}", ip_address)
+                )
+            except Exception:
+                pass  # Si falla auditoría, continuar
             return {"success": False, "message": "Usuario o contraseña inválidos"}
 
         user_id, pwd_hash, activo, intentos, bloqueado_hasta = rows[0]
@@ -84,9 +95,31 @@ class AuthManager:
 
         # Validaciones de estado
         if not activo:
+            # Registrar intento con usuario inactivo
+            try:
+                self.db.execute_query(
+                    """
+                    INSERT INTO pal_auditoria_accesos (usuario_id, accion, modulo, detalle, ip_address, exitoso, fecha)
+                    VALUES (?, 'LOGIN_FAILED', 'ADMIN', ?, ?, 0, GETDATE())
+                    """,
+                    (user_id, "Usuario inactivo", ip_address)
+                )
+            except Exception:
+                pass
             return {"success": False, "message": "Usuario inactivo"}
         bh = self._to_dt(bloqueado_hasta)
         if bh and ahora < bh:
+            # Registrar intento con usuario bloqueado
+            try:
+                self.db.execute_query(
+                    """
+                    INSERT INTO pal_auditoria_accesos (usuario_id, accion, modulo, detalle, ip_address, exitoso, fecha)
+                    VALUES (?, 'LOGIN_FAILED', 'ADMIN', ?, ?, 0, GETDATE())
+                    """,
+                    (user_id, "Usuario bloqueado temporalmente", ip_address)
+                )
+            except Exception:
+                pass
             return {"success": False, "message": "Usuario bloqueado temporalmente"}
 
         # Validar password
@@ -101,6 +134,17 @@ class AuthManager:
                 "UPDATE pal_usuarios SET intentos_fallidos = ?, bloqueado_hasta = ? WHERE id = ?",
                 (nuevos_intentos, bloqueado, user_id)
             )
+            # Registrar intento fallido
+            try:
+                self.db.execute_query(
+                    """
+                    INSERT INTO pal_auditoria_accesos (usuario_id, accion, modulo, detalle, ip_address, exitoso, fecha)
+                    VALUES (?, 'LOGIN_FAILED', 'ADMIN', ?, ?, 0, GETDATE())
+                    """,
+                    (user_id, f"Intento {nuevos_intentos}/{self.max_intentos}", ip_address)
+                )
+            except Exception:
+                pass
             return {"success": False, "message": "Usuario o contraseña inválidos"}
 
         # Resetear intentos fallidos y actualizar último acceso
@@ -108,6 +152,18 @@ class AuthManager:
             "UPDATE pal_usuarios SET intentos_fallidos = 0, bloqueado_hasta = NULL, fecha_ultimo_acceso = ? WHERE id = ?",
             (ahora, user_id)
         )
+        
+        # Registrar login exitoso
+        try:
+            self.db.execute_query(
+                """
+                INSERT INTO pal_auditoria_accesos (usuario_id, accion, modulo, detalle, ip_address, exitoso, fecha)
+                VALUES (?, 'LOGIN', 'ADMIN', 'Login exitoso', ?, 1, GETDATE())
+                """,
+                (user_id, ip_address)
+            )
+        except Exception:
+            pass
 
         # Crear sesión
         token = self._crear_sesion(user_id, ip_address)
@@ -119,6 +175,27 @@ class AuthManager:
         }
 
     def logout(self, token: str) -> None:
+        """Cierra la sesión y registra el logout en auditoría."""
+        # Obtener info de la sesión
+        try:
+            rows = self.db.fetch_data(
+                "SELECT usuario_id FROM pal_sesiones WHERE token = ?",
+                (token,)
+            )
+            if rows:
+                usuario_id = rows[0][0]
+                # Registrar logout
+                self.db.execute_query(
+                    """
+                    INSERT INTO pal_auditoria_accesos (usuario_id, accion, modulo, detalle, exitoso, fecha)
+                    VALUES (?, 'LOGOUT', 'ADMIN', 'Logout', 1, GETDATE())
+                    """,
+                    (usuario_id,)
+                )
+        except Exception:
+            pass  # Si falla auditoría, continuar
+        
+        # Cerrar sesión
         self._cerrar_sesion_token(token)
 
     def verificar_sesion(self, token: str) -> Optional[Dict[str, Any]]:

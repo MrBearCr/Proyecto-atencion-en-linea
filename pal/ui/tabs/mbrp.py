@@ -54,8 +54,24 @@ def setup_mbrp_tab(app):
     ttk.Button(top_controls, text="Cargar", command=app.cargar_mbrp_base).pack(side=tk.RIGHT, padx=10)
     ttk.Button(top_controls, text="🔄 Actualizar Ventas", 
                command=lambda: getattr(app, 'actualizar_ultimas_ventas_mbrp', lambda: None)()).pack(side=tk.RIGHT, padx=5)
-    ttk.Button(top_controls, text="📈 Exportar Excel", 
-               command=lambda: getattr(app, 'exportar_mbrp_excel', lambda: None)()).pack(side=tk.RIGHT, padx=5)
+
+    can_export_mbrp = False
+    try:
+        if hasattr(app, 'permissions') and app.current_user:
+            can_export_mbrp = app.permissions.tiene_permiso(app.current_user['id'], 'MBRP', 'exportar')
+        if app.current_user and app.current_user.get('username','').lower() == 'admin':
+            can_export_mbrp = True
+    except Exception:
+        can_export_mbrp = False
+    btn_export_mbrp = ttk.Button(top_controls, text="📈 Exportar Excel", 
+               command=lambda: getattr(app, 'exportar_mbrp_excel', lambda: None)())
+    btn_export_mbrp.pack(side=tk.RIGHT, padx=5)
+    if not can_export_mbrp:
+        try:
+            btn_export_mbrp.state(["disabled"])  # ttk style
+        except Exception:
+            btn_export_mbrp.config(state='disabled')
+
     ttk.Button(top_controls, text="📊 Reporte", command=app.generar_reporte_mbrp).pack(side=tk.RIGHT, padx=5)
 
     # Filtros jerárquicos

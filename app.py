@@ -894,20 +894,23 @@ class DatabaseApp:
     def _update_tra_ui_after_chunk(self, total_records, chunk_count, records_per_sec=0):
         """Actualiza UI TRA después de cargar un chunk en segundo plano con estadísticas de rendimiento"""
         try:
+            # Evitar errores si la UI fue destruida/reconstruida
+            if not hasattr(self, 'root') or not self.root.winfo_exists():
+                return
             # Actualizar status con estadísticas de rendimiento
-            if hasattr(self, 'api_status'):
+            if hasattr(self, 'api_status') and self.api_status.winfo_exists():
                 status_text = f"TRA: {total_records} registros"
                 if records_per_sec > 0:
-                    status_text += f" ({records_per_sec:.0f} reg/s)"
-                if chunk_count > 0:
-                    status_text += f" - Chunk {chunk_count}"
-                
-                self.api_status.config(
-                    text=status_text, 
-                    foreground="#004C97"
-                )
+                    status_text += f" | {records_per_sec:.0f} reg/s"
+                self.api_status.config(text=status_text, foreground="#004C97")
             
-            # Reaplicar filtros para mostrar datos actualizados (solo si hay datos significativos)
+            # Actualizar paginación y vista si el tree existe
+            if hasattr(self, 'tra_tree') and self.tra_tree and self.tra_tree.winfo_exists():
+                if hasattr(self, 'tra_pagina_label') and self.tra_pagina_label.winfo_exists():
+                    # Nota: solo actualizar etiqueta; el refresco completo se hace en aplicar_filtro_tra()
+                    self.tra_pagina_label.config(text=f"{total_records} registros")
+        except Exception as e:
+            self.tra_debug_log(f"Error actualizando UI TRA: {e}", level="ERROR")
             if hasattr(self, 'aplicar_filtro_tra') and total_records > 10:
                 self.aplicar_filtro_tra()
             
@@ -1201,6 +1204,24 @@ class DatabaseApp:
         import threading
         
         try:
+            # Permisos: TRA.exportar
+            allowed = False
+            try:
+                if hasattr(self, 'permissions') and self.current_user:
+                    allowed = self.permissions.tiene_permiso(self.current_user['id'], 'TRA', 'exportar')
+                if self.current_user and self.current_user.get('username','').lower() == 'admin':
+                    allowed = True
+            except Exception:
+                allowed = False
+            if not allowed:
+                messagebox.showwarning("Permiso denegado", "No tienes permiso para exportar datos de TRA")
+                try:
+                    if hasattr(self, 'audit_db') and self.current_user:
+                        self.audit_db.log_action(
+                            accion='PERMISSION_DENIED', usuario_id=self.current_user['id'], modulo='TRA', detalle='exportar')
+                except Exception:
+                    pass
+                return
             # Verificar si hay datos para exportar
             if not hasattr(self, 'cached_ventas_tra') or not self.cached_ventas_tra:
                 messagebox.showwarning("Sin datos", "No hay datos TRA cargados para exportar")
@@ -1304,10 +1325,22 @@ class DatabaseApp:
                         "• Hojas incluidas: Datos principales, Resumen por rotación, Productos de baja rotación\n"
                         "• Formato: Tablas con filtros y formato condicional"
                     ))
+                    try:
+                        if hasattr(self, 'audit_db') and self.current_user:
+                            self.audit_db.log_action(
+                                accion='EXPORT', usuario_id=self.current_user['id'], modulo='TRA', detalle=filename, exitoso=True)
+                    except Exception:
+                        pass
                     
                 except Exception as e:
                     # Notificar error en el hilo principal
                     self.root.after(0, lambda err=str(e): self._export_error("TRA", err))
+                    try:
+                        if hasattr(self, 'audit_db') and self.current_user:
+                            self.audit_db.log_action(
+                                accion='EXPORT', usuario_id=self.current_user['id'], modulo='TRA', detalle=str(e), exitoso=False)
+                    except Exception:
+                        pass
             
             # Iniciar exportación en hilo separado
             thread = threading.Thread(target=export_thread, daemon=True, name="ExportTRA")
@@ -1324,6 +1357,24 @@ class DatabaseApp:
         import threading
         
         try:
+            # Permisos: MBRP.exportar
+            allowed = False
+            try:
+                if hasattr(self, 'permissions') and self.current_user:
+                    allowed = self.permissions.tiene_permiso(self.current_user['id'], 'MBRP', 'exportar')
+                if self.current_user and self.current_user.get('username','').lower() == 'admin':
+                    allowed = True
+            except Exception:
+                allowed = False
+            if not allowed:
+                messagebox.showwarning("Permiso denegado", "No tienes permiso para exportar datos de MBRP")
+                try:
+                    if hasattr(self, 'audit_db') and self.current_user:
+                        self.audit_db.log_action(
+                            accion='PERMISSION_DENEGADO', usuario_id=self.current_user['id'], modulo='MBRP', detalle='exportar')
+                except Exception:
+                    pass
+                return
             # Verificar si hay datos para exportar
             if not hasattr(self, 'cached_ventas_mbrp') or not self.cached_ventas_mbrp:
                 messagebox.showwarning("Sin datos", "No hay datos MBRP cargados para exportar")
@@ -1384,10 +1435,22 @@ class DatabaseApp:
                         "• Hojas incluidas: Datos principales, Resumen por rentabilidad, Productos críticos\n"
                         "• Formato: Tablas con filtros y formato condicional por margen"
                     ))
+                    try:
+                        if hasattr(self, 'audit_db') and self.current_user:
+                            self.audit_db.log_action(
+                                accion='EXPORT', usuario_id=self.current_user['id'], modulo='MBRP', detalle=filename, exitoso=True)
+                    except Exception:
+                        pass
                     
                 except Exception as e:
                     # Notificar error en el hilo principal
                     self.root.after(0, lambda err=str(e): self._export_error("MBRP", err))
+                    try:
+                        if hasattr(self, 'audit_db') and self.current_user:
+                            self.audit_db.log_action(
+                                accion='EXPORT', usuario_id=self.current_user['id'], modulo='MBRP', detalle=str(e), exitoso=False)
+                    except Exception:
+                        pass
             
             # Iniciar exportación en hilo separado
             thread = threading.Thread(target=export_thread, daemon=True, name="ExportMBRP")
@@ -1404,6 +1467,24 @@ class DatabaseApp:
         import threading
         
         try:
+            # Permisos: STOCK.exportar
+            allowed = False
+            try:
+                if hasattr(self, 'permissions') and self.current_user:
+                    allowed = self.permissions.tiene_permiso(self.current_user['id'], 'STOCK', 'exportar')
+                if self.current_user and self.current_user.get('username','').lower() == 'admin':
+                    allowed = True
+            except Exception:
+                allowed = False
+            if not allowed:
+                messagebox.showwarning("Permiso denegado", "No tienes permiso para exportar datos de Stock")
+                try:
+                    if hasattr(self, 'audit_db') and self.current_user:
+                        self.audit_db.log_action(
+                            accion='PERMISSION_DENIED', usuario_id=self.current_user['id'], modulo='STOCK', detalle='exportar')
+                except Exception:
+                    pass
+                return
             # Verificar si openpyxl está disponible
             try:
                 import openpyxl
@@ -1512,10 +1593,22 @@ class DatabaseApp:
                         "• Formato condicional por niveles\n"
                         "• Columnas auto-ajustadas"
                     ))
+                    try:
+                        if hasattr(self, 'audit_db') and self.current_user:
+                            self.audit_db.log_action(
+                                accion='EXPORT', usuario_id=self.current_user['id'], modulo='STOCK', detalle=filename, exitoso=True)
+                    except Exception:
+                        pass
                     
                 except Exception as e:
                     # Notificar error en el hilo principal
                     self.root.after(0, lambda err=str(e): self._export_error("Stock", err))
+                    try:
+                        if hasattr(self, 'audit_db') and self.current_user:
+                            self.audit_db.log_action(
+                                accion='EXPORT', usuario_id=self.current_user['id'], modulo='STOCK', detalle=str(e), exitoso=False)
+                    except Exception:
+                        pass
             
             # Iniciar exportación en hilo separado
             thread = threading.Thread(target=export_thread, daemon=True, name="ExportStock")
@@ -1640,6 +1733,101 @@ class DatabaseApp:
         self.tree.delete(*self.tree.get_children())
         for row in records:
             self.tree.insert("", tk.END, values=row)
+
+    def cargar_eventos_calendario(self):
+        """Carga en el calendario los envíos PENDIENTES desde la BD y resalta las fechas."""
+        try:
+            if not hasattr(self, 'cal'):
+                return
+            # Limpiar eventos anteriores del calendario
+            try:
+                for ev_id in self.cal.get_calevents():
+                    self.cal.calevent_remove(ev_id)
+            except Exception:
+                pass
+
+            # Asegurar conexión y consultar envíos pendientes
+            if not self.db_manager.ensure_connection():
+                return
+            rows = self.db_manager.fetch_data(
+                "SELECT id, numero_cliente, fecha_programada, tipo_envio, codigo_producto, estado "
+                "FROM pal_envios_programados WHERE estado = 'PENDIENTE'"
+            )
+
+            # Mapear eventos por fecha (YYYY-MM-DD)
+            self.eventos_por_fecha = {}
+            for id_envio, numero, fecha_prog, tipo, codigo, estado in (rows or []):
+                try:
+                    key = fecha_prog.strftime('%Y-%m-%d')
+                except Exception:
+                    key = str(fecha_prog)[:10]
+                self.eventos_por_fecha.setdefault(key, []).append({
+                    'id': id_envio,
+                    'numero': numero,
+                    'fecha': fecha_prog,
+                    'tipo': (tipo or ''),
+                    'codigo': codigo,
+                    'estado': estado,
+                })
+
+            # Resaltar fechas en el calendario
+            for key, lst in self.eventos_por_fecha.items():
+                try:
+                    y, m, d = [int(x) for x in key.split('-')]
+                    dt = datetime(y, m, d)
+                    self.cal.calevent_create(dt, f"{len(lst)} pendiente(s)", 'pendiente')
+                except Exception:
+                    continue
+            try:
+                self.cal.tag_config('pendiente', background='#FFB81C', foreground='#004C97')
+            except Exception:
+                pass
+
+            # Mostrar detalles del día seleccionado
+            self.mostrar_eventos_fecha(None)
+        except Exception as e:
+            try:
+                self.log(f"Error cargando eventos de calendario: {e}", "ERROR")
+            except Exception:
+                pass
+
+    def mostrar_eventos_fecha(self, event):
+        """Muestra en el panel de detalles los envíos del día seleccionado."""
+        try:
+            if not hasattr(self, 'eventos_text') or not hasattr(self, 'cal'):
+                return 0
+            fecha_sel = self.cal.get_date()  # 'YYYY-MM-DD' por date_pattern
+            key = str(fecha_sel)
+
+            self.eventos_text.delete('1.0', tk.END)
+            eventos = (getattr(self, 'eventos_por_fecha', {}) or {}).get(key, [])
+            if not eventos:
+                self.eventos_text.insert(tk.END, "Sin envíos pendientes para esta fecha.")
+                return 0
+
+            # Ordenar por hora si es posible
+            try:
+                eventos_sorted = sorted(eventos, key=lambda e: e['fecha'])
+            except Exception:
+                eventos_sorted = eventos
+
+            for e in eventos_sorted:
+                try:
+                    hora = e['fecha'].strftime('%H:%M')
+                except Exception:
+                    hora = ''
+                linea = (
+                    f"#{e['id']} | {hora} | {e['tipo']} | Cliente: {e['numero']} | "
+                    f"Producto: {e['codigo'] or '-'} | Estado: {e['estado']}\n"
+                )
+                self.eventos_text.insert(tk.END, linea)
+            return 0
+        except Exception as e:
+            try:
+                self.log(f"Error mostrando eventos: {e}", "ERROR")
+            except Exception:
+                pass
+            return 0
 
     def programar_actualizaciones_stock(self):
         def actualizar():
@@ -2235,11 +2423,60 @@ class DatabaseApp:
             from pal.ui.tabs.stock import setup_stock_tab as setup_stock_tab_ui
             setup_stock_tab_ui(self)
         
-        # Pestaña de Gestión de Usuarios (solo admin)
+        # Pestaña de Administración (solo si ADMIN habilitado)
         if self.modules_enabled.get("admin", False):
             self.admin_tab = ttk.Frame(self.main_notebook)
-            self.main_notebook.add(self.admin_tab, text="🔓 Gestión de Usuarios")
-            self._create_admin_users_tab(self.admin_tab)
+            self.main_notebook.add(self.admin_tab, text="🔓 Administración")
+
+            admin_nb = ttk.Notebook(self.admin_tab)
+            admin_nb.pack(fill=tk.BOTH, expand=True)
+
+            # Tab: Usuarios (visible si permiso admin.usuarios o admin)
+            show_users = False
+            try:
+                if hasattr(self, 'permissions') and self.current_user:
+                    show_users = self.permissions.tiene_permiso(self.current_user['id'], 'ADMIN', 'usuarios')
+                if self.current_user and self.current_user.get('username', '').lower() == 'admin':
+                    show_users = True
+            except Exception:
+                show_users = self.current_user and self.current_user.get('username', '').lower() == 'admin'
+
+            if show_users:
+                admin_users_frame = ttk.Frame(admin_nb)
+                admin_nb.add(admin_users_frame, text="Usuarios")
+                self._create_admin_users_tab(admin_users_frame)
+
+            # Tab: Roles y Permisos (visible si admin o tiene permiso admin.roles)
+            show_roles = False
+            try:
+                if hasattr(self, 'permissions') and self.current_user:
+                    show_roles = (
+                        self.current_user.get('username', '').lower() == 'admin' or
+                        self.permissions.tiene_permiso(self.current_user['id'], 'ADMIN', 'roles')
+                    )
+            except Exception:
+                show_roles = self.current_user and self.current_user.get('username', '').lower() == 'admin'
+
+            if show_roles:
+                roles_frame = ttk.Frame(admin_nb)
+                admin_nb.add(roles_frame, text="Roles y Permisos")
+                self._create_roles_permissions_tab(roles_frame)
+
+            # Tab: Auditoría (visible si admin o permiso admin.auditoria)
+            show_audit = False
+            try:
+                if hasattr(self, 'permissions') and self.current_user:
+                    show_audit = (
+                        self.current_user.get('username', '').lower() == 'admin' or
+                        self.permissions.tiene_permiso(self.current_user['id'], 'ADMIN', 'auditoria')
+                    )
+            except Exception:
+                show_audit = self.current_user and self.current_user.get('username', '').lower() == 'admin'
+
+            if show_audit:
+                audit_frame = ttk.Frame(admin_nb)
+                admin_nb.add(audit_frame, text="Auditoría")
+                self._create_audit_tab(audit_frame)
     
     def mostrar_tra_filtrado(self, datos_filtrados):
         """Muestra datos filtrados TRA en el Treeview con colores, stock actual e ideal, y días restantes"""
@@ -3760,7 +3997,12 @@ class DatabaseApp:
                 if self.db_manager.connect(server, database, user, password):
                     self.update_status('connected', server=server, api_token=api_token)
                     self.log("Conexión a BD exitosa", "SUCCESS")
-                    # Inicializar auth y habilitar login en el splash
+                    # Inicializar servicios de seguridad y auth
+                    try:
+                        from pal.core.audit_db import AuditDB
+                        self.audit_db = AuditDB(self.db_manager)
+                    except Exception:
+                        self.audit_db = None
                     self.auth = AuthManager(self.db_manager)
                     # Crear admin si no existe (password predeterminada '123')
                     self._ensure_admin_user()
@@ -3892,10 +4134,18 @@ class DatabaseApp:
         frame = ttk.Frame(parent, padding=15)
         frame.pack(fill=tk.BOTH, expand=True)
         
-        is_admin = self.current_user and self.current_user.get('username', '').lower() == 'admin'
+        # Permiso requerido: ADMIN.usuarios (fallback: usuario 'admin')
+        allowed = False
+        try:
+            if hasattr(self, 'permissions') and self.current_user:
+                allowed = self.permissions.tiene_permiso(self.current_user['id'], 'ADMIN', 'usuarios')
+            if self.current_user and self.current_user.get('username', '').lower() == 'admin':
+                allowed = True
+        except Exception:
+            allowed = self.current_user and self.current_user.get('username', '').lower() == 'admin'
         
-        if not is_admin:
-            ttk.Label(frame, text="Solo el administrador puede gestionar usuarios y módulos.", foreground="orange").pack(pady=20)
+        if not allowed:
+            ttk.Label(frame, text="No tienes permiso para gestionar usuarios.", foreground="orange").pack(pady=20)
             return
         
         ttk.Label(frame, text="Gestionar módulos de usuarios", font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=10)
@@ -3962,6 +4212,25 @@ class DatabaseApp:
     def _save_user_modules_admin(self):
         """Guarda los módulos del usuario seleccionado en la BD."""
         try:
+            # Permiso requerido
+            can_manage = False
+            try:
+                if hasattr(self, 'permissions') and self.current_user:
+                    can_manage = self.permissions.tiene_permiso(self.current_user['id'], 'ADMIN', 'usuarios')
+                if self.current_user and self.current_user.get('username', '').lower() == 'admin':
+                    can_manage = True
+            except Exception:
+                can_manage = False
+            if not can_manage:
+                messagebox.showwarning("Permiso denegado", "No tienes permiso para modificar módulos de usuarios")
+                try:
+                    if hasattr(self, 'audit_db') and self.current_user:
+                        self.audit_db.log_action(
+                            accion='PERMISSION_DENIED', usuario_id=self.current_user['id'], modulo='ADMIN', detalle='modificar_modulos')
+                except Exception:
+                    pass
+                return
+            
             sel_username = self.user_combo.get()
             user_id = next((u[0] for u in self.usuarios_list if u[1] == sel_username), None)
             if not user_id:
@@ -3984,6 +4253,12 @@ class DatabaseApp:
             
             messagebox.showinfo("Listo", f"Módulos de '{sel_username}' guardados")
             self.log(f"Módulos de '{sel_username}' actualizados", "SUCCESS")
+            try:
+                if hasattr(self, 'audit_db'):
+                    self.audit_db.log_action(
+                        accion='USER_MODULES_UPDATE', usuario_id=self.current_user['id'], modulo='ADMIN', detalle=f"user={sel_username}")
+            except Exception:
+                pass
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo guardar: {e}")
             self.log(f"Error guardando módulos: {e}", "ERROR")
@@ -4163,6 +4438,25 @@ class DatabaseApp:
     def _save_admin_user(self):
         """Guarda o crea usuario según lo indicado en el formulario."""
         try:
+            # Permiso requerido
+            can_manage = False
+            try:
+                if hasattr(self, 'permissions') and self.current_user:
+                    can_manage = self.permissions.tiene_permiso(self.current_user['id'], 'ADMIN', 'usuarios')
+                if self.current_user and self.current_user.get('username', '').lower() == 'admin':
+                    can_manage = True
+            except Exception:
+                can_manage = False
+            if not can_manage:
+                messagebox.showwarning("Permiso denegado", "No tienes permiso para crear/editar usuarios")
+                try:
+                    if hasattr(self, 'audit_db') and self.current_user:
+                        self.audit_db.log_action(
+                            accion='PERMISSION_DENIED', usuario_id=self.current_user['id'], modulo='ADMIN', detalle='guardar_usuario')
+                except Exception:
+                    pass
+                return
+            
             username = self.admin_user_username.get().strip()
             nombre = self.admin_user_nombre.get().strip()
             email = self.admin_user_email.get().strip() or None
@@ -4174,6 +4468,7 @@ class DatabaseApp:
                 return
             
             is_new = not hasattr(self, 'current_admin_user_id') or self.current_admin_user_id is None
+            user_id = None
             
             if is_new:
                 # Crear nuevo usuario
@@ -4182,8 +4477,19 @@ class DatabaseApp:
                     return
                 from pal.core.user_management import UserManager
                 um = UserManager(self.db_manager)
-                user_id = um.crear_usuario(username, password, nombre, email)
-                messagebox.showinfo("Listo", f"Usuario '{username}' creado exitosamente")
+                try:
+                    user_id = um.crear_usuario(username, password, nombre, email)
+                    messagebox.showinfo("Listo", f"Usuario '{username}' creado exitosamente")
+                    try:
+                        if hasattr(self, 'audit_db'):
+                            self.audit_db.log_action(
+                                accion='USER_CREATE', usuario_id=self.current_user['id'], modulo='ADMIN', detalle=f"username={username}")
+                    except Exception:
+                        pass
+                except Exception as create_err:
+                    messagebox.showerror("Error", f"No se pudo crear usuario: {str(create_err)}")
+                    self.log(f"Error creando usuario: {create_err}", "ERROR")
+                    return
             else:
                 # Actualizar usuario existente
                 user_id = self.current_admin_user_id
@@ -4200,23 +4506,33 @@ class DatabaseApp:
                         (pwd_hash, user_id)
                     )
                 messagebox.showinfo("Listo", f"Usuario '{username}' actualizado exitosamente")
+                try:
+                    if hasattr(self, 'audit_db'):
+                        self.audit_db.log_action(
+                            accion='USER_UPDATE', usuario_id=self.current_user['id'], modulo='ADMIN', detalle=f"id={user_id}")
+                except Exception:
+                    pass
             
-            # Guardar módulos
-            for modulo_db, var in self.admin_user_mod_vars.items():
-                habilitado = 1 if var.get() else 0
-                self.db_manager.execute_query(
-                    """
-                    IF NOT EXISTS (SELECT 1 FROM pal_usuarios_modulos WHERE usuario_id = ? AND modulo = ?)
-                        INSERT INTO pal_usuarios_modulos (usuario_id, modulo, habilitado) VALUES (?, ?, ?)
-                    ELSE
-                        UPDATE pal_usuarios_modulos SET habilitado = ? WHERE usuario_id = ? AND modulo = ?
-                    """,
-                    (user_id, modulo_db, user_id, modulo_db, habilitado, habilitado, user_id, modulo_db)
-                )
-            
-            self.log(f"Usuario '{username}' guardado", "SUCCESS")
-            self._reload_users_list()
-            self._clear_user_form()
+            # Guardar módulos (solo si user_id es válido)
+            if user_id:
+                for modulo_db, var in self.admin_user_mod_vars.items():
+                    habilitado = 1 if var.get() else 0
+                    self.db_manager.execute_query(
+                        """
+                        IF NOT EXISTS (SELECT 1 FROM pal_usuarios_modulos WHERE usuario_id = ? AND modulo = ?)
+                            INSERT INTO pal_usuarios_modulos (usuario_id, modulo, habilitado) VALUES (?, ?, ?)
+                        ELSE
+                            UPDATE pal_usuarios_modulos SET habilitado = ? WHERE usuario_id = ? AND modulo = ?
+                        """,
+                        (user_id, modulo_db, user_id, modulo_db, habilitado, habilitado, user_id, modulo_db)
+                    )
+                
+                self.log(f"Usuario '{username}' guardado", "SUCCESS")
+                self._reload_users_list()
+                self._clear_user_form()
+            else:
+                messagebox.showerror("Error", "No se asignó un ID válido al usuario")
+                self.log(f"Error: user_id inválido para '{username}'", "ERROR")
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo guardar usuario: {e}")
             self.log(f"Error guardando usuario: {e}", "ERROR")
@@ -4224,6 +4540,25 @@ class DatabaseApp:
     def _delete_admin_user(self):
         """Elimina (desactiva) el usuario seleccionado."""
         try:
+            # Permiso requerido
+            can_manage = False
+            try:
+                if hasattr(self, 'permissions') and self.current_user:
+                    can_manage = self.permissions.tiene_permiso(self.current_user['id'], 'ADMIN', 'usuarios')
+                if self.current_user and self.current_user.get('username', '').lower() == 'admin':
+                    can_manage = True
+            except Exception:
+                can_manage = False
+            if not can_manage:
+                messagebox.showwarning("Permiso denegado", "No tienes permiso para desactivar usuarios")
+                try:
+                    if hasattr(self, 'audit_db') and self.current_user:
+                        self.audit_db.log_action(
+                            accion='PERMISSION_DENIED', usuario_id=self.current_user['id'], modulo='ADMIN', detalle='desactivar_usuario')
+                except Exception:
+                    pass
+                return
+            
             if not hasattr(self, 'current_admin_user_id') or self.current_admin_user_id is None:
                 messagebox.showwarning("Error", "Selecciona un usuario para eliminar")
                 return
@@ -4236,14 +4571,436 @@ class DatabaseApp:
                 )
                 messagebox.showinfo("Listo", f"Usuario '{username}' desactivado")
                 self.log(f"Usuario '{username}' desactivado", "INFO")
+                try:
+                    if hasattr(self, 'audit_db'):
+                        self.audit_db.log_action(
+                            accion='USER_DEACTIVATE', usuario_id=self.current_user['id'], modulo='ADMIN', detalle=f"user={username}")
+                except Exception:
+                    pass
                 self._reload_users_list()
                 self._clear_user_form()
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo desactivar usuario: {e}")
     
+    # =========================
+    # Roles y Permisos (Fase 5)
+    # =========================
+    def _create_roles_permissions_tab(self, parent):
+        container = ttk.Frame(parent, padding=10)
+        container.pack(fill=tk.BOTH, expand=True)
+
+        # Split left (roles) / right (details + permisos + asignación a usuarios)
+        left = ttk.Frame(container)
+        left.pack(side=tk.LEFT, fill=tk.Y, padx=(0,10))
+        right = ttk.Frame(container)
+        right.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+
+        # LEFT: Roles list
+        ttk.Label(left, text="Roles", font=("Segoe UI", 11, "bold")).pack(anchor="w")
+        tree_frame = ttk.Frame(left)
+        tree_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+        scrollbar = ttk.Scrollbar(tree_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.roles_tree = ttk.Treeview(
+            tree_frame,
+            columns=("id","nombre","sistema"),
+            height=14,
+            yscrollcommand=scrollbar.set
+        )
+        scrollbar.config(command=self.roles_tree.yview)
+        self.roles_tree.column("#0", width=0)
+        self.roles_tree.column("id", width=40)
+        self.roles_tree.column("nombre", width=160)
+        self.roles_tree.column("sistema", width=70)
+        self.roles_tree.heading("#0", text="")
+        self.roles_tree.heading("id", text="ID")
+        self.roles_tree.heading("nombre", text="Nombre")
+        self.roles_tree.heading("sistema", text="Sistema")
+        self.roles_tree.pack(fill=tk.BOTH, expand=True)
+        self.roles_tree.bind("<<TreeviewSelect>>", lambda e: self._on_role_select())
+
+        btns = ttk.Frame(left)
+        btns.pack(fill=tk.X, pady=5)
+        ttk.Button(btns, text="Nuevo", command=self._new_role).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btns, text="Guardar", command=self._save_role).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btns, text="Eliminar", command=self._delete_role).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btns, text="Recargar", command=self._reload_roles_list).pack(side=tk.LEFT, padx=2)
+
+        # RIGHT: Details and permissions
+        details = ttk.LabelFrame(right, text="Detalle del Rol", padding=10)
+        details.pack(fill=tk.X)
+        ttk.Label(details, text="Nombre:").grid(row=0, column=0, sticky="w", padx=5, pady=5)
+        self.role_name_entry = ttk.Entry(details, width=30)
+        self.role_name_entry.grid(row=0, column=1, sticky="ew", padx=5, pady=5)
+        ttk.Label(details, text="Descripción:").grid(row=1, column=0, sticky="w", padx=5, pady=5)
+        self.role_desc_entry = ttk.Entry(details, width=50)
+        self.role_desc_entry.grid(row=1, column=1, sticky="ew", padx=5, pady=5)
+        details.columnconfigure(1, weight=1)
+
+        # Permissions catalog (by module)
+        self.perm_vars_by_id = {}
+        self.perm_catalog_by_module = {}
+        perms_rows = self.db_manager.fetch_data("SELECT id, codigo, modulo, descripcion FROM pal_permisos ORDER BY modulo, codigo") or []
+        for pid, codigo, modulo, desc in perms_rows:
+            m = str(modulo)
+            self.perm_catalog_by_module.setdefault(m, []).append((int(pid), str(codigo), str(desc or "")))
+
+        # Scrollable permissions container
+        perms_container = ttk.LabelFrame(right, text="Permisos por módulo", padding=5)
+        perms_container.pack(fill=tk.BOTH, expand=True, pady=10)
+
+        canvas = tk.Canvas(perms_container, borderwidth=0, highlightthickness=0)
+        vscroll = ttk.Scrollbar(perms_container, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vscroll.set)
+        vscroll.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        perms_inner = ttk.Frame(canvas)
+        inner_window = canvas.create_window((0, 0), window=perms_inner, anchor="nw")
+
+        def _on_perms_inner_configure(event=None):
+            try:
+                canvas.configure(scrollregion=canvas.bbox("all"))
+                canvas.itemconfigure(inner_window, width=canvas.winfo_width())
+            except Exception:
+                pass
+        def _on_canvas_configure(event=None):
+            try:
+                canvas.itemconfigure(inner_window, width=canvas.winfo_width())
+            except Exception:
+                pass
+        perms_inner.bind("<Configure>", _on_perms_inner_configure)
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        # Optional: mouse wheel scrolling
+        def _on_mousewheel(event):
+            try:
+                delta = -1 * (event.delta // 120)
+                canvas.yview_scroll(delta, "units")
+            except Exception:
+                pass
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
+        # Build permission sections inside scrollable frame
+        self.perm_section_frames = {}
+        row_idx = 0
+        for modulo, plist in sorted(self.perm_catalog_by_module.items()):
+            sect = ttk.LabelFrame(perms_inner, text=modulo, padding=8)
+            sect.grid(row=row_idx, column=0, sticky="ew", padx=5, pady=5)
+            row_idx += 1
+            # Checkboxes for this module
+            col = 0
+            for pid, codigo, desc in plist:
+                var = tk.BooleanVar(value=False)
+                cb = ttk.Checkbutton(sect, text=codigo.split('.')[-1], variable=var)
+                cb.grid(row=0, column=col, sticky="w", padx=6, pady=4)
+                self.perm_vars_by_id[pid] = var
+                col += 1
+        for i in range(row_idx):
+            perms_inner.grid_rowconfigure(i, weight=0)
+        perms_inner.grid_columnconfigure(0, weight=1)
+
+        # Fixed action bar for saving permissions
+        perm_actions = ttk.Frame(right)
+        perm_actions.pack(fill=tk.X, pady=(0,5))
+        ttk.Button(perm_actions, text="Guardar Permisos del Rol", command=self._save_role_permissions).pack(side=tk.RIGHT)
+
+        # User-role assignment
+        assign = ttk.LabelFrame(right, text="Asignación de Roles a Usuario", padding=10)
+        assign.pack(fill=tk.BOTH, expand=False, pady=10)
+        ttk.Label(assign, text="Usuario:").grid(row=0, column=0, sticky="w", padx=5)
+        self.assign_user_combo = ttk.Combobox(assign, state="readonly", width=25)
+        self.assign_user_combo.grid(row=0, column=1, sticky="w", padx=5)
+        self.assign_user_combo.bind("<<ComboboxSelected>>", lambda e: self._load_user_roles_selector())
+
+        # Roles checkboxes for selected user
+        self.user_role_vars = {}
+        self.user_roles_frame = ttk.Frame(assign)
+        self.user_roles_frame.grid(row=1, column=0, columnspan=2, sticky="w", padx=5, pady=5)
+        ttk.Button(assign, text="Guardar Roles de Usuario", command=self._save_user_roles_assignment).grid(row=2, column=1, sticky="e", padx=5, pady=5)
+
+        # Initialize data
+        self.current_role_id = None
+        self._reload_roles_list()
+        self._reload_users_combo_for_assignment()
+
+    def _reload_roles_list(self):
+        try:
+            rows = self.db_manager.fetch_data("SELECT id, nombre, es_sistema FROM pal_roles ORDER BY nombre") or []
+            # Clear
+            for item in self.roles_tree.get_children():
+                self.roles_tree.delete(item)
+            for rid, nombre, es_sistema in rows:
+                self.roles_tree.insert("", tk.END, values=(int(rid), str(nombre), "Sí" if bool(es_sistema) else "No"))
+        except Exception as e:
+            self.log(f"Error cargando roles: {e}", "ERROR")
+
+    def _on_role_select(self):
+        try:
+            sel = self.roles_tree.selection()
+            if not sel:
+                return
+            values = self.roles_tree.item(sel[0], "values")
+            role_id = int(values[0])
+            self.current_role_id = role_id
+            # Load details
+            row = self.db_manager.fetch_data("SELECT nombre, descripcion FROM pal_roles WHERE id = ?", (role_id,))
+            if row:
+                self.role_name_entry.delete(0, tk.END)
+                self.role_name_entry.insert(0, str(row[0][0] or ""))
+                self.role_desc_entry.delete(0, tk.END)
+                self.role_desc_entry.insert(0, str(row[0][1] or ""))
+            # Load permissions for role
+            for var in self.perm_vars_by_id.values():
+                var.set(False)
+            perm_rows = self.db_manager.fetch_data("SELECT permiso_id FROM pal_roles_permisos WHERE rol_id = ?", (role_id,)) or []
+            for (pid,) in perm_rows:
+                if int(pid) in self.perm_vars_by_id:
+                    self.perm_vars_by_id[int(pid)].set(True)
+        except Exception as e:
+            self.log(f"Error cargando rol: {e}", "ERROR")
+
+    def _new_role(self):
+        try:
+            self.current_role_id = None
+            self.role_name_entry.delete(0, tk.END)
+            self.role_desc_entry.delete(0, tk.END)
+            for var in self.perm_vars_by_id.values():
+                var.set(False)
+        except Exception:
+            pass
+
+    def _save_role(self):
+        try:
+            nombre = self.role_name_entry.get().strip()
+            descripcion = self.role_desc_entry.get().strip() or None
+            if not nombre:
+                messagebox.showwarning("Error", "El nombre del rol es obligatorio")
+                return
+            if self.current_role_id is None:
+                # Crear
+                self.db_manager.execute_query(
+                    "INSERT INTO pal_roles (nombre, descripcion, es_sistema) VALUES (?, ?, 0)",
+                    (nombre, descripcion)
+                )
+                self.current_role_id = int(self.db_manager.fetch_data("SELECT id FROM pal_roles WHERE nombre = ?", (nombre,))[0][0])
+            else:
+                # Actualizar
+                self.db_manager.execute_query(
+                    "UPDATE pal_roles SET nombre = ?, descripcion = ? WHERE id = ?",
+                    (nombre, descripcion, self.current_role_id)
+                )
+            self._reload_roles_list()
+            messagebox.showinfo("Listo", "Rol guardado")
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo guardar el rol: {e}")
+
+    def _delete_role(self):
+        try:
+            if not self.current_role_id:
+                messagebox.showwarning("Error", "Selecciona un rol")
+                return
+            row = self.db_manager.fetch_data("SELECT es_sistema, nombre FROM pal_roles WHERE id = ?", (self.current_role_id,))
+            if not row:
+                return
+            es_sistema, nombre = bool(row[0][0]), str(row[0][1])
+            if es_sistema:
+                messagebox.showwarning("No permitido", "No se puede eliminar un rol del sistema")
+                return
+            if not messagebox.askyesno("Confirmar", f"¿Eliminar rol '{nombre}'?"):
+                return
+            # Eliminar asignaciones y rol
+            self.db_manager.execute_query("DELETE FROM pal_roles_permisos WHERE rol_id = ?", (self.current_role_id,))
+            self.db_manager.execute_query("DELETE FROM pal_usuarios_roles WHERE rol_id = ?", (self.current_role_id,))
+            self.db_manager.execute_query("DELETE FROM pal_roles WHERE id = ?", (self.current_role_id,))
+            self.current_role_id = None
+            self._reload_roles_list()
+            self._new_role()
+            messagebox.showinfo("Listo", "Rol eliminado")
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo eliminar el rol: {e}")
+
+    def _save_role_permissions(self):
+        try:
+            if not self.current_role_id:
+                messagebox.showwarning("Error", "Selecciona o crea un rol antes de guardar permisos")
+                return
+            # Reemplazar conjunto de permisos del rol
+            self.db_manager.execute_query("DELETE FROM pal_roles_permisos WHERE rol_id = ?", (self.current_role_id,))
+            selected_perm_ids = [pid for pid, var in self.perm_vars_by_id.items() if var.get()]
+            for pid in selected_perm_ids:
+                self.db_manager.execute_query(
+                    "IF NOT EXISTS (SELECT 1 FROM pal_roles_permisos WHERE rol_id = ? AND permiso_id = ?)\n"
+                    "INSERT INTO pal_roles_permisos (rol_id, permiso_id) VALUES (?, ?)\n",
+                    (self.current_role_id, pid, self.current_role_id, pid)
+                )
+            messagebox.showinfo("Listo", "Permisos del rol guardados")
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudieron guardar permisos: {e}")
+
+    def _reload_users_combo_for_assignment(self):
+        try:
+            rows = self.db_manager.fetch_data("SELECT id, username FROM pal_usuarios WHERE activo = 1 ORDER BY username") or []
+            self.assign_users = [(int(r[0]), str(r[1])) for r in rows]
+            self.assign_user_combo['values'] = [u[1] for u in self.assign_users]
+            if self.assign_users:
+                self.assign_user_combo.current(0)
+                self._load_user_roles_selector()
+        except Exception as e:
+            self.log(f"Error cargando usuarios: {e}", "WARNING")
+
+    def _load_user_roles_selector(self):
+        try:
+            # Clear existing
+            for child in self.user_roles_frame.winfo_children():
+                child.destroy()
+            self.user_role_vars = {}
+            sel_username = self.assign_user_combo.get()
+            user_id = next((u[0] for u in getattr(self, 'assign_users', []) if u[1] == sel_username), None)
+            if not user_id:
+                return
+            # Load roles and current assignments
+            roles = self.db_manager.fetch_data("SELECT id, nombre FROM pal_roles ORDER BY nombre") or []
+            assigned = self.db_manager.fetch_data("SELECT rol_id FROM pal_usuarios_roles WHERE usuario_id = ?", (user_id,)) or []
+            assigned_set = {int(r[0]) for r in assigned}
+            # Create checkboxes
+            col = 0
+            row = 0
+            for rid, nombre in roles:
+                var = tk.BooleanVar(value=int(rid) in assigned_set)
+                cb = ttk.Checkbutton(self.user_roles_frame, text=str(nombre), variable=var)
+                cb.grid(row=row, column=col, sticky="w", padx=6, pady=4)
+                self.user_role_vars[int(rid)] = var
+                col += 1
+                if col >= 3:
+                    col = 0
+                    row += 1
+        except Exception as e:
+            self.log(f"Error cargando roles de usuario: {e}", "WARNING")
+
+    def _save_user_roles_assignment(self):
+        try:
+            sel_username = self.assign_user_combo.get()
+            user_id = next((u[0] for u in getattr(self, 'assign_users', []) if u[1] == sel_username), None)
+            if not user_id:
+                messagebox.showwarning("Error", "Selecciona un usuario")
+                return
+            # Replace role set
+            self.db_manager.execute_query("DELETE FROM pal_usuarios_roles WHERE usuario_id = ?", (user_id,))
+            selected_role_ids = [rid for rid, var in self.user_role_vars.items() if var.get()]
+            for rid in selected_role_ids:
+                self.db_manager.execute_query(
+                    "IF NOT EXISTS (SELECT 1 FROM pal_usuarios_roles WHERE usuario_id = ? AND rol_id = ?)\n"
+                    "INSERT INTO pal_usuarios_roles (usuario_id, rol_id) VALUES (?, ?)\n",
+                    (user_id, rid, user_id, rid)
+                )
+            # Limpiar cache permisos del usuario si el servicio está disponible
+            try:
+                if hasattr(self, 'permissions'):
+                    self.permissions.limpiar_cache_usuario(user_id)
+            except Exception:
+                pass
+            messagebox.showinfo("Listo", f"Roles de '{sel_username}' actualizados")
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudieron guardar roles del usuario: {e}")
+    
     def _save_modules_config(self):
         """Deprecated: módulos ahora se controlan por BD (pal_usuarios_modulos)."""
         pass
+
+    # =========================
+    # Auditoría (Fase 6)
+    # =========================
+    def _create_audit_tab(self, parent):
+        frame = ttk.Frame(parent, padding=10)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        # Filtros
+        filters = ttk.Frame(frame)
+        filters.pack(fill=tk.X)
+        ttk.Label(filters, text="Usuario:").pack(side=tk.LEFT)
+        self.audit_user_combo = ttk.Combobox(filters, state="readonly", width=25)
+        self.audit_user_combo.pack(side=tk.LEFT, padx=5)
+        ttk.Button(filters, text="Recargar", command=self._reload_audit_logs).pack(side=tk.LEFT, padx=5)
+
+        # Cargar usuarios para filtro
+        try:
+            rows = self.db_manager.fetch_data("SELECT id, username FROM pal_usuarios ORDER BY username") or []
+            self.audit_users = [(int(r[0]), str(r[1])) for r in rows]
+            self.audit_user_combo['values'] = [u[1] for u in self.audit_users]
+        except Exception:
+            self.audit_users = []
+
+        # Tabla
+        table_frame = ttk.Frame(frame)
+        table_frame.pack(fill=tk.BOTH, expand=True, pady=10)
+        cols = ("Fecha", "Usuario", "Acción", "Módulo", "Éxito", "IP", "Detalle")
+        self.audit_tree = ttk.Treeview(table_frame, columns=cols, show='headings', height=12)
+        
+        # Configurar estilos de colores para filas intercaladas
+        style = ttk.Style()
+        style.configure('Treeview', rowheight=25)
+        self.audit_tree.tag_configure('oddrow', background='#F0F0F0', foreground='#000000')
+        self.audit_tree.tag_configure('evenrow', background='#FFFFFF', foreground='#000000')
+        self.audit_tree.tag_configure('error_row', background='#FFE6E6', foreground='#CC0000')
+        self.audit_tree.tag_configure('success_row', background='#E6F3E6', foreground='#006600')
+        
+        for c in cols:
+            self.audit_tree.heading(c, text=c)
+            self.audit_tree.column(c, width=120 if c != "Detalle" else 300, anchor='w')
+        vsb = ttk.Scrollbar(table_frame, orient='vertical', command=self.audit_tree.yview)
+        self.audit_tree.configure(yscrollcommand=vsb.set)
+        self.audit_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self._reload_audit_logs()
+
+    def _reload_audit_logs(self):
+        try:
+            # Limpiar
+            for item in self.audit_tree.get_children():
+                self.audit_tree.delete(item)
+            # Filtro de usuario
+            sel_user = self.audit_user_combo.get() if hasattr(self, 'audit_user_combo') else ''
+            user_id = next((u[0] for u in getattr(self, 'audit_users', []) if u[1] == sel_user), None)
+            if user_id:
+                query = (
+                    "SELECT TOP 500 a.fecha, u.username, a.accion, a.modulo, a.exitoso, a.ip_address, a.detalle "
+                    "FROM pal_auditoria_accesos a LEFT JOIN pal_usuarios u ON u.id = a.usuario_id "
+                    "WHERE a.usuario_id = ? ORDER BY a.fecha DESC"
+                )
+                rows = self.db_manager.fetch_data(query, (user_id,)) or []
+            else:
+                query = (
+                    "SELECT TOP 500 a.fecha, u.username, a.accion, a.modulo, a.exitoso, a.ip_address, a.detalle "
+                    "FROM pal_auditoria_accesos a LEFT JOIN pal_usuarios u ON u.id = a.usuario_id "
+                    "ORDER BY a.fecha DESC"
+                )
+                rows = self.db_manager.fetch_data(query) or []
+            
+            # Insertar filas con colores intercalados
+            for idx, r in enumerate(rows):
+                fecha, username, accion, modulo, exitoso, ip, detalle = r
+                
+                # Determinar tag de color
+                # Prioridad: error_row > success_row > oddrow/evenrow
+                tags = ()
+                if not exitoso:  # Filas de error en rojo
+                    tags = ('error_row',)
+                elif exitoso:  # Filas de éxito en verde
+                    tags = ('success_row',)
+                else:  # Colores intercalados por defecto
+                    tags = ('oddrow' if idx % 2 == 0 else 'evenrow',)
+                
+                self.audit_tree.insert("", tk.END, values=(
+                    str(fecha), str(username or ''), str(accion or ''), str(modulo or ''),
+                    'Sí' if bool(exitoso) else 'No', str(ip or ''), str(detalle or '')
+                ), tags=tags)
+        except Exception as e:
+            try:
+                self.log(f"Error cargando auditoría: {e}", "ERROR")
+            except Exception:
+                pass
 
     def _save_debug_config(self):
         try:
@@ -4357,7 +5114,9 @@ class DatabaseApp:
             if self.db_manager.connect(server, database, user, password):
                 self.save_connection_settings(server, database, user, token)
                 self.update_status('connected', server=server, api_token=token)
-                # Inicializar auth y verificar/esquema pal_* interactivo
+                # Inicializar servicios de seguridad
+                from pal.core.audit_db import AuditDB
+                self.audit_db = AuditDB(self.db_manager)
                 self.auth = AuthManager(self.db_manager)
                 self._ensure_security_schema_interactive()
                 # Requerir login
@@ -4365,6 +5124,11 @@ class DatabaseApp:
                     return
                 self.settings_window.destroy()
                 self.log("Conexión a BD exitosa", "SUCCESS")
+                try:
+                    if hasattr(self, 'audit_db'):
+                        self.audit_db.log_action(accion='DB_CONNECTED', usuario_id=self.current_user['id'] if self.current_user else None, detalle=server, modulo='ADMIN')
+                except Exception:
+                    pass
                 self.show_temp_notification("Conexión exitosa")
                 self.search_records()
             
@@ -4378,6 +5142,12 @@ class DatabaseApp:
             ErrorCode.DB_CONNECTION_FAILED
         )
             self.update_status('error', message=error_msg)
+            try:
+                if hasattr(self, 'audit_db'):
+                    self.audit_db.log_action(
+                        accion='DB_CONNECTION_ERROR', usuario_id=self.current_user['id'] if self.current_user else None, detalle=error_msg, exitoso=False, modulo='ADMIN')
+            except Exception:
+                pass
             self.show_temp_notification("Error de conexión", duration=5000)
 
     def create_connection_tab(self, parent):
@@ -4549,6 +5319,13 @@ class DatabaseApp:
             # Validar credenciales
             resp = self.auth.login(username, password, ip_address=None)
             if not resp.get('success'):
+                try:
+                    if hasattr(self, 'audit_db'):
+                        self.audit_db.log_access(
+                            accion='LOGIN', usuario_id=None, exitoso=False, detalle=f"user={username}"
+                        )
+                except Exception:
+                    pass
                 return False, resp.get('message', 'Credenciales inválidas')
             
             # Guardar sesión
@@ -4556,6 +5333,11 @@ class DatabaseApp:
             self.current_user = resp['user']
             
             self.log(f"✅ Sesión iniciada como {username}", "SUCCESS")
+            try:
+                if hasattr(self, 'audit_db'):
+                    self.audit_db.log_access(accion='LOGIN', usuario_id=self.current_user['id'], exitoso=True)
+            except Exception:
+                pass
             
             # Forzar cambio de contraseña si admin usó la predeterminada (en hilo principal)
             if username.lower() == 'admin' and password == '123':
@@ -4590,6 +5372,12 @@ class DatabaseApp:
                 if hasattr(self, 'main_notebook') and self.main_notebook.winfo_exists():
                     self.main_notebook.destroy()
                 self.create_main_workspace()
+                # Cargar lista de registros al iniciar si la pestaña existe
+                try:
+                    if hasattr(self, 'search_records'):
+                        self.search_records()
+                except Exception:
+                    pass
             except Exception as e:
                 self.log(f"Error recreando workspace: {e}", "WARNING")
             
@@ -4689,6 +5477,12 @@ class DatabaseApp:
             # Cerrar sesión en BD
             if self.auth and self.session_token:
                 self.auth.logout(self.session_token)
+            
+            try:
+                if hasattr(self, 'audit_db') and self.current_user:
+                    self.audit_db.log_access(accion='LOGOUT', usuario_id=self.current_user['id'], exitoso=True)
+            except Exception:
+                pass
             
             self.session_token = None
             self.current_user = None
@@ -4887,6 +5681,12 @@ class DatabaseApp:
                 "FAILED",
                 ErrorCode.INVALID_CONFIG
             )
+            try:
+                if hasattr(self, 'audit_db'):
+                    self.audit_db.log_action(
+                        accion='SAVE_CONFIG_FAILED', usuario_id=self.current_user['id'] if self.current_user else None, modulo='ADMIN', detalle=str(e), exitoso=False)
+            except Exception:
+                pass
             messagebox.showerror("Error", f"No se pudo guardar: {str(e)}")
     
     def validate_input(self):
@@ -4944,6 +5744,13 @@ class DatabaseApp:
             )
             
             self.show_temp_notification("¡Guardado exitosamente!")
+            try:
+                if hasattr(self, 'audit_db') and self.current_user:
+                    self.audit_db.log_action(
+                        accion='RECORD_CREATE', usuario_id=self.current_user['id'], modulo='REGISTROS', 
+                        detalle=f"numero={self.num_cliente.get()} codigo={self.cod_producto.get()}")
+            except Exception:
+                pass
 
             # Restablecer el estado a 'Conectado' después de 3 segundos
             self.root.after(3000, lambda: self.update_status('connected'))
@@ -4953,6 +5760,12 @@ class DatabaseApp:
         except Exception as e:
             self.notification_manager.show_success("Error", str(e))
             self.show_temp_notification("Error al guardar", duration=5000)
+            try:
+                if hasattr(self, 'audit_db') and self.current_user:
+                    self.audit_db.log_action(
+                        accion='RECORD_CREATE', usuario_id=self.current_user['id'], modulo='REGISTROS', detalle=str(e), exitoso=False)
+            except Exception:
+                pass
 
     def search_records(self):
         if not self.db_manager.conn:  # <-- Agrega esta validación
@@ -4988,6 +5801,12 @@ class DatabaseApp:
                 
         except Exception as e:
             self.notification_manager.show_error("Error", str(e))
+            try:
+                if hasattr(self, 'audit_db') and self.current_user:
+                    self.audit_db.log_action(
+                        accion='RECORD_SEARCH_ERROR', usuario_id=self.current_user['id'], modulo='REGISTROS', detalle=str(e), exitoso=False)
+            except Exception:
+                pass
 
     def enviar_a_todos(self):
         self.log("Iniciando proceso de envío masivo...", "INFO")
@@ -5017,6 +5836,12 @@ class DatabaseApp:
 
             self.actual = 0
             self.enviando = True
+            try:
+                if hasattr(self, 'audit_db') and self.current_user:
+                    self.audit_db.log_action(
+                        accion='MSG_MASS_START', usuario_id=self.current_user['id'], modulo='MENSAJES')
+            except Exception:
+                pass
         
             # Configurar UI de progreso
             self.progress = ttk.Progressbar(self.root, orient="horizontal", length=300, mode="determinate")
@@ -5029,6 +5854,12 @@ class DatabaseApp:
             
         except Exception as e:
             self.log(f"Error en envío masivo: {str(e)}", "ERROR")
+            try:
+                if hasattr(self, 'audit_db') and self.current_user:
+                    self.audit_db.log_action(
+                        accion='MSG_MASS_ERROR', usuario_id=self.current_user['id'], modulo='MENSAJES', detalle=str(e), exitoso=False)
+            except Exception:
+                pass
             self.toggle_buttons('normal')
             messagebox.showerror("Error", f"Error obteniendo clientes: {str(e)}")
             self.enviando = False
@@ -5168,6 +5999,11 @@ class DatabaseApp:
     def _update_ui_after_chunk(self, total_records, chunk_number):
         """Actualiza la UI después de cargar un chunk de datos"""
         try:
+            # Evitar errores si la UI fue destruida
+            if not hasattr(self, 'root') or not self.root.winfo_exists():
+                return
+            if not hasattr(self, 'stock_tree') or not self.stock_tree or not self.stock_tree.winfo_exists():
+                return
             # Actualizar filtros si es necesario
             self.aplicar_filtro_stock()
             
@@ -5447,10 +6283,22 @@ class DatabaseApp:
 
                 self.db_manager.execute_query("DELETE FROM pal_clientes WHERE id = ?", (record_id,))
                 self.update_status('action', message="Registro eliminado")
+                try:
+                    if hasattr(self, 'audit_db') and self.current_user:
+                        self.audit_db.log_action(
+                            accion='RECORD_DELETE', usuario_id=self.current_user['id'], modulo='REGISTROS', detalle=f"id={record_id}")
+                except Exception:
+                    pass
                 self.search_records()
                 self.clear_inputs() 
             except Exception as e:
                 messagebox.showerror("Error", str(e))
+                try:
+                    if hasattr(self, 'audit_db') and self.current_user:
+                        self.audit_db.log_action(
+                            accion='RECORD_DELETE', usuario_id=self.current_user['id'], modulo='REGISTROS', detalle=str(e), exitoso=False)
+                except Exception:
+                    pass
 
     def crear_botones_masivos(self):
         frame_masivo = ttk.Frame(self.root)
@@ -5496,6 +6344,13 @@ class DatabaseApp:
                 (self.num_cliente.get(), self.cod_producto.get(), record_id)
             )
             self.update_status('action', message="Registro actualizado")
+            try:
+                if hasattr(self, 'audit_db') and self.current_user:
+                    self.audit_db.log_action(
+                        accion='RECORD_UPDATE', usuario_id=self.current_user['id'], modulo='REGISTROS', 
+                        detalle=f"id={record_id}")
+            except Exception:
+                pass
 
             # Restablecer el estado a 'Conectado' después de 3 segundos
             self.root.after(3000, lambda: self.update_status('connected'))
@@ -5504,6 +6359,12 @@ class DatabaseApp:
             self.clear_inputs()
         except Exception as e:
             messagebox.showerror("Error", str(e))
+            try:
+                if hasattr(self, 'audit_db') and self.current_user:
+                    self.audit_db.log_action(
+                        accion='RECORD_UPDATE', usuario_id=self.current_user['id'], modulo='REGISTROS', detalle=str(e), exitoso=False)
+            except Exception:
+                pass
 
     def buscar_descripcion(self, event=None):
         """Obtiene la descripción y actualiza el campo correspondiente"""
@@ -5545,6 +6406,22 @@ class DatabaseApp:
         return 0  # Return integer for WNDPROC
     
                        
+    def _records_on_click(self, event):
+        """Selecciona fila en el Treeview de Registros con un solo click"""
+        try:
+            if not hasattr(self, 'tree') or not self.tree or not self.tree.winfo_exists():
+                return 0
+            region = self.tree.identify_region(event.x, event.y)
+            if region in ('cell', 'tree'):
+                item = self.tree.identify_row(event.y)
+                if item:
+                    self.tree.selection_set(item)
+                    self.tree.focus(item)
+                    self.tree.see(item)
+        except Exception:
+            pass
+        return 0
+
     def on_tree_double_click(self, event):
         """Manejo de doble click en la tabla con limpieza de datos"""
         # Return 0 at end for WNDPROC
@@ -5573,6 +6450,116 @@ class DatabaseApp:
                 messagebox.showerror("Error", f"Error al cargar datos: {str(e)}")
         return 0  # Return integer for WNDPROC
     
+
+    def mostrar_ventana_programacion(self):
+        try:
+            win = tk.Toplevel(self.root)
+            win.title("Programar Envío")
+            win.transient(self.root)
+            win.grab_set()
+            win.resizable(False, False)
+            frm = ttk.Frame(win, padding=10)
+            frm.pack(fill=tk.BOTH, expand=True)
+
+            # Número de cliente
+            ttk.Label(frm, text="Número Cliente:").grid(row=0, column=0, sticky='w', padx=5, pady=5)
+            num_entry = ttk.Entry(frm, width=20)
+            num_entry.grid(row=0, column=1, sticky='ew', padx=5, pady=5)
+
+            # Fecha (Calendar) + Hora/Minuto (Spinbox)
+            ttk.Label(frm, text="Fecha:").grid(row=1, column=0, sticky='w', padx=5, pady=5)
+            from tkcalendar import Calendar
+            from datetime import datetime, timedelta
+            default_date = datetime.now() + timedelta(minutes=2)
+            cal = Calendar(frm, selectmode='day', year=default_date.year, month=default_date.month, day=default_date.day)
+            cal.grid(row=1, column=1, sticky='w', padx=5, pady=5)
+
+            ttk.Label(frm, text="Hora:").grid(row=1, column=2, sticky='e', padx=(15,5))
+            spin_hora = ttk.Spinbox(frm, from_=0, to=23, width=4)
+            spin_hora.insert(0, f"{default_date.hour:02d}")
+            spin_hora.grid(row=1, column=3, sticky='w')
+            ttk.Label(frm, text=":").grid(row=1, column=4, sticky='w')
+            spin_minuto = ttk.Spinbox(frm, from_=0, to=59, width=4)
+            spin_minuto.insert(0, f"{default_date.minute:02d}")
+            spin_minuto.grid(row=1, column=5, sticky='w', padx=(0,5))
+
+            # Tipo de envío
+            ttk.Label(frm, text="Tipo:").grid(row=2, column=0, sticky='w', padx=5, pady=5)
+            tipo_var = tk.StringVar(value='DISPONIBILIDAD')
+            tipo_combo = ttk.Combobox(frm, textvariable=tipo_var, values=['DISPONIBILIDAD', 'ENTREGA'], state='readonly', width=18)
+            tipo_combo.grid(row=2, column=1, sticky='w', padx=5, pady=5)
+
+            # Código de producto (solo para DISPONIBILIDAD)
+            ttk.Label(frm, text="Código Producto:").grid(row=3, column=0, sticky='w', padx=5, pady=5)
+            cod_entry = ttk.Entry(frm, width=20)
+            cod_entry.grid(row=3, column=1, sticky='w', padx=5, pady=5)
+
+            def _toggle_codigo(*args):
+                if tipo_var.get() == 'DISPONIBILIDAD':
+                    cod_entry.config(state='normal')
+                else:
+                    cod_entry.delete(0, tk.END)
+                    cod_entry.config(state='disabled')
+            try:
+                tipo_var.trace_add('write', lambda *a: _toggle_codigo())
+            except Exception:
+                pass
+            _toggle_codigo()
+
+            def confirmar():
+                from datetime import datetime
+                numero = num_entry.get().strip()
+                if not numero:
+                    messagebox.showwarning("Error", "Ingrese el número de cliente")
+                    return
+                try:
+                    # Obtener fecha del Calendar de forma robusta
+                    try:
+                        d = cal.selection_get()  # datetime.date
+                    except Exception:
+                        d = cal.get_date()
+                        d = datetime.fromisoformat(str(d)).date()
+                    h = int(spin_hora.get() or 0)
+                    m = int(spin_minuto.get() or 0)
+                    if not (0 <= h <= 23 and 0 <= m <= 59):
+                        raise ValueError
+                    fecha = datetime(d.year, d.month, d.day, h, m)
+                except Exception:
+                    messagebox.showwarning("Error", "Fecha/Hora inválida")
+                    return
+
+                tipo = tipo_var.get().strip().upper() or 'DISPONIBILIDAD'
+                codigo = (cod_entry.get().strip() or None)
+                if tipo == 'DISPONIBILIDAD' and not codigo:
+                    messagebox.showwarning("Error", "Ingrese el código de producto para DISPONIBILIDAD")
+                    return
+
+                # Programar
+                try:
+                    if not hasattr(self, 'envios_programados'):
+                        from pal.services.envios import EnvioProgramado
+                        self.envios_programados = EnvioProgramado(self.db_manager)
+                    ok = self.envios_programados.programar_envio(numero, fecha, tipo_envio=tipo, codigo_producto=codigo)
+                    if ok:
+                        messagebox.showinfo("Listo", "Envío programado")
+                        try:
+                            if hasattr(self, 'audit_db') and self.current_user:
+                                self.audit_db.log_action(accion='MSG_SCHEDULE', usuario_id=self.current_user['id'], modulo='MENSAJES', detalle=f"cliente={numero} fecha={fecha} tipo={tipo}")
+                        except Exception:
+                            pass
+                        win.destroy()
+                    else:
+                        messagebox.showerror("Error", "No se pudo programar el envío")
+                except Exception as e:
+                    messagebox.showerror("Error", f"Fallo programando: {e}")
+
+            btns = ttk.Frame(frm)
+            btns.grid(row=4, column=0, columnspan=6, sticky='e', pady=10)
+            ttk.Button(btns, text="Programar", command=confirmar).pack(side=tk.RIGHT, padx=5)
+            ttk.Button(btns, text="Cancelar", command=win.destroy).pack(side=tk.RIGHT)
+            frm.columnconfigure(1, weight=1)
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo abrir el programador: {e}")
 
     def notificar(self):
 
@@ -5616,9 +6603,21 @@ class DatabaseApp:
 
             self.enviar_mensaje_whatsapp(numero_cliente, [descripcion])
             self.show_temp_notification("Enviado Exitosamente")
+            try:
+                if hasattr(self, 'audit_db') and self.current_user:
+                    self.audit_db.log_action(
+                        accion='MSG_SEND', usuario_id=self.current_user['id'], modulo='MENSAJES', detalle=f"cliente={numero_cliente}")
+            except Exception:
+                pass
     
         except Exception as e:
             messagebox.showerror("Error", f"Error obteniendo descripción o cantidad: {str(e)}")
+            try:
+                if hasattr(self, 'audit_db') and self.current_user:
+                    self.audit_db.log_action(
+                        accion='MSG_SEND', usuario_id=self.current_user['id'], modulo='MENSAJES', detalle=str(e), exitoso=False)
+            except Exception:
+                pass
 
     def procesar_envio_programado(self, id_envio, numero_cliente):
         """Envía un mensaje programado usando plantillas de WhatsApp y actualiza el estado"""
@@ -5671,6 +6670,12 @@ class DatabaseApp:
                     "UPDATE pal_envios_programados SET estado = 'ENVIADO' WHERE id = ?",
                     (id_envio,)
                 )
+                try:
+                    if hasattr(self, 'audit_db') and self.current_user:
+                        self.audit_db.log_action(
+                            accion='MSG_SCHEDULED_SENT', usuario_id=self.current_user['id'], modulo='MENSAJES', detalle=f"id={id_envio}")
+                except Exception:
+                    pass
                 return True
 
             return False
@@ -5683,6 +6688,12 @@ class DatabaseApp:
                 "FAILED",
                 error_code=ErrorCode.WHATSAPP_API_FAILURE
             )
+            try:
+                if hasattr(self, 'audit_db') and self.current_user:
+                    self.audit_db.log_action(
+                        accion='MSG_SCHEDULED_ERROR', usuario_id=self.current_user['id'], modulo='MENSAJES', detalle=str(e), exitoso=False)
+            except Exception:
+                pass
             return False
         finally:
             self.log(f"Finalizado el procesamiento del envío {id_envio} para el cliente {numero_cliente}", "INFO")
@@ -5723,9 +6734,17 @@ class DatabaseApp:
             if self.actual >= self.total or self.enviando == False:
                 self.toggle_buttons('normal')
                 self.enviando = False
-                self.progress.destroy()
-                self.lbl_progreso.destroy()
+                if hasattr(self, 'progress') and self.progress and self.progress.winfo_exists():
+                    self.progress.destroy()
+                if hasattr(self, 'lbl_progreso') and self.lbl_progreso and self.lbl_progreso.winfo_exists():
+                    self.lbl_progreso.destroy()
                 self.log("Proceso de envío completado", "SUCCESS")
+                try:
+                    if hasattr(self, 'audit_db') and self.current_user:
+                        self.audit_db.log_action(
+                            accion='MSG_MASS_COMPLETE', usuario_id=self.current_user['id'], modulo='MENSAJES')
+                except Exception:
+                    pass
 
         numero = self.clientes_lista[self.actual][0]
     
@@ -5889,6 +6908,30 @@ class DatabaseApp:
         self.descripcion.insert(0, texto)
         self.descripcion.config(state='readonly')
         self.descripcion.update_idletasks()
+
+    # Helpers de Registros
+    def obtener_descripcion_producto(self, codigo: str) -> str | None:
+        try:
+            rows = self.db_manager.fetch_data(
+                "SELECT C_DESCRI FROM dbo.MA_PRODUCTOS WHERE C_CODIGO = ?",
+                (str(codigo),)
+            )
+            if rows and rows[0] and rows[0][0]:
+                return str(rows[0][0])
+            return None
+        except Exception:
+            return None
+
+    def validar_stock_producto(self, codigo: str) -> bool:
+        try:
+            rows = self.db_manager.fetch_data(
+                "SELECT ISNULL(n_cantidad,0) FROM dbo.MA_DEPOPROD WHERE c_codarticulo = ? AND c_coddeposito = '0301'",
+                (str(codigo),)
+            )
+            cantidad = int(rows[0][0]) if rows and rows[0] else 0
+            return cantidad > 0
+        except Exception:
+            return False
 
     # ====================
     # MBRP (Baja Rotación)

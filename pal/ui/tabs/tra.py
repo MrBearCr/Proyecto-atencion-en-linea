@@ -53,8 +53,24 @@ def setup_tra_tab(app):
     app.sede_combo.pack(side=tk.LEFT)
 
     # Botones de acción
-    ttk.Button(top_controls, text="📈 Exportar Excel", 
-               command=lambda: getattr(app, 'exportar_tra_excel', lambda: None)()).pack(side=tk.RIGHT, padx=5)
+    # Exportar (respetar permisos)
+    can_export = False
+    try:
+        if hasattr(app, 'permissions') and app.current_user:
+            can_export = app.permissions.tiene_permiso(app.current_user['id'], 'TRA', 'exportar')
+        if app.current_user and app.current_user.get('username','').lower() == 'admin':
+            can_export = True
+    except Exception:
+        can_export = False
+    btn_export = ttk.Button(top_controls, text="📈 Exportar Excel", 
+               command=lambda: getattr(app, 'exportar_tra_excel', lambda: None)())
+    btn_export.pack(side=tk.RIGHT, padx=5)
+    if not can_export:
+        try:
+            btn_export.state(["disabled"])  # ttk style
+        except Exception:
+            btn_export.config(state='disabled')
+
     ttk.Button(top_controls, text="Cargar", command=app.cargar_tra_base).pack(side=tk.RIGHT, padx=10)
 
     # Frame para filtros jerárquicos

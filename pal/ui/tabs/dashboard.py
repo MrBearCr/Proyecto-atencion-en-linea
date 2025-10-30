@@ -97,37 +97,44 @@ def setup_dashboard_tab(app):
         'envio_mensajes': {
             'icon': '📨',
             'name': 'Mensajería',
-            'tab_text': 'Mensajería'
+            'tab_text': 'Mensajería',  # Tab exacto
+            'tab_attr': 'messaging_tab',
         },
         'stock': {
             'icon': '📎',
             'name': 'Stock',
-            'tab_text': 'Alertas Stock'
+            'tab_text': '🚨 Alertas Stock',  # Tab exacto con emoji
+            'tab_attr': 'stock_tab',
         },
         'tra': {
             'icon': '📈',
             'name': 'T.R.A',
-            'tab_text': 'T.R.A'
+            'tab_text': '📈 T.R.A',  # Tab exacto con emoji
+            'tab_attr': 'tra_tab',
         },
         'mbrp': {
             'icon': '📉',
             'name': 'MBRP',
-            'tab_text': 'MBRP'
+            'tab_text': '📉 MBRP',  # Tab exacto con emoji
+            'tab_attr': 'mbrp_tab',
         },
         'estadisticas': {
             'icon': '📊',
             'name': 'Estadísticas',
-            'tab_text': 'Estadísticas'
+            'tab_text': '📊 Estadísticas',  # Tab exacto con emoji
+            'tab_attr': 'stats_tab',
         },
         'calendario': {
             'icon': '📅',
             'name': 'Calendario',
-            'tab_text': 'Calendario'
+            'tab_text': '📅 Calendario',  # Tab exacto con emoji
+            'tab_attr': 'calendar_tab',
         },
         'admin': {
             'icon': '🔓',
             'name': 'Usuarios',
-            'tab_text': 'Gestión de Usuarios'  # Debe coincidir con create_main_workspace
+            'tab_text': '🔓 Administración',  # Tab exacto con emoji
+            'tab_attr': 'admin_tab',
         }
     }
     
@@ -175,13 +182,14 @@ def setup_dashboard_tab(app):
             def on_leave(e, cf=card_frame):
                 cf.configure(relief=tk.RAISED, bd=1, bg="#FFFFFF")
             
-            def on_click(tab_text=module_data['tab_text']):
-                _switch_to_tab(app, tab_text)
+            def on_click(tab_attr=module_data.get('tab_attr'), tab_text=module_data['tab_text']):
+                _select_tab_by_attr(app, tab_attr, fallback_text=tab_text)
             
             card_frame.bind("<Enter>", on_enter)
             card_frame.bind("<Leave>", on_leave)
-            card_frame.bind("<Button-1>", lambda e: on_click())
-            inner.bind("<Button-1>", lambda e: on_click())
+            # Importante: fijar la referencia del handler por iteración (evitar que todas apunten al último)
+            card_frame.bind("<Button-1>", lambda e, f=on_click: f())
+            inner.bind("<Button-1>", lambda e, f=on_click: f())
             inner.bind("<Enter>", on_enter)
             inner.bind("<Leave>", on_leave)
             
@@ -241,14 +249,33 @@ def setup_dashboard_tab(app):
     _update_dashboard_info(app)
 
 
-def _switch_to_tab(app, tab_name):
-    """Cambiar a un tab específ ico del notebook"""
+def _select_tab_by_attr(app, tab_attr, fallback_text=None):
+    """Selecciona el tab usando directamente el atributo (sin búsquedas).
+    Si falla o no existe, usa fallback_text con búsqueda clásica.
+    """
     try:
-        # Buscar el tab por su texto (búsqueda exacta o parcial)
+        tab = getattr(app, tab_attr, None)
+        if tab:
+            app.main_notebook.select(tab)
+            return
+    except Exception as e:
+        print(f"Error seleccionando tab por atributo {tab_attr}: {e}")
+    if fallback_text:
+        _switch_to_tab(app, fallback_text)
+
+def _switch_to_tab(app, tab_name):
+    """Cambiar a un tab por coincidencia exacta primero; sin substring amplia para evitar falsos positivos."""
+    try:
+        # Intento 1: coincidencia exacta del texto mostrado
         for i in range(app.main_notebook.index('end')):
-            tab_text = app.main_notebook.tab(i, 'text')
-            # Búsqueda flexible: si el nombre está contenido, o si es coincidencia exacta
-            if tab_name == tab_text or (len(tab_name) > 3 and tab_name in tab_text):
+            if tab_name == app.main_notebook.tab(i, 'text'):
+                app.main_notebook.select(i)
+                return
+        # Intento 2: coincidencia case-insensitive sin eliminar acentos
+        tgt = (tab_name or '').strip().lower()
+        for i in range(app.main_notebook.index('end')):
+            cur = (app.main_notebook.tab(i, 'text') or '').strip().lower()
+            if tgt == cur:
                 app.main_notebook.select(i)
                 return
     except Exception as e:

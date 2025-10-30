@@ -14,16 +14,48 @@ class UserManager:
 
     def crear_usuario(self, username: str, password: str, nombre_completo: str,
                       email: str | None = None, roles: List[int] | None = None) -> int:
+        """Crea un nuevo usuario en la BD.
+        
+        Args:
+            username: Username único
+            password: Contraseña en texto plano (será hasheada)
+            nombre_completo: Nombre completo del usuario
+            email: Email opcional
+            roles: Lista de IDs de roles a asignar (opcional)
+            
+        Returns:
+            ID del usuario creado
+            
+        Raises:
+            Exception: Si el usuario ya existe o hay error al insertar
+        """
         pwd_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt(12)).decode("utf-8")
-        self.db.execute_query(
+        
+        # Verificar que username no exista
+        existing = self.db.fetch_data("SELECT id FROM pal_usuarios WHERE username = ?", (username,))
+        if existing:
+            raise Exception(f"El usuario '{username}' ya existe")
+        
+        # Insertar usuario
+        success = self.db.execute_query(
             """
             INSERT INTO pal_usuarios (username, password_hash, nombre_completo, email, activo)
             VALUES (?, ?, ?, ?, 1)
             """,
             (username, pwd_hash, nombre_completo, email)
         )
+        
+        if not success:
+            raise Exception(f"Error al crear usuario '{username}'")
+        
+        # Obtener ID del usuario recién creado
         row = self.db.fetch_data("SELECT id FROM pal_usuarios WHERE username = ?", (username,))
-        user_id = int(row[0][0]) if row else 0
+        if not row:
+            raise Exception(f"No se pudo obtener ID del usuario '{username}'")
+            
+        user_id = int(row[0][0])
+        
+        # Asignar roles si se proporcionan
         if roles:
             for rol_id in roles:
                 self.db.execute_query(
@@ -31,6 +63,7 @@ class UserManager:
                     "INSERT INTO pal_usuarios_roles (usuario_id, rol_id) VALUES (?, ?)\n",
                     (user_id, rol_id, user_id, rol_id)
                 )
+        
         return user_id
 
     def actualizar_usuario(self, usuario_id: int, **kwargs):

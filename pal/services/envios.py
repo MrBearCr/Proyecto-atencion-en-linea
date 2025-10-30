@@ -12,11 +12,18 @@ class EnvioProgramado:
     def __init__(self, db_manager):
         self.db_manager = db_manager
 
-    def programar_envio(self, numero_cliente, fecha):
+    def programar_envio(self, numero_cliente, fecha, tipo_envio: str = 'DISPONIBILIDAD', codigo_producto: str | None = None):
         try:
+            # Asegurar tipo_envio válido
+            tipo = (tipo_envio or 'DISPONIBILIDAD').upper()
+            if tipo not in ('DISPONIBILIDAD', 'ENTREGA'):
+                tipo = 'DISPONIBILIDAD'
             self.db_manager.execute_query(
-                "INSERT INTO pal_envios_programados (numero_cliente, fecha_programada, estado) VALUES (?, ?, 'PENDIENTE')",
-                (numero_cliente, fecha)
+                """
+                INSERT INTO pal_envios_programados (numero_cliente, fecha_programada, estado, tipo_envio, codigo_producto)
+                VALUES (?, ?, 'PENDIENTE', ?, ?)
+                """,
+                (numero_cliente, fecha, tipo, codigo_producto)
             )
             return True
         except Exception as e:

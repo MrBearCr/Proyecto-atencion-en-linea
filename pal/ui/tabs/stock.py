@@ -86,8 +86,23 @@ def setup_stock_tab(app):
     action_frame.pack(fill=tk.X, pady=5)
 
     
-    ttk.Button(action_frame, text="📈 Exportar Excel", 
-               command=lambda: getattr(app, 'exportar_excel', lambda: None)()).pack(side=tk.LEFT, padx=5)
+    # Exportar (respetar permisos)
+    can_export_stock = False
+    try:
+        if hasattr(app, 'permissions') and app.current_user:
+            can_export_stock = app.permissions.tiene_permiso(app.current_user['id'], 'STOCK', 'exportar')
+        if app.current_user and app.current_user.get('username','').lower() == 'admin':
+            can_export_stock = True
+    except Exception:
+        can_export_stock = False
+    btn_export_stock = ttk.Button(action_frame, text="📈 Exportar Excel", 
+               command=lambda: getattr(app, 'exportar_excel', lambda: None)())
+    btn_export_stock.pack(side=tk.LEFT, padx=5)
+    if not can_export_stock:
+        try:
+            btn_export_stock.state(["disabled"])  # ttk style
+        except Exception:
+            btn_export_stock.config(state='disabled')
     
     ttk.Button(action_frame, text="🔄 Recargar", 
                command=lambda: getattr(app, 'recargar_stock', lambda: None)()).pack(side=tk.LEFT, padx=5)

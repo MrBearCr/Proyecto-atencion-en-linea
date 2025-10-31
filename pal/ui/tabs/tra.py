@@ -232,6 +232,10 @@ def setup_tra_tab(app):
     app.tra_tree.tag_configure('sin_movimiento_alt', background='#757575', foreground='#FFFFFF', font=('', 11))  # Gris más oscuro
     app.tra_tree.tag_configure('sin_clasificar_alt', background='#7B1FA2', foreground='#FFFFFF', font=('', 11))  # Púrpura más oscuro
     
+    # Estilos para productos con ALERTA de stock (indicador visual adicional)
+    # Estos estilos se aplican cuando hay alta/media rotación + stock bajo
+    app.tra_tree.tag_configure('stock_alert', background='#FFE082', foreground='#E65100', font=('', 11, 'bold'))  # Amarillo con naranja oscuro
+    
     # Configurar colores de selección en el style para que funcione correctamente
     style.map('Large.Treeview',
         background=[('selected', '#0D47A1')],  # Azul oscuro para selección

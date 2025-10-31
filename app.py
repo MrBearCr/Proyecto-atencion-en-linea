@@ -156,6 +156,15 @@ class DatabaseApp:
         # Iniciar inicialización en segundo plano
         threading.Thread(target=self._initialize_app, daemon=True).start()
 
+    def _show_initial_settings(self):
+        """Muestra diálogo de configuración si no hay BD inicial."""
+        try:
+            if self.root.state() == 'withdrawn':
+                self.root.deiconify()
+            self.show_settings()
+        except Exception as e:
+            print(f"[ERROR] No se pudo mostrar diálogo de configuración: {e}")
+
     def _initialize_app(self):
         try:
             # Tu lógica de inicialización original
@@ -286,6 +295,9 @@ class DatabaseApp:
         finally:
             # Marcar inicialización como completada siempre
             self.splash.app_initialized.set()
+            # Si no hay conexión BD y no hay login configurado, mostrar settings después del splash
+            if not hasattr(self, 'auth') or not self.auth:
+                self.root.after(1000, self._show_initial_settings)
             
             # No deiconificar la ventana principal aquí.
             # La ventana principal se mostrará cuando el splash complete login exitoso.
@@ -325,6 +337,31 @@ class DatabaseApp:
             self.favoritos.add(codigo)
         self._save_favoritos_cache()
         return True
+    
+    def _check_product_stock_alert(self, codigo):
+        """Verifica si un producto tiene alerta de stock y devuelve el nivel de alerta.
+        
+        Args:
+            codigo (str): Código del producto a verificar
+            
+        Returns:
+            str or None: Nivel de alerta ('Crítica', 'Media', 'Leve') o None si no tiene alerta
+        """
+        try:
+            # Si no hay alertas cacheadas, retornar None
+            if not hasattr(self, 'cached_alertas') or not self.cached_alertas:
+                return None
+            
+            # Buscar el producto en las alertas de stock
+            codigo_str = str(codigo).strip()
+            for alerta_codigo, _, _, nivel in self.cached_alertas:
+                if str(alerta_codigo).strip() == codigo_str:
+                    return nivel
+            
+            return None
+        except Exception as e:
+            self.tra_debug_log(f"Error verificando alerta de stock para {codigo}: {e}")
+            return None
 
     def _get_favoritos_local(self):
         """Devuelve el set de códigos favoritos"""
@@ -1146,31 +1183,132 @@ class DatabaseApp:
 
 
     def monitorear_favoritos(self):
-        """Monitorea favoritos usando el archivo JSON"""
+        """Monitorea favoritos y productos críticos de rotación alta/media"""
+        self.log("[MONITOR] Hilo de monitoreo de favoritos iniciado", "INFO")
+        wait_count = 0
         while True:
             try:
                 if not self.db_manager.conn:
+                    wait_count += 1
+                    if wait_count % 6 == 0:  # Log cada 6 iteraciones (360s = 6 min)
+                        self.log(f"[MONITOR] Esperando conexión BD... ({wait_count * 60}s)", "DEBUG")
                     time.sleep(60)
                     continue
+                
+                wait_count = 0  # Reset cuando hay conexión
             
                 # Obtener favoritos desde el JSON
-                favoritos = self._get_favoritos_local()  # <- Cambio clave aquí
+                favoritos = self._get_favoritos_local()
+                if not favoritos:
+                    time.sleep(300)
+                    continue
             
                 # Mantener lógica original de alertas
-                current_alerts = self.db_manager.obtener_alertas_stock()
+                try:
+                    current_alerts = self.db_manager.obtener_alertas_stock()
+                except Exception as e:
+                    self.log(f"[MONITOR] Error obteniendo alertas: {e}", "WARNING")
+                    time.sleep(300)
+                    continue
             
-                for codigo, desc, stock, nivel in current_alerts:
-                    if codigo in favoritos:  # <- Solo verificar los favoritos del JSON
+                for codigo, desc, stock, nivel in (current_alerts or []):
+                    if codigo in favoritos:
                         clave = (codigo, stock, nivel)
                         if clave not in self.ultimas_notificaciones:
-                            self.mostrar_notificacion(codigo, stock, nivel)
-                            self.ultimas_notificaciones.add(clave)
+                            try:
+                                self.mostrar_notificacion(codigo, stock, nivel)
+                                self.ultimas_notificaciones.add(clave)
+                            except Exception as e:
+                                self.log(f"[MONITOR] Error mostrando notificación: {e}", "WARNING")
+                
+                # NUEVA CARACTERÍSTICA: Detectar productos críticos de alta/media rotación
+                if hasattr(self, 'cached_ventas_tra') and self.cached_ventas_tra:
+                    try:
+                        self._detectar_y_notificar_criticos(current_alerts or [])
+                    except Exception as e:
+                        self.log(f"[MONITOR] Error detectando críticos: {e}", "DEBUG")
                         
                 time.sleep(300)  # 5 minutos
             
             except Exception as e:
-                self.log(f"Error monitoreo favoritos: {str(e)}", "ERROR")
+                self.log(f"[MONITOR] Error monitoreo favoritos: {str(e)}", "ERROR")
                 time.sleep(100)
+    
+    def _detectar_y_notificar_criticos(self, alertas_stock):
+        """Detecta y notifica sobre productos de alta/media rotación con alerta de stock"""
+        try:
+            from pal.services.tra import detectar_alertas_rotacion_alta, generar_reporte_critico_rotacion
+            
+            # Detectar productos críticos
+            productos_criticos = detectar_alertas_rotacion_alta(
+                self.cached_ventas_tra,
+                alertas_stock,
+                rotaciones_objetivo=["ALTA", "MEDIA"]
+            )
+            
+            if not productos_criticos:
+                return
+            
+            # Generar reporte
+            reporte = generar_reporte_critico_rotacion(productos_criticos)
+            
+            # Mostrar notificación al usuario (solo primera vez o cambios)
+            # Usar hash del reporte para detectar cambios
+            hash_actual = hash(str(sorted([p['codigo'] for p in productos_criticos])))
+            hash_anterior = getattr(self, '_hash_criticos_anterior', None)
+            
+            if hash_actual != hash_anterior:
+                self._mostrar_alerta_compras(reporte)
+                self._hash_criticos_anterior = hash_actual
+        
+        except Exception as e:
+            self.log(f"Error detectando productos críticos: {e}", "DEBUG")
+    
+    def _mostrar_alerta_compras(self, reporte):
+        """Muestra alerta visual para el departamento de compras"""
+        try:
+            total = reporte.get('total', 0)
+            if total == 0:
+                return
+            
+            por_rotacion = reporte.get('por_rotacion', {})
+            por_nivel = reporte.get('por_nivel', {})
+            
+            # Construir mensaje de alerta
+            mensaje_titulo = f"⚠️ ALERTA CRÍTICA: {total} Producto(s) sin Stock"
+            
+            detalles = []
+            detalles.append(f"Total productos críticos: {total}")
+            
+            if por_rotacion:
+                detalles.append("\nPor Rotación:")
+                for rotacion, cantidad in por_rotacion.items():
+                    detalles.append(f"  • {rotacion}: {cantidad}")
+            
+            if por_nivel:
+                detalles.append("\nPor Nivel de Alerta:")
+                for nivel, cantidad in por_nivel.items():
+                    detalles.append(f"  • {nivel}: {cantidad}")
+            
+            mensaje = "\n".join(detalles)
+            
+            # Mostrar alerta
+            self.log(f"🚨 {mensaje_titulo} - {total} productos", "ERROR")
+            
+            # Toast notification (si disponible)
+            try:
+                if hasattr(self, 'toaster'):
+                    self.toaster.show_toast(
+                        "ALERTA DE COMPRAS",
+                        f"{total} producto(s) de alta/media rotación sin stock",
+                        duration=15,
+                        threaded=False
+                    )
+            except Exception:
+                pass
+        
+        except Exception as e:
+            self.log(f"Error mostrando alerta de compras: {e}", "ERROR")
 
 
     def mostrar_notificacion(self, codigo, stock, nivel):
@@ -2505,10 +2643,24 @@ class DatabaseApp:
             # Determinar tag de color según rotación
             tag_rotacion = rotacion.lower()
             
+            # Verificar si producto tiene alerta de stock y es de rotación ALTA o MEDIA
+            alerta_stock = self._check_product_stock_alert(codigo)
+            es_rotacion_critica = rotacion.upper() in ['ALTA', 'MEDIA']
+            tiene_alerta_critica = alerta_stock and es_rotacion_critica
+            
+            # Si tiene alerta crítica (alta/media rotación + stock bajo), agregar indicador
+            desc_mostrada = desc
+            tags_mostrados = (tag_rotacion,)
+            if tiene_alerta_critica:
+                # Agregar indicador visual prominente al inicio de la descripción
+                desc_mostrada = f"🔴 {desc}"
+                # Agregar tag de alerta además del tag de rotación
+                tags_mostrados = (tag_rotacion, 'stock_alert')
+            
             self.tra_tree.insert(
                 "", tk.END,
-                values=(codigo, desc, rotacion, int(neto), stock_actual, stock_ideal, dias_restantes),
-                tags=(tag_rotacion,)
+                values=(codigo, desc_mostrada, rotacion, int(neto), stock_actual, stock_ideal, dias_restantes),
+                tags=tags_mostrados
             )
     
     def cambiar_pagina_tra(self, delta):
@@ -2549,10 +2701,24 @@ class DatabaseApp:
             neto_valor = float(neto or 0)
             neto_formateado = int(neto_valor) if neto_valor == int(neto_valor) else round(neto_valor, 2)
             
+            # Verificar si producto tiene alerta de stock y es de rotación ALTA o MEDIA
+            alerta_stock = self._check_product_stock_alert(codigo)
+            es_rotacion_critica = rotacion.upper() in ['ALTA', 'MEDIA']
+            tiene_alerta_critica = alerta_stock and es_rotacion_critica
+            
+            # Si tiene alerta crítica (alta/media rotación + stock bajo), agregar indicador
+            desc_mostrada = desc
+            tags_mostrados = (tag_rotacion,)
+            if tiene_alerta_critica:
+                # Agregar indicador visual prominente al inicio de la descripción
+                desc_mostrada = f"🔴 {desc}"
+                # Agregar tag de alerta además del tag de rotación
+                tags_mostrados = (tag_rotacion, 'stock_alert')
+            
             self.tra_tree.insert(
                 "", "end", 
-                values=(codigo, desc, rotacion, neto_formateado, stock_actual, stock_ideal, dias_restantes),
-                tags=(tag_rotacion,)
+                values=(codigo, desc_mostrada, rotacion, neto_formateado, stock_actual, stock_ideal, dias_restantes),
+                tags=tags_mostrados
             )
     
         # Actualizar controles
@@ -2689,6 +2855,9 @@ class DatabaseApp:
             throttle_seconds=2.0
         )
         
+        # Obtener alertas de stock si están disponibles
+        alertas_para_filtro = getattr(self, 'cached_alertas', [])
+        
         # Filtrar y ordenar
         datos_filtrados = filter_ventas_tra(
             ventas=self.cached_ventas_tra,
@@ -2697,7 +2866,8 @@ class DatabaseApp:
             sub_code=sub_cod,
             search_text=texto,
             filter_rotacion='TODAS',  # Por ahora no implementamos filtro por rotación en UI
-            favoritos=favoritos
+            favoritos=favoritos,
+            alertas_stock=alertas_para_filtro  # Pasar alertas para ordenamiento prioritario
         )
         
         self.tra_debug_log(
@@ -4457,7 +4627,33 @@ class DatabaseApp:
                     pass
                 return
             
+            # PROTECCIÓN: Solo el usuario 'admin' puede modificar su propia cuenta
             username = self.admin_user_username.get().strip()
+            is_editing_admin = (hasattr(self, 'current_admin_user_id') and self.current_admin_user_id is not None and
+                               username.lower() == 'admin')
+            
+            if is_editing_admin and self.current_user and self.current_user.get('username', '').lower() != 'admin':
+                usuario_actual = self.current_user.get('username', 'DESCONOCIDO')
+                
+                messagebox.showerror(
+                    "Acceso denegado",
+                    "⚠️ PROTECCIÓN DE SEGURIDAD\n\nSolo el usuario 'admin' puede modificar su propia cuenta.\n\n" +
+                    "Por seguridad, el acceso al usuario 'admin' está restringido."
+                )
+                
+                self.log(
+                    f"[SECURITY] Intento de modificar usuario admin desde: {usuario_actual}",
+                    "ERROR"
+                )
+                try:
+                    if hasattr(self, 'audit_db') and self.current_user:
+                        self.audit_db.log_action(
+                            accion='SECURITY_VIOLATION_ADMIN_MODIFY', usuario_id=self.current_user['id'], modulo='ADMIN',
+                            detalle=f'Usuario {usuario_actual} intentó modificar cuenta admin', exitoso=False)
+                except Exception:
+                    pass
+                return
+            
             nombre = self.admin_user_nombre.get().strip()
             email = self.admin_user_email.get().strip() or None
             password = self.admin_user_password.get().strip()
@@ -4564,6 +4760,29 @@ class DatabaseApp:
                 return
             
             username = self.admin_user_username.get()
+            
+            # PROTECCIÓN: Impedir que se desactive el usuario 'admin'
+            if username.lower() == 'admin':
+                usuario_actual = self.current_user.get('username', 'DESCONOCIDO') if self.current_user else 'DESCONOCIDO'
+                
+                messagebox.showerror(
+                    "Acceso denegado",
+                    "⚠️ PROTECCIÓN DE SEGURIDAD\n\nNo se puede desactivar el usuario 'admin'.\n\n" +
+                    "Este usuario es esencial para el sistema."
+                )
+                
+                self.log(
+                    f"[SECURITY] Intento de desactivar usuario admin desde: {usuario_actual}",
+                    "ERROR"
+                )
+                try:
+                    if hasattr(self, 'audit_db') and self.current_user:
+                        self.audit_db.log_action(
+                            accion='SECURITY_VIOLATION_ADMIN_DELETE', usuario_id=self.current_user['id'], modulo='ADMIN',
+                            detalle=f'Usuario {usuario_actual} intentó desactivar cuenta admin', exitoso=False)
+                except Exception:
+                    pass
+                return
             if messagebox.askyesno("Confirmar", f"¿Desactivar usuario '{username}'?"):
                 self.db_manager.execute_query(
                     "UPDATE pal_usuarios SET activo = 0 WHERE id = ?",
@@ -5057,6 +5276,29 @@ class DatabaseApp:
             messagebox.showerror("Error", f"Error durante login: {e}")
             return False
 
+    def _reset_session_on_db_change(self):
+        """Reset de sesión cuando se cambia de base de datos."""
+        try:
+            self.log("[DB CHANGE] Reseteando sesión...", "INFO")
+            # Cerrar sesión actual
+            if hasattr(self, 'session_token') and self.session_token and hasattr(self, 'auth'):
+                try:
+                    self.auth.logout(self.session_token)
+                except Exception:
+                    pass
+            # Resetear variables de sesión
+            self.session_token = None
+            self.current_user = None
+            self.auth = None
+            self.permissions = None
+            # Limpiar caché
+            self.cached_ventas_tra = []
+            self.cached_ventas_mbrp = []
+            self.cached_alertas = []
+            self.log("[DB CHANGE] Sesión reseteada correctamente", "SUCCESS")
+        except Exception as e:
+            self.log(f"[DB CHANGE] Error durante reset: {e}", "WARNING")
+
     def _ensure_security_schema_interactive(self):
         """Verifica tablas pal_* y ofrece crearlas si faltan."""
         try:
@@ -5080,7 +5322,7 @@ class DatabaseApp:
                         self.update_status('action', message="Creando tablas PAL...")
                         self.db_manager.ensure_security_tables()
                         self.update_status('connected')
-                        messagebox.showinfo("Listo", "Tablas creadas correctamente.")
+                        messagebox.showinfo("Listo", "Tablas creadas correctamente.\n\nAhora inicia sesión con:\nUsuario: admin\nContraseña: 123")
                         self.log("Esquema pal_* creado/actualizado", "SUCCESS")
                     except Exception as e:
                         self.update_status('error', message=str(e))
@@ -5110,6 +5352,20 @@ class DatabaseApp:
     
             if password:
                 self.cred_manager.store_temp_password(password)
+
+            # Detectar cambio de base de datos
+            old_settings = self.load_connection_settings()
+            db_changed = (
+                old_settings and (
+                    old_settings.get('server') != server or 
+                    old_settings.get('database') != database or 
+                    old_settings.get('user') != user
+                )
+            )
+            
+            if db_changed:
+                self.log(f"[DB CHANGE] Cambio de BD: {old_settings.get('database')} → {database}", "INFO")
+                self._reset_session_on_db_change()
 
             if self.db_manager.connect(server, database, user, password):
                 self.save_connection_settings(server, database, user, token)
@@ -5768,11 +6024,20 @@ class DatabaseApp:
                 pass
 
     def search_records(self):
-        if not self.db_manager.conn:  # <-- Agrega esta validación
-            self.notification_manager.show_error("Error", "No hay conexión a la base de datos")
-      
-            self.show_settings()  # Opcional: Abrir ventana de conexión
+        # PRIMERO: Verificar que el módulo MENSAJES esté habilitado (donde está REGISTROS)
+        # Si no está habilitado, retornar silenciosamente (no es un error del usuario)
+        if not self.modules_enabled.get("envio_mensajes", False):
             return
+        
+        if not self.db_manager.conn:
+            self.notification_manager.show_error("Error", "No hay conexión a la base de datos")
+            self.show_settings()
+            return
+        
+        # Validar que el widget tree exista y sea accesible
+        if not hasattr(self, 'tree') or not self.tree or not self.tree.winfo_exists():
+            return
+        
         try:
             self.tree.delete(*self.tree.get_children())
             num = self.num_cliente.get().strip()
@@ -7050,35 +7315,74 @@ class DatabaseApp:
             from pal.services.mbrp import clasificar_rotacion_mbrp, filtrar_productos_baja_rotacion
             try:
                 self.log("[MBRP] Clasificando y filtrando productos de baja rotación...", "INFO")
+                self.log(f"[MBRP] Datos acumulados antes de filtrar: {len(acumulados)} productos", "DEBUG")
+                
+                if acumulados:
+                    primera = acumulados[0]
+                    self.log(f"[MBRP] Primera fila acumulada: {primera} (len={len(primera)})", "DEBUG")
                 
                 # PASO 1: Primero filtrar por IM (usa datos sin clasificar)
                 # Filtrar productos con Índice de Movilidad bajo (umbral 30%)
+                self.log(f"[MBRP] Iniciando filtrado con umbral_im=30.0...", "DEBUG")
                 productos_baja_rotacion = filtrar_productos_baja_rotacion(acumulados, umbral_im=30.0)
                 self.log(f"[MBRP] Filtrados: {len(productos_baja_rotacion)}/{len(acumulados)} productos (IM <= 30%)", "INFO")
                 
+                if not productos_baja_rotacion:
+                    self.log(f"[MBRP] ADVERTENCIA: Filtrado retornó lista vacía", "WARNING")
+                
                 # PASO 2: Luego clasificar los productos filtrados
                 # Usar clasificación MBRP que se enfoca en productos de baja rotación
+                self.log(f"[MBRP] Iniciando clasificación de {len(productos_baja_rotacion)} productos...", "DEBUG")
                 productos_clasificados = clasificar_rotacion_mbrp(productos_baja_rotacion)
                 self.log(f"[MBRP] Clasificados: {len(productos_clasificados)} productos", "INFO")
                 
+                if not productos_clasificados:
+                    self.log(f"[MBRP] ADVERTENCIA: Clasificación retornó lista vacía", "WARNING")
+                
                 self.cached_ventas_mbrp = productos_clasificados
+                self.log(f"[MBRP] Cache MBRP actualizado: {len(self.cached_ventas_mbrp)} productos", "INFO")
             except Exception as e:
                 self.log(f"Error en clasificación MBRP: {e}", "ERROR")
                 import traceback
                 self.log(f"Traceback: {traceback.format_exc()}", "DEBUG")
                 # En caso de error, usar datos sin clasificar
+                self.log(f"[MBRP] Usando datos sin clasificar como fallback: {len(acumulados)} productos", "WARNING")
                 self.cached_ventas_mbrp = list(acumulados)
 
             # Actualizar UI
             def _finish():
                 try:
+                    self.log("[MBRP] _finish() iniciado", "DEBUG")
+                    self.log(f"[MBRP] _finish() - cached_ventas_mbrp tiene {len(self.cached_ventas_mbrp)} productos", "DEBUG")
+                    
                     self.aplicar_filtro_mbrp()
-                    self.api_status.config(text="MBRP: Completo", foreground="green")
-                    self.global_progress.stop()
-                    self.global_progress.pack_forget()
-                    self.mbrp_debug_log("UI MBRP actualizada correctamente")
+                    self.log("[MBRP] _finish() - aplicar_filtro_mbrp completado", "DEBUG")
+                    
+                    try:
+                        self.api_status.config(text="MBRP: Completo", foreground="green")
+                        self.log("[MBRP] _finish() - api_status actualizado", "DEBUG")
+                    except Exception as e:
+                        self.log(f"[MBRP] Error actualizando api_status: {e}", "WARNING")
+                    
+                    try:
+                        self.global_progress.stop()
+                        self.global_progress.pack_forget()
+                        self.log("[MBRP] _finish() - progress bar detenido", "DEBUG")
+                    except Exception as e:
+                        self.log(f"[MBRP] Error deteniendo progress bar: {e}", "WARNING")
+                    
+                    self.log("[MBRP] _finish() completado correctamente", "SUCCESS")
                 except Exception as e:
-                    self.mbrp_debug_log(f"Error actualizando UI MBRP: {e}")
+                    self.log(f"[MBRP] ERROR en _finish: {e}", "ERROR")
+                    import traceback
+                    tb = traceback.format_exc()
+                    self.log(f"[MBRP] Traceback: {tb}", "DEBUG")
+                    # Intentar detener progress bar de todas formas
+                    try:
+                        self.global_progress.stop()
+                        self.global_progress.pack_forget()
+                    except Exception:
+                        pass
             self.root.after(0, _finish)
         except Exception as e:
             self.log(f"MBRP error en carga: {e}", "ERROR")
@@ -7088,73 +7392,98 @@ class DatabaseApp:
                 pass
 
     def aplicar_filtro_mbrp(self):
-        if not hasattr(self, 'cached_ventas_mbrp') or not self.cached_ventas_mbrp:
-            self.mbrp_debug_log(
-                "No hay datos MBRP en cache",
-                level="WARNING",
-                throttle_key="no_data",
-                throttle_seconds=5.0
+        try:
+            if not hasattr(self, 'cached_ventas_mbrp') or not self.cached_ventas_mbrp:
+                self.mbrp_debug_log(
+                    "No hay datos MBRP en cache",
+                    level="WARNING",
+                    throttle_key="no_data",
+                    throttle_seconds=5.0
+                )
+                return
+            
+            self.log(f"[MBRP] aplicar_filtro_mbrp() iniciado con {len(self.cached_ventas_mbrp)} productos en cache", "DEBUG")
+            
+            # Inicializar diccionarios si no existen
+            if not hasattr(self, 'mbrp_dept_dict'):
+                self.log("[MBRP] Inicializando mbrp_dept_dict vacío", "WARNING")
+                self.mbrp_dept_dict = {}
+            if not hasattr(self, 'mbrp_group_dict'):
+                self.mbrp_group_dict = {}
+            if not hasattr(self, 'mbrp_sub_dict'):
+                self.mbrp_sub_dict = {}
+            
+            # Filtros jerárquicos (similar a TRA)
+            dept_cod = self.mbrp_dept_dict.get(self.mbrp_dept_var.get()) if hasattr(self, 'mbrp_dept_var') else None
+            group_cod = None
+            sub_cod = None
+            if dept_cod and hasattr(self, 'mbrp_group_var'):
+                group_desc = self.mbrp_group_var.get()
+                group_cod = self.mbrp_group_dict.get(dept_cod, {}).get(group_desc)
+                if group_cod and hasattr(self, 'mbrp_sub_var'):
+                    sub_desc = self.mbrp_sub_var.get()
+                    # Usar string como key (formato: "dept|group")
+                    key = f"{dept_cod}|{group_cod}"
+                    sub_cod = self.mbrp_sub_dict.get(key, {}).get(sub_desc)
+
+            texto = self.mbrp_search_var.get() if hasattr(self, 'mbrp_search_var') else ''
+            
+            self.log(
+                f"[MBRP] Aplicando filtros - Dept: {dept_cod}, Group: {group_cod}, Sub: {sub_cod}, Texto: '{texto}'",
+                "DEBUG"
             )
-            return
-        
-        # Filtros jerárquicos (similar a TRA)
-        dept_cod = self.mbrp_dept_dict.get(self.mbrp_dept_var.get()) if hasattr(self, 'mbrp_dept_var') else None
-        group_cod = None
-        sub_cod = None
-        if dept_cod and hasattr(self, 'mbrp_group_var'):
-            group_desc = self.mbrp_group_var.get()
-            group_cod = self.mbrp_group_dict.get(dept_cod, {}).get(group_desc)
-            if group_cod and hasattr(self, 'mbrp_sub_var'):
-                sub_desc = self.mbrp_sub_var.get()
-                # Usar string como key (formato: "dept|group")
-                key = f"{dept_cod}|{group_cod}"
-                sub_cod = self.mbrp_sub_dict.get(key, {}).get(sub_desc)
 
-        texto = self.mbrp_search_var.get() if hasattr(self, 'mbrp_search_var') else ''
-        
-        self.mbrp_debug_log(
-            f"Filtros MBRP - Datos: {len(self.cached_ventas_mbrp)} | "
-            f"Dept: {dept_cod}, Group: {group_cod}, Sub: {sub_cod}, Texto: '{texto}'",
-            throttle_key="filter_input",
-            throttle_seconds=2.0
-        )
+            from pal.services.tra import filter_ventas_tra, paginate_tra
+            datos_filtrados = filter_ventas_tra(
+                ventas=self.cached_ventas_mbrp,
+                dept_code=dept_cod,
+                group_code=group_cod,
+                sub_code=sub_cod,
+                search_text=texto,
+                filter_rotacion='TODAS',
+                favoritos=self._get_favoritos_local(),
+            )
+            
+            self.log(
+                f"[MBRP] Después de filter_ventas_tra: {len(datos_filtrados)} productos filtrados",
+                "DEBUG"
+            )
 
-        from pal.services.tra import filter_ventas_tra, paginate_tra
-        datos_filtrados = filter_ventas_tra(
-            ventas=self.cached_ventas_mbrp,
-            dept_code=dept_cod,
-            group_code=group_cod,
-            sub_code=sub_cod,
-            search_text=texto,
-            filter_rotacion='TODAS',
-            favoritos=self._get_favoritos_local(),
-        )
-        
-        self.mbrp_debug_log(
-            f"Resultado: {len(datos_filtrados)} productos",
-            throttle_key="filter_result",
-            throttle_seconds=2.0
-        )
-
-        if not hasattr(self, 'mbrp_current_page') or self.mbrp_current_page < 1:
-            self.mbrp_current_page = 1
-        datos_pagina, total_paginas, self.mbrp_current_page = paginate_tra(
-            datos_filtrados, self.mbrp_current_page, self.mbrp_page_size
-        )
-        
-        self.mbrp_debug_log(
-            f"Página {self.mbrp_current_page}/{total_paginas} ({len(datos_pagina)} filas)",
-            throttle_key="pagination",
-            throttle_seconds=1.5
-        )
-        self.mostrar_mbrp_paginado(datos_pagina)
-        self.actualizar_controles_paginacion_mbrp(total_paginas)
+            if not hasattr(self, 'mbrp_current_page') or self.mbrp_current_page < 1:
+                self.mbrp_current_page = 1
+            if not hasattr(self, 'mbrp_page_size'):
+                self.mbrp_page_size = 500
+            datos_pagina, total_paginas, self.mbrp_current_page = paginate_tra(
+                datos_filtrados, self.mbrp_current_page, self.mbrp_page_size
+            )
+            
+            self.log(
+                f"[MBRP] Página {self.mbrp_current_page}/{total_paginas} ({len(datos_pagina)} filas en página)",
+                "DEBUG"
+            )
+            
+            self.log(f"[MBRP] Llamando a mostrar_mbrp_paginado con {len(datos_pagina)} productos", "DEBUG")
+            self.mostrar_mbrp_paginado(datos_pagina)
+            self.log(f"[MBRP] mostrar_mbrp_paginado completado", "DEBUG")
+            
+            self.actualizar_controles_paginacion_mbrp(total_paginas)
+        except Exception as e:
+            self.log(f"[MBRP] ERROR en aplicar_filtro_mbrp: {e}", "ERROR")
+            import traceback
+            self.log(f"[MBRP] Traceback: {traceback.format_exc()}", "DEBUG")
 
     def mostrar_mbrp_paginado(self, datos):
         if not hasattr(self, 'mbrp_tree'):
+            self.log("[MBRP] ERROR: mbrp_tree no existe", "ERROR")
             return
-        self.mbrp_tree.delete(*self.mbrp_tree.get_children())
+        try:
+            self.mbrp_tree.delete(*self.mbrp_tree.get_children())
+        except Exception as e:
+            self.log(f"[MBRP] Error limpiando mbrp_tree: {e}", "ERROR")
+            return
+        
         if not datos:
+            self.log("[MBRP] datos vacío en mostrar_mbrp_paginado", "DEBUG")
             return
             
         # Importar servicios MBRP

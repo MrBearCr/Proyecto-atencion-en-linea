@@ -536,7 +536,9 @@ class DatabaseManager:
             -- Ensure initial admin user and modules
             IF NOT EXISTS (SELECT 1 FROM pal_usuarios WHERE username = N'admin')
             BEGIN
-                DECLARE @admin_pwd NVARCHAR(255) = N'$2b$12$PLACEHOLDER_PLACEHOLDER_PLACEHOLDER_PLACEHOLDER_PL';
+                -- Bcrypt hash para contraseña: 123
+                -- Generado con: bcrypt.hashpw(b'123', bcrypt.gensalt(rounds=12))
+                DECLARE @admin_pwd NVARCHAR(255) = N'$2b$12$1dErMkRR9YPWV9vUeSAfbO5t.jQHOF4cLCzyDi1x5plUjtuEH/r/O';
                 INSERT INTO pal_usuarios (username, password_hash, nombre_completo, email, activo)
                 VALUES (N'admin', @admin_pwd, N'Administrador del Sistema', NULL, 1);
             END;

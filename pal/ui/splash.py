@@ -93,10 +93,21 @@ class SplashScreen(tk.Toplevel):
     def start_animation(self):
         # Temporizador mínimo de 3 segundos
         self.after(3000, self.minimum_time_elapsed.set)
+        # Timeout global: si no cierra en 30s, forzar cierre
+        self.after(30000, self._force_timeout)
         # Animación de progreso
         self._update_progress()
         # Verificación periódica
         self._check_loading_status()
+    
+    def _force_timeout(self):
+        """Fuerza el cierre del splash si se queda colgado."""
+        try:
+            if self.winfo_exists() and not self.login_success.is_set():
+                print("[SPLASH] Timeout: Cerrando splash por timeout de 30s")
+                self.destroy()
+        except Exception:
+            pass
 
     def _update_progress(self):
         if self.progress_value < 100:

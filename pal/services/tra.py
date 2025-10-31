@@ -10,7 +10,7 @@ logger = get_logger("TRA")
 
 
 def filter_ventas_tra(ventas, dept_code=None, group_code=None, sub_code=None, 
-                     search_text="", filter_rotacion="TODAS", favoritos=None):
+                     search_text="", filter_rotacion="TODAS", favoritos=None, alertas_stock=None):
     """
     Filtra los datos de ventas TRA según múltiples criterios
     
@@ -22,15 +22,20 @@ def filter_ventas_tra(ventas, dept_code=None, group_code=None, sub_code=None,
         search_text: Texto para buscar en código/descripción
         filter_rotacion: Tipo de rotación ('TODAS', 'ALTA', 'MEDIA', 'BAJA', etc.)
         favoritos: Set de códigos favoritos
+        alertas_stock: Lista de tuplas (codigo, desc, stock, nivel) de productos en alerta
         
     Returns:
-        list: Lista filtrada de datos de ventas
+        list: Lista filtrada de datos de ventas, ordenada por: favoritos+alerta, alerta, neto descendente
     """
     if not ventas:
         return []
         
     datos_filtrados = list(ventas)
     favoritos = favoritos or set()
+    alertas_stock = alertas_stock or []
+    
+    # Crear set de códigos en alerta para búsqueda rápida
+    codigos_alerta = {str(alerta[0]).strip() for alerta in alertas_stock}
     
     # Filtro jerárquico unificado (lee jerarquía desde el propio registro: idx 2,3,4)
     datos_filtrados = filter_by_hierarchy(
@@ -62,12 +67,33 @@ def filter_ventas_tra(ventas, dept_code=None, group_code=None, sub_code=None,
             if len(r) > 6 and str(r[6]).upper() == filter_rotacion.upper()
         ]
     
-    # Ordenar por favoritos (favoritos primero), luego por neto descendente
+    # Ordenar con prioridad: Favoritos > Rotación (ALTA > MEDIA > BAJA) > Alertas > Neto
+    def _get_rotacion(item):
+        """Extrae rotación de forma segura"""
+        try:
+            if len(item) > 6:
+                rotacion = str(item[6]).upper()
+                if rotacion == 'ALTA':
+                    return 0  # Prioridad más alta
+                elif rotacion == 'MEDIA':
+                    return 1
+                elif rotacion == 'BAJA':
+                    return 2
+            return 3  # Sin clasificación
+        except:
+            return 3
+    
     datos_ordenados = sorted(
         datos_filtrados,
         key=lambda x: (
-            str(x[0]) not in favoritos,  # Favoritos primero
-            -_get_tra_neto(x)  # Neto descendente
+            # 1. Favoritos primero (False=0 < True=1)
+            str(x[0]) not in favoritos,
+            # 2. Rotación (ALTA=0, MEDIA=1, BAJA=2)
+            _get_rotacion(x),
+            # 3. Alerta de stock (con alerta primero: False=0 < True=1)
+            str(x[0]) not in codigos_alerta,
+            # 4. Neto descendente (negativo para orden inverso)
+            -_get_tra_neto(x)
         )
     )
     
@@ -270,6 +296,96 @@ def obtener_stock_ideal_tra(neto_ventas, dias_periodo=365, dias_buffer=30):
         
     except (ValueError, TypeError, ZeroDivisionError):
         return 0
+
+
+def detectar_alertas_rotacion_alta(ventas_clasificadas, alertas_stock, rotaciones_objetivo=["ALTA", "MEDIA"]):
+    """
+    Detecta productos de alta/media rotación que tienen alerta de stock
+    Para alertar al departamento de compras sobre productos críticos sin stock
+    
+    Args:
+        ventas_clasificadas: Lista de ventas con clasificación de rotación
+        alertas_stock: Diccionario {codigo: (descripcion, stock, nivel_alerta)}
+        rotaciones_objetivo: Lista de rotaciones a monitorear (default: ALTA, MEDIA)
+        
+    Returns:
+        list: Lista de productos críticos [(codigo, descripcion, stock, nivel, rotacion), ...]
+    """
+    try:
+        productos_criticos = []
+        
+        # Crear mapa de alertas para búsqueda rápida
+        alertas_map = {str(r[0]).strip(): r for r in alertas_stock} if alertas_stock else {}
+        
+        for venta in ventas_clasificadas:
+            if not venta or len(venta) < 7:
+                continue
+                
+            codigo = str(venta[0]).strip()
+            descripcion = str(venta[1]) if len(venta) > 1 else ""
+            rotacion = str(venta[6]) if len(venta) > 6 else "BAJA"
+            
+            # Si el producto tiene rotación objetivo y está en alertas
+            if rotacion in rotaciones_objetivo and codigo in alertas_map:
+                alerta = alertas_map[codigo]
+                # alerta = (codigo, descripcion, stock, nivel_alerta)
+                if len(alerta) >= 4:
+                    stock = alerta[2]
+                    nivel_alerta = alerta[3]
+                    productos_criticos.append({
+                        'codigo': codigo,
+                        'descripcion': descripcion,
+                        'stock': stock,
+                        'nivel': nivel_alerta,
+                        'rotacion': rotacion
+                    })
+        
+        return productos_criticos
+        
+    except Exception as e:
+        logger.error(f"Error detectando alertas de rotación: {e}")
+        return []
+
+
+def generar_reporte_critico_rotacion(productos_criticos):
+    """
+    Genera un reporte resumido para el departamento de compras
+    
+    Args:
+        productos_criticos: Lista de productos críticos
+        
+    Returns:
+        dict: Reporte con estadísticas y listado
+    """
+    try:
+        if not productos_criticos:
+            return {
+                'total': 0,
+                'por_rotacion': {},
+                'por_nivel': {},
+                'productos': []
+            }
+        
+        reporte = {
+            'total': len(productos_criticos),
+            'por_rotacion': {},
+            'por_nivel': {},
+            'productos': productos_criticos
+        }
+        
+        # Contar por rotación
+        for p in productos_criticos:
+            rotacion = p.get('rotacion', 'DESCONOCIDO')
+            reporte['por_rotacion'][rotacion] = reporte['por_rotacion'].get(rotacion, 0) + 1
+            
+            nivel = p.get('nivel', 'DESCONOCIDO')
+            reporte['por_nivel'][nivel] = reporte['por_nivel'].get(nivel, 0) + 1
+        
+        return reporte
+        
+    except Exception as e:
+        logger.error(f"Error generando reporte crítico: {e}")
+        return {'total': 0, 'por_rotacion': {}, 'por_nivel': {}, 'productos': []}
 
 
 # Alias para compatibilidad con código existente

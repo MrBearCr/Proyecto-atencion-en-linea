@@ -26,36 +26,56 @@ def calcular_indice_movilidad(ventas_data: List, total_ventas_periodo: float = N
     - 0% = Producto sin ventas o con ventas netas <= 0
     """
     if not ventas_data:
+        logger.debug(f"[CALC IM] ventas_data vacía")
         return {}
     
     try:
+        logger.debug(f"[CALC IM] Iniciando cálculo IM para {len(ventas_data)} productos")
+        
         # Extraer ventas por código
         ventas_por_codigo = {}
+        items_invalidos = 0
+        
         for item in ventas_data:
             if len(item) >= 6:
                 codigo = str(item[0])
                 # El neto siempre está en item[5], independiente de clasificación
-                neto = float(item[5]) if item[5] is not None else 0.0
-                ventas_por_codigo[codigo] = neto
+                try:
+                    neto = float(item[5]) if item[5] is not None else 0.0
+                    ventas_por_codigo[codigo] = neto
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"[CALC IM] Neto inválido para {codigo}: {item[5]} - {e}")
+                    ventas_por_codigo[codigo] = 0.0
+            else:
+                items_invalidos += 1
+        
+        logger.debug(f"[CALC IM] Extraídos {len(ventas_por_codigo)} productos válidos, {items_invalidos} items inválidos")
         
         if not ventas_por_codigo:
+            logger.warning(f"[CALC IM] No se extrajeron ventas válidas")
             return {}
         
         # Filtrar solo productos con ventas positivas para el cálculo del IM
         ventas_positivas = {k: v for k, v in ventas_por_codigo.items() if v > 0}
         
+        logger.debug(f"[CALC IM] Productos con ventas positivas: {len(ventas_positivas)}/{len(ventas_por_codigo)}")
+        
         # Si no hay ventas positivas, todos tienen IM = 0
         if not ventas_positivas:
+            logger.info(f"[CALC IM] Ningún producto con ventas positivas - asignando IM=0 a todos")
             return {codigo: 0.0 for codigo in ventas_por_codigo.keys()}
         
         # Encontrar máximo y mínimo para normalización (solo de ventas positivas)
         max_ventas = max(ventas_positivas.values())
         min_ventas_positivas = min(ventas_positivas.values())
         
+        logger.debug(f"[CALC IM] Rango de ventas: min={min_ventas_positivas}, max={max_ventas}")
+        
         # Evitar división por cero
         rango_ventas = max_ventas - min_ventas_positivas
         if rango_ventas == 0:
             # Todos los productos con ventas tienen las mismas ventas
+            logger.info(f"[CALC IM] Todas las ventas iguales - asignando IM=50% a productos con ventas")
             indices = {codigo: 50.0 for codigo in ventas_positivas.keys()}
             # Productos sin ventas tienen IM = 0
             for codigo in ventas_por_codigo:
@@ -75,10 +95,11 @@ def calcular_indice_movilidad(ventas_data: List, total_ventas_periodo: float = N
                 # Asegurar que el IM mínimo para productos con ventas sea > 0.1%
                 indices_movilidad[codigo] = max(0.1, round(im, 1))
         
+        logger.debug(f"[CALC IM] Cálculo completado: {len(indices_movilidad)} índices generados")
         return indices_movilidad
         
     except Exception as e:
-        logger.error(f"Error calculando índices de movilidad: {e}")
+        logger.error(f"[CALC IM] Error calculando índices de movilidad: {e}", exc_info=True)
         return {}
 
 
@@ -225,18 +246,32 @@ def filtrar_productos_baja_rotacion(ventas_data: List, umbral_im: float = 20.0) 
         list: Productos filtrados con baja rotación, ordenados por IM ascendente
     """
     if not ventas_data:
+        logger.warning(f"[MBRP FILTER] ventas_data vacía")
         return []
     
     try:
+        logger.info(f"[MBRP FILTER] Iniciando filtrado: {len(ventas_data)} productos, umbral_im={umbral_im}%")
+        
+        # Verificar estructura de datos
+        primera_fila = ventas_data[0] if ventas_data else None
+        if primera_fila:
+            logger.debug(f"[MBRP FILTER] Primera fila: {primera_fila}, len={len(primera_fila)}")
+        
         # Calcular IM para todos los productos (usa item[5] que siempre es neto)
         indices_movilidad = calcular_indice_movilidad(ventas_data)
+        logger.info(f"[MBRP FILTER] Índices de movilidad calculados: {len(indices_movilidad)} productos")
         
         if not indices_movilidad:
-            logger.warning("No se pudieron calcular índices de movilidad")
+            logger.warning(f"[MBRP FILTER] No se pudieron calcular índices de movilidad (datos recibidos: {len(ventas_data)} productos)")
+            # Debug: verificar qué hay en ventas_data
+            if ventas_data:
+                logger.debug(f"[MBRP FILTER] Primeros 3 items: {ventas_data[:3]}")
             return []
         
         # Filtrar productos con IM bajo o igual al umbral
         productos_baja_rotacion = []
+        im_stats = {'filtrados': 0, 'excluidos': 0, 'sin_im': 0}
+        
         for item in ventas_data:
             if len(item) >= 6:
                 codigo = str(item[0])
@@ -245,16 +280,22 @@ def filtrar_productos_baja_rotacion(ventas_data: List, umbral_im: float = 20.0) 
                 # Incluir solo productos con IM por debajo o igual al umbral
                 if im <= umbral_im:
                     productos_baja_rotacion.append(item)
+                    im_stats['filtrados'] += 1
+                else:
+                    im_stats['excluidos'] += 1
+            else:
+                im_stats['sin_im'] += 1
+                logger.warning(f"[MBRP FILTER] Item incompleto: {item}")
         
         # Ordenar por IM ascendente (los de menor movilidad primero)
         productos_baja_rotacion.sort(key=lambda x: indices_movilidad.get(str(x[0]), 0.0))
         
-        logger.info(f"Filtrados {len(productos_baja_rotacion)}/{len(ventas_data)} productos con IM <= {umbral_im}%")
+        logger.info(f"[MBRP FILTER] Resultados: {im_stats['filtrados']} filtrados, {im_stats['excluidos']} excluidos, {im_stats['sin_im']} incompletos (total entrada: {len(ventas_data)})")
         
         return productos_baja_rotacion
         
     except Exception as e:
-        logger.error(f"Error filtrando productos de baja rotación: {e}")
+        logger.error(f"[MBRP FILTER] Error filtrando productos de baja rotación: {e}", exc_info=True)
         # En caso de error, devolver lista vacía en lugar de todos los datos
         return []
 
@@ -277,20 +318,32 @@ def clasificar_rotacion_mbrp(ventas_data: List) -> List:
     - ALTA: IM > 30% (se excluye normalmente del análisis MBRP)
     """
     if not ventas_data:
+        logger.warning(f"[MBRP CLASSIFY] ventas_data vacía")
         return []
     
     try:
+        logger.info(f"[MBRP CLASSIFY] Iniciando clasificación: {len(ventas_data)} productos")
+        
+        # Verificar estructura de datos
+        primera_fila = ventas_data[0] if ventas_data else None
+        if primera_fila:
+            logger.debug(f"[MBRP CLASSIFY] Primera fila: {primera_fila}, len={len(primera_fila)}")
+        
         # Calcular índices de movilidad
         indices_movilidad = calcular_indice_movilidad(ventas_data)
+        logger.info(f"[MBRP CLASSIFY] Índices de movilidad calculados: {len(indices_movilidad)} productos")
         
         if not indices_movilidad:
-            logger.warning("No se pudieron calcular índices de movilidad para clasificación")
+            logger.warning(f"[MBRP CLASSIFY] No se pudieron calcular índices de movilidad para clasificación (datos: {len(ventas_data)})")
             return list(ventas_data)
         
         ventas_clasificadas = []
+        clasificacion_stats = {'sin_movimiento': 0, 'baja': 0, 'media': 0, 'alta': 0, 'incompletos': 0}
+        
         for item in ventas_data:
             if len(item) < 6:
-                logger.warning(f"Item con menos de 6 campos: {item}")
+                logger.warning(f"[MBRP CLASSIFY] Item con menos de 6 campos: {item}")
+                clasificacion_stats['incompletos'] += 1
                 continue
                 
             codigo = str(item[0])
@@ -301,12 +354,16 @@ def clasificar_rotacion_mbrp(ventas_data: List) -> List:
             # SIN_MOVIMIENTO: IM = 0% O neto <= 0
             if im == 0.0 or neto <= 0:
                 rotacion = "SIN_MOVIMIENTO"
+                clasificacion_stats['sin_movimiento'] += 1
             elif im <= 10.0:
                 rotacion = "BAJA"
+                clasificacion_stats['baja'] += 1
             elif im <= 30.0:
                 rotacion = "MEDIA"
+                clasificacion_stats['media'] += 1
             else:
                 rotacion = "ALTA"  # Normalmente se filtraría en MBRP
+                clasificacion_stats['alta'] += 1
             
             # Convertir a lista mutable y añadir clasificación
             try:
@@ -328,11 +385,11 @@ def clasificar_rotacion_mbrp(ventas_data: List) -> List:
             
             ventas_clasificadas.append(tuple(item_list))
         
-        logger.info(f"Clasificados {len(ventas_clasificadas)} productos para MBRP")
+        logger.info(f"[MBRP CLASSIFY] Clasificación completada: {len(ventas_clasificadas)} productos (SIN_MOVIMIENTO: {clasificacion_stats['sin_movimiento']}, BAJA: {clasificacion_stats['baja']}, MEDIA: {clasificacion_stats['media']}, ALTA: {clasificacion_stats['alta']}, incompletos: {clasificacion_stats['incompletos']})")
         return ventas_clasificadas
         
     except Exception as e:
-        logger.error(f"Error clasificando rotación MBRP: {e}")
+        logger.error(f"[MBRP CLASSIFY] Error clasificando rotación MBRP: {e}", exc_info=True)
         return list(ventas_data) if ventas_data else []
 
 

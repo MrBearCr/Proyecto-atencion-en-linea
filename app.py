@@ -158,11 +158,19 @@ class DatabaseApp:
         threading.Thread(target=self._initialize_app, daemon=True).start()
 
     def _show_initial_settings(self):
-        """Muestra diálogo de configuración si no hay BD inicial."""
+        """Muestra diálogo de configuración si no hay BD inicial y cierra el splash.
+        Cierra el splash marcando login_success para no bloquear la UI de configuración.
+        """
         try:
             if self.root.state() == 'withdrawn':
                 self.root.deiconify()
             self.show_settings()
+            # Permitir que el splash se cierre aunque no haya login todavía
+            try:
+                if hasattr(self, 'splash') and self.splash and hasattr(self.splash, 'login_success'):
+                    self.splash.login_success.set()
+            except Exception:
+                pass
         except Exception as e:
             print(f"[ERROR] No se pudo mostrar diálogo de configuración: {e}")
 

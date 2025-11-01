@@ -22,6 +22,10 @@ class DatabaseManager:
         # Lock para acceso thread-safe al pool
         import threading
         self._pool_lock = threading.Lock()
+        # Lock para conectar/reconectar de forma serializada
+        self._connect_lock = threading.Lock()
+        # Evitar correr migraciones/DDL en cada reconexión
+        self._schema_initialized = False
         # Flag de depuración para controlar prints [DB DEBUG]
         self.debug_enabled = False
 
@@ -130,23 +134,32 @@ class DatabaseManager:
         final_conn_str = initial_conn_str + f"DATABASE={database};"
 
         try:
-            self.conn = pyodbc.connect(final_conn_str)
-            self.cursor = self.conn.cursor()
-            self.connected_server = server
-            # Store connection parameters for potential reconnection
-            self.server = server
-            self.database = database
-            self.user = user
-            self.password = password
-            self.create_table()
-            # Do not auto-create security schema; let UI prompt the user
-            try:
-                missing = self.check_security_schema()
-                if missing:
-                    self._log(f"Security schema missing tables: {', '.join(missing)}", "WARNING")
-            except Exception as se:
-                self._log(f"Security schema check failed: {se}", "ERROR")
-            return True
+            # Serializar conexión para evitar condiciones de carrera entre hilos
+            with self._connect_lock:
+                self.conn = pyodbc.connect(final_conn_str)
+                self.cursor = self.conn.cursor()
+                self.connected_server = server
+                # Store connection parameters for potential reconnection
+                self.server = server
+                self.database = database
+                self.user = user
+                self.password = password
+                # Ejecutar DDL solo una vez por proceso (evita conflictos en reconexiones/hilos)
+                if not self._schema_initialized:
+                    try:
+                        self.create_table()
+                        self._schema_initialized = True
+                    except Exception as ddl_e:
+                        # No impedir la conexión si el driver no permite múltiples resultados
+                        self._log(f"DDL init skipped due to error: {ddl_e}", "WARNING")
+                # Do not auto-create security schema; let UI prompt the user
+                try:
+                    missing = self.check_security_schema()
+                    if missing:
+                        self._log(f"Security schema missing tables: {', '.join(missing)}", "WARNING")
+                except Exception as se:
+                    self._log(f"Security schema check failed: {se}", "ERROR")
+                return True
         except pyodbc.Error as e:
             error_msg = f"{ErrorCode.DB_CONNECTION_FAILED}: {str(e)}"
             raise Exception(error_msg) from e
@@ -724,34 +737,64 @@ class DatabaseManager:
         
 
     def execute_query(self, query, params=None):
-        cursor = None
-        try:
-            # Ensure connection is valid
-            if not self.ensure_connection():
-                raise Exception("Unable to establish database connection")
-            
-            # Create new cursor for this operation
-            cursor = self.conn.cursor()
-            if params:
-                cursor.execute(query, params)
-            else:
-                cursor.execute(query)
-            self.conn.commit()
-            return True
-        except pyodbc.Error as e:
-            if self.conn:
+        """Ejecuta DML/DDL usando conexión por-hilo; maneja reconexión y rollback seguro"""
+        max_retries = 3
+        for attempt in range(max_retries):
+            cursor = None
+            thread_conn = None
+            try:
+                # Usar conexión dedicada del hilo actual
+                thread_conn = self.get_thread_connection("exec")
+                if not thread_conn:
+                    if attempt < max_retries - 1:
+                        time.sleep(1)
+                        continue
+                    raise Exception("Unable to establish database connection")
+
+                cursor = thread_conn.cursor()
+                if params:
+                    cursor.execute(query, params)
+                else:
+                    cursor.execute(query)
+                thread_conn.commit()
+                return True
+            except pyodbc.Error as e:
+                # Intentar rollback seguro
                 try:
-                    self.conn.rollback()
-                except:
+                    if thread_conn:
+                        thread_conn.rollback()
+                except Exception:
                     pass
-            error_msg = f"{ErrorCode.DB_QUERY_EXECUTION}: {str(e)}"
-            raise Exception(error_msg) from e
-        finally:
-            if cursor:
-                try:
-                    cursor.close()
-                except:
-                    pass
+                # Errores de conexión: limpiar conexión del pool y reintentar
+                err_s = str(e)
+                if any(code in err_s for code in ["HY000", "HY010", "08S01", "08003", "07005"]):
+                    try:
+                        thread_key = f"exec_{threading.current_thread().name}"
+                        with self._pool_lock:
+                            if thread_key in self._connection_pool:
+                                try:
+                                    self._connection_pool[thread_key].close()
+                                except Exception:
+                                    pass
+                                del self._connection_pool[thread_key]
+                    except Exception:
+                        pass
+                    if attempt < max_retries - 1:
+                        time.sleep(2 ** attempt)
+                        continue
+                error_msg = f"{ErrorCode.DB_QUERY_EXECUTION}: {str(e)}"
+                raise Exception(error_msg) from e
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    time.sleep(1)
+                    continue
+                raise
+            finally:
+                if cursor:
+                    try:
+                        cursor.close()
+                    except:
+                        pass
 
     def is_connection_valid(self):
         """Validates if the current database connection is active and functional"""
@@ -794,54 +837,50 @@ class DatabaseManager:
         return True
 
     def fetch_data(self, query, params=None):
-        """Executes a SELECT query with improved error handling and connection validation"""
+        """SELECT con conexión por-hilo y reintentos sin tocar self.conn global"""
         max_retries = 3
-        
         for attempt in range(max_retries):
             cursor = None
+            thread_conn = None
             try:
-                # Ensure we have a valid connection
-                if not self.ensure_connection():
-                    if attempt == max_retries - 1:
-                        raise Exception("Unable to establish database connection")
-                    time.sleep(2)
-                    continue
-                
-                # Create a new cursor for this query to avoid state conflicts
-                cursor = self.conn.cursor()
+                # Conexión dedicada del hilo
+                thread_conn = self.get_thread_connection("fetch")
+                if not thread_conn:
+                    if attempt < max_retries - 1:
+                        time.sleep(1)
+                        continue
+                    raise Exception("Unable to establish database connection")
+
+                cursor = thread_conn.cursor()
                 cursor.execute(query, params or ())
                 result = cursor.fetchall()
-                
-                # Log successful execution in debug mode
+
                 if getattr(self, 'debug_enabled', False):
                     self._log(f"[DB DEBUG] Query executed successfully: {len(result) if result else 0} rows returned", "DEBUG")
-                
                 return result
-                
+
             except pyodbc.Error as e:
                 error_code = getattr(e, 'args', [''])[0] if hasattr(e, 'args') else str(e)
                 error_msg = str(e)
-                
-                # Handle specific ODBC errors
+                # Errores de conexión: limpiar conexión del hilo y reintentar
                 if error_code in ['HY000', 'HY010', '08S01', '08003', '07005']:
-                    # Connection-related errors - try to reconnect
                     if getattr(self, 'debug_enabled', False):
                         self._log(f"[DB DEBUG] Connection error detected on attempt {attempt + 1}: {error_code}", "DEBUG")
-                    
-                    # Force reconnection
-                    if cursor:
-                        try:
-                            cursor.close()
-                        except:
-                            pass
-                    self.conn = None
-                    self.cursor = None
-                    
+                    try:
+                        thread_key = f"fetch_{threading.current_thread().name}"
+                        with self._pool_lock:
+                            if thread_key in self._connection_pool:
+                                try:
+                                    self._connection_pool[thread_key].close()
+                                except Exception:
+                                    pass
+                                del self._connection_pool[thread_key]
+                    except Exception:
+                        pass
                     if attempt < max_retries - 1:
-                        time.sleep(2 ** attempt)  # Exponential backoff
+                        time.sleep(2 ** attempt)
                         continue
-                
-                # Log the error details
+                # Log detallado
                 detailed_error = f"""
             Error en consulta SQL:
             Query: {query}
@@ -851,13 +890,9 @@ class DatabaseManager:
             Attempt: {attempt + 1}/{max_retries}
             """
                 self._log(detailed_error, "ERROR")
-                
-                # If this is the last attempt, raise the exception
                 if attempt == max_retries - 1:
                     raise Exception(f"Database query failed after {max_retries} attempts: {error_msg}")
-                    
             except Exception as e:
-                # Handle non-ODBC exceptions
                 error_msg = f"""
             Unexpected error in database query:
             Query: {query}
@@ -866,20 +901,15 @@ class DatabaseManager:
             Attempt: {attempt + 1}/{max_retries}
             """
                 self._log(error_msg, "ERROR")
-                
                 if attempt == max_retries - 1:
                     raise
-                
                 time.sleep(1)
             finally:
-                # Always close cursor after use
                 if cursor:
                     try:
                         cursor.close()
                     except:
                         pass
-        
-        # Should not reach here, but just in case
         return []
 
     def fetch_data_threadsafe(self, query, params=None, thread_name="generic"):
@@ -1004,15 +1034,26 @@ class DatabaseManager:
                 if "HY010" in error_msg or "HY000" in error_msg:
                     # print(f"[DB DEBUG] Error ODBC en intento {attempt + 1}: {error_msg}")  # DEBUG COMENTADO
                     
-                    # Cerrar y recrear conexión para errores de secuencia
+                    # Cerrar SOLO la conexión de este hilo y limpiarla del pool
                     try:
-                        if hasattr(self, 'cursor') and self.cursor:
-                            self.cursor.close()
-                        if self.conn:
-                            self.conn.close()
-                        self.conn = None
-                        self.cursor = None
-                    except:
+                        thread_key = f"stock_chunk_{threading.current_thread().name}"
+                        with self._pool_lock:
+                            try:
+                                # Cerrar cursor local si sigue abierto
+                                try:
+                                    cursor.close()
+                                except Exception:
+                                    pass
+                                # Cerrar conexión del pool para este hilo
+                                if thread_key in self._connection_pool:
+                                    try:
+                                        self._connection_pool[thread_key].close()
+                                    except Exception:
+                                        pass
+                                    del self._connection_pool[thread_key]
+                            except Exception:
+                                pass
+                    except Exception:
                         pass
                     
                     # Esperar antes de reintentar

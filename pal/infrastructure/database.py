@@ -602,8 +602,8 @@ class DatabaseManager:
                         INNER JOIN MA_PRODUCTOS p ON d.c_codarticulo = p.C_CODIGO
                         WHERE c_coddeposito = '0301'
                         GROUP BY c_codarticulo
-                        HAVING SUM(n_cantidad) < 21  
-                        ORDER BY stock ASC
+                    HAVING SUM(n_cantidad) <= 20  
+                    ORDER BY CAST(SUM(n_cantidad) AS INT) ASC
                     """
             
                 if limit:
@@ -1148,4 +1148,99 @@ class DatabaseManager:
             return rows
         except Exception as e:
             print(f"Error obteniendo chunk de ventas TRA: {str(e)}")
+            return []
+    
+    def obtener_depositos(self):
+        """Obtiene lista de depósitos desde MA_DEPOSITO
+        
+        Returns:
+            list: Lista de tuplas (c_coddeposito, c_descripcion)
+        """
+        try:
+            query = """
+                SELECT c_coddeposito, c_descripcion
+                FROM MA_DEPOSITO
+                ORDER BY c_coddeposito
+            """
+            result = self.fetch_data(query)
+            return result if result else []
+        except Exception as e:
+            print(f"Error obteniendo depósitos: {str(e)}")
+            return []
+    
+    def obtener_alertas_stock_chunk(self, start_row=1, fetch_size=500, deposito='0301'):
+        """Obtiene alertas de stock en chunks para depósito específico
+        
+        Args:
+            start_row: Fila inicial (1-indexed)
+            fetch_size: Cantidad de filas a obtener
+            deposito: Código de depósito/sede
+            
+        Returns:
+            list: Lista de tuplas (codigo, descripcion, stock, nivel)
+        """
+        try:
+            query = """
+                SELECT 
+                    c_codarticulo AS codigo,
+                    MAX(p.C_DESCRI) AS descripcion,
+                    CAST(SUM(n_cantidad) AS INT) AS stock,  
+                    CASE
+                        WHEN SUM(n_cantidad) BETWEEN 15 AND 20 THEN 'Leve'  
+                        WHEN SUM(n_cantidad) BETWEEN 8 AND 14 THEN 'Media'
+                        ELSE 'Crítica'
+                    END AS nivel
+                FROM MA_DEPOPROD d
+                    INNER JOIN MA_PRODUCTOS p ON d.c_codarticulo = p.C_CODIGO
+                    WHERE c_coddeposito = ?
+                    GROUP BY c_codarticulo
+                    HAVING SUM(n_cantidad) < 21  
+                    ORDER BY CAST(SUM(n_cantidad) AS INT) ASC
+                    OFFSET ? ROWS FETCH NEXT ? ROWS ONLY
+            """
+            offset = start_row - 1  # Convert to 0-indexed
+            return self.fetch_data(query, (deposito, offset, fetch_size))
+        except Exception as e:
+            print(f"Error obteniendo chunk de alertas stock: {str(e)}")
+            return []
+    
+    def obtener_alertas_stock_multiples(self, start_row=1, fetch_size=500, depositos=['0301']):
+        """Obtiene alertas de stock para múltiples depósitos
+        
+        Args:
+            start_row: Fila inicial (1-indexed)
+            fetch_size: Cantidad de filas a obtener
+            depositos: Lista de códigos de depósito
+            
+        Returns:
+            list: Lista de tuplas (codigo, descripcion, stock, nivel)
+        """
+        try:
+            if not depositos:
+                depositos = ['0301']
+            
+            placeholders = ','.join('?' for _ in depositos)
+            query = f"""
+                SELECT 
+                    c_codarticulo AS codigo,
+                    MAX(p.C_DESCRI) AS descripcion,
+                    CAST(SUM(n_cantidad) AS INT) AS stock,  
+                    CASE
+                        WHEN SUM(n_cantidad) BETWEEN 15 AND 20 THEN 'Leve'  
+                        WHEN SUM(n_cantidad) BETWEEN 8 AND 14 THEN 'Media'
+                        ELSE 'Crítica'
+                    END AS nivel
+                FROM MA_DEPOPROD d
+                    INNER JOIN MA_PRODUCTOS p ON d.c_codarticulo = p.C_CODIGO
+                    WHERE c_coddeposito IN ({placeholders})
+                    GROUP BY c_codarticulo
+                    HAVING SUM(n_cantidad) < 21  
+                    ORDER BY CAST(SUM(n_cantidad) AS INT) ASC
+                    OFFSET ? ROWS FETCH NEXT ? ROWS ONLY
+            """
+            offset = start_row - 1  # Convert to 0-indexed
+            params = depositos + [offset, fetch_size]
+            return self.fetch_data(query, params)
+        except Exception as e:
+            print(f"Error obteniendo alertas stock múltiples: {str(e)}")
             return []

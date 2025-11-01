@@ -36,6 +36,7 @@ from pal.core.session import SessionManager
 from pal.core.auth import AuthManager
 from pal.services.cache import CacheDescripciones
 from pal.services.envios import EnvioProgramado, ProgramadorEnvios
+from pal.core.log import set_component_level
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from win10toast import ToastNotifier
@@ -225,6 +226,14 @@ class DatabaseApp:
             self.tra_debug = self.debug_flags.get('tra', False)
             self.stock_debug = self.debug_flags.get('stock', False)
             self.mbrp_debug = self.debug_flags.get('mbrp', False)
+            # Configurar niveles de log por componente para reducir ruido
+            try:
+                set_component_level("TRA", "DEBUG" if self.tra_debug else "WARNING")
+                set_component_level("STOCK", "DEBUG" if self.stock_debug else "WARNING")
+                set_component_level("MBRP", "DEBUG" if self.mbrp_debug else "WARNING")
+                set_component_level("DB", "DEBUG" if self.debug_flags.get('db', False) else "INFO")
+            except Exception:
+                pass
             try:
                 # Habilitar/Deshabilitar debug en el gestor de BD
                 setattr(self.db_manager, 'debug_enabled', self.debug_flags.get('db', False))
@@ -1988,7 +1997,7 @@ class DatabaseApp:
             self.cod_producto.bind("<KeyRelease>", lambda e: self.buscar_descripcion(e) or 0)
         
         # Atajo de teclado para consola de debug (Ctrl+Shift+D)
-        self.root.bind("<Control-Shift-D>", lambda e: self.debug_console.toggle())
+        self.root.bind_all("<Control-Shift-D>", lambda e: (self.debug_console.toggle() or 0))
 
     def setup_modern_ui(self):   
         self.root.title("Gestión de Clientes - Corporativo")
@@ -2028,6 +2037,15 @@ class DatabaseApp:
         self.sub_dict = {}
         self.sub_combo['values'] = ['Todos']
         self.sub_var.set('Todos')
+        
+        # Cargar depósitos y preferencias
+        try:
+            self._load_stock_depositos_preference()
+            self.load_depositos_stock()
+            self._update_stock_depositos_label()
+        except Exception as e:
+            self.log(f"Error cargando depósitos: {e}", "DEBUG")
+            self.stock_depositos_seleccionados = ['0301']
 
     def load_tra_filters(self):
         """Carga departamentos, grupos y subgrupos para la pestaña T.R.A"""
@@ -2402,6 +2420,241 @@ class DatabaseApp:
         self.pagination_label.config(text=f"Página {self.current_page}/{total_paginas}")
         self.btn_prev['state'] = 'normal' if self.current_page > 1 else 'disabled'
         self.btn_next['state'] = 'normal' if self.current_page < total_paginas else 'disabled'    
+    
+    def load_depositos_stock(self):
+        """Carga lista de depósitos desde la base de datos"""
+        try:
+            depositos = self.db_manager.obtener_depositos()
+            if not depositos:
+                self.log("No se encontraron depósitos en la BD", "WARNING")
+                return
+            
+            # Agrupar por localidad según prefijo
+            localidades = {}
+            for cod, desc in depositos:
+                cod = str(cod).strip()
+                desc = str(desc).strip()
+                
+                # Determinar localidad por prefijo
+                if cod.startswith('03'):
+                    localidad = 'Cabudare'
+                elif cod.startswith('01'):
+                    localidad = 'Barinas'
+                elif cod.startswith('04'):
+                    localidad = 'Guanare'
+                else:
+                    localidad = 'Otra'
+                
+                if localidad not in localidades:
+                    localidades[localidad] = []
+                localidades[localidad].append({'codigo': cod, 'descripcion': desc})
+            
+            # Guardar en atributos
+            self.stock_localidades = localidades
+            self.stock_depositos_por_codigo = {cod: desc for cod, desc in depositos}
+            
+            # Inicializar seleccionados (default a Cabudare)
+            if not hasattr(self, 'stock_depositos_seleccionados'):
+                self.stock_depositos_seleccionados = [d['codigo'] for d in localidades.get('Cabudare', [])]
+            
+            # Actualizar label de depósitos
+            self._update_stock_depositos_label()
+            
+            self.log(f"✅ Depósitos cargados: {len(depositos)} depósitos en {len(localidades)} localidades", "SUCCESS")
+            
+        except Exception as e:
+            self.log(f"Error cargando depósitos: {e}", "ERROR")
+    
+    def _update_stock_depositos_label(self):
+        """Actualiza el label con los depósitos seleccionados"""
+        try:
+            if not hasattr(self, 'stock_depositos_seleccionados'):
+                self.stock_depositos_seleccionados = ['0301']
+            
+            if hasattr(self, 'stock_depositos_label'):
+                # Crear texto descriptivo
+                descs = [self.stock_depositos_por_codigo.get(cod, cod) 
+                        for cod in sorted(self.stock_depositos_seleccionados)]
+                texto = ', '.join(descs) if descs else '[Sin seleccionar]'
+                self.stock_depositos_label.config(text=f"📦 {texto}")
+        except Exception as e:
+            self.log(f"Error actualizando label de depósitos: {e}", "DEBUG")
+    
+    def abrir_menu_depositos_stock(self):
+        """Abre diálogo para configurar localidad y depósitos"""
+        try:
+            import tkinter as tk
+            from tkinter import ttk
+            
+            if not hasattr(self, 'stock_localidades'):
+                self.log("Cargando depósitos...", "INFO")
+                return
+            
+            # Crear ventana emergente
+            ventana = tk.Toplevel(self.root)
+            ventana.title("Configurar Localidad y Depósitos")
+            ventana.geometry("600x450")
+            ventana.resizable(False, False)
+            ventana.grab_set()
+            
+            # Frame de selección de localidad
+            frame_localidad_sel = ttk.LabelFrame(ventana, text="1. Seleccionar Localidad", padding=10)
+            frame_localidad_sel.pack(fill=tk.X, padx=10, pady=10)
+            
+            localidad_var = tk.StringVar()
+            
+            def on_localidad_selected(event=None):
+                """Handler cuando se selecciona una localidad"""
+                localidad_sel = localidad_var.get()
+                # Limpiar y actualizar checkboxes de depósitos
+                for widget in frame_depositos_inner.winfo_children():
+                    widget.destroy()
+                
+                if localidad_sel and localidad_sel in self.stock_localidades:
+                    for deposito in self.stock_localidades[localidad_sel]:
+                        cod = deposito['codigo']
+                        desc = deposito['descripcion']
+                        var = tk.BooleanVar(value=cod in self.stock_depositos_seleccionados)
+                        vars_depositos[cod] = var
+                        ttk.Checkbutton(
+                            frame_depositos_inner,
+                            text=f"{cod} - {desc}",
+                            variable=var
+                        ).pack(anchor=tk.W, padx=10, pady=3)
+            
+            # Combobox de localidades
+            ttk.Label(frame_localidad_sel, text="Localidad:").pack(side=tk.LEFT, padx=5)
+            combo_localidad = ttk.Combobox(
+                frame_localidad_sel,
+                textvariable=localidad_var,
+                values=sorted(self.stock_localidades.keys()),
+                state='readonly',
+                width=30
+            )
+            combo_localidad.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+            combo_localidad.bind('<<ComboboxSelected>>', on_localidad_selected)
+            
+            # Obtener localidad actual del primer depósito seleccionado
+            localidad_actual = None
+            if hasattr(self, 'stock_depositos_seleccionados') and self.stock_depositos_seleccionados:
+                for loc, deps in self.stock_localidades.items():
+                    for dep in deps:
+                        if dep['codigo'] == self.stock_depositos_seleccionados[0]:
+                            localidad_actual = loc
+                            break
+                    if localidad_actual:
+                        break
+            
+            if localidad_actual:
+                localidad_var.set(localidad_actual)
+            
+            # Frame de selección de depósitos
+            frame_depositos_label = ttk.LabelFrame(ventana, text="2. Seleccionar Depósitos", padding=10)
+            frame_depositos_label.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+            
+            # Canvas con scrollbar para los depósitos
+            canvas = tk.Canvas(frame_depositos_label)
+            scrollbar = ttk.Scrollbar(frame_depositos_label, orient="vertical", command=canvas.yview)
+            frame_depositos_inner = ttk.Frame(canvas)
+            
+            frame_depositos_inner.bind(
+                "<Configure>",
+                lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+            )
+            
+            canvas.create_window((0, 0), window=frame_depositos_inner, anchor="nw")
+            canvas.configure(yscrollcommand=scrollbar.set)
+            
+            canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+            
+            vars_depositos = {}
+            
+            # Mostrar depósitos de la localidad seleccionada
+            if localidad_actual:
+                on_localidad_selected()
+            
+            # Frame de botones
+            frame_botones = ttk.Frame(ventana)
+            frame_botones.pack(fill=tk.X, padx=10, pady=10)
+            
+            def guardar_seleccion():
+                """Guarda la selección de localidad y depósitos"""
+                localidad_sel = localidad_var.get()
+                if not localidad_sel:
+                    self.log("Debe seleccionar una localidad", "WARNING")
+                    return
+                
+                seleccionados = [cod for cod, var in vars_depositos.items() if var.get()]
+                
+                if not seleccionados:
+                    self.log("Debe seleccionar al menos un depósito", "WARNING")
+                    return
+                
+                # Guardar localidad actual
+                self.stock_localidad_actual = localidad_sel
+                self.stock_depositos_seleccionados = seleccionados
+                self._update_stock_depositos_label()
+                
+                # Guardar preferencia
+                self._save_stock_depositos_preference()
+                
+                # Recargar datos
+                self.current_page = 1
+                self.recargar_stock()
+                
+                ventana.destroy()
+                self.log(f"✅ Localidad: {localidad_sel} | Depósitos: {', '.join(seleccionados)}", "SUCCESS")
+            
+            ttk.Button(frame_botones, text="✅ Guardar", command=guardar_seleccion).pack(side=tk.LEFT, padx=5)
+            ttk.Button(frame_botones, text="❌ Cancelar", command=ventana.destroy).pack(side=tk.LEFT, padx=5)
+            
+        except Exception as e:
+            self.log(f"Error abriendo menú de depósitos: {e}", "ERROR")
+    
+    def _save_stock_depositos_preference(self):
+        """Guarda preferencia de localidad y depósitos seleccionados en archivo local"""
+        try:
+            import json
+            pref_file = "stock_depositos_preference.json"
+            pref_data = {
+                'localidad': getattr(self, 'stock_localidad_actual', 'Cabudare'),
+                'depositos': self.stock_depositos_seleccionados,
+                'timestamp': str(time.time())
+            }
+            with open(pref_file, 'w', encoding='utf-8') as f:
+                json.dump(pref_data, f, ensure_ascii=False)
+            self.log(f"💾 Preferencia guardada", "DEBUG")
+        except Exception as e:
+            self.log(f"Error guardando preferencia de depósitos: {e}", "DEBUG")
+    
+    def _load_stock_depositos_preference(self):
+        """Carga preferencia de localidad y depósitos guardada"""
+        try:
+            import json
+            import os
+            pref_file = "stock_depositos_preference.json"
+            if os.path.exists(pref_file):
+                with open(pref_file, 'r', encoding='utf-8') as f:
+                    pref_data = json.load(f)
+                    self.stock_localidad_actual = pref_data.get('localidad', 'Cabudare')
+                    self.stock_depositos_seleccionados = pref_data.get('depositos', ['0301'])
+                    self.log(f"📂 Preferencia cargada - Localidad: {self.stock_localidad_actual}", "DEBUG")
+            else:
+                self.stock_localidad_actual = 'Cabudare'
+                self.stock_depositos_seleccionados = ['0301']
+        except Exception as e:
+            self.log(f"Error cargando preferencia: {e}", "DEBUG")
+            self.stock_localidad_actual = 'Cabudare'
+            self.stock_depositos_seleccionados = ['0301']
+    
+    def on_deposito_stock_selected(self):
+        """Handler cuando cambian los depósitos seleccionados"""
+        try:
+            self.current_page = 1
+            self.recargar_stock()
+        except Exception as e:
+            self.log(f"Error en cambio de depósito: {e}", "ERROR")
 
     def hover_row(self, event):
         item = self.stock_tree.identify_row(event.y)
@@ -4298,7 +4551,133 @@ class DatabaseApp:
             text="Guardar Depuración",
             command=self._save_debug_config
         ).grid(row=4, column=0, sticky="e", pady=10, padx=10)
+        
+        # Pestaña de Caché y Limpieza
+        cache_frame = ttk.Frame(notebook)
+        notebook.add(cache_frame, text="Caché y Limpieza")
+        self._create_cache_cleanup_tab(cache_frame)
 
+    def _create_cache_cleanup_tab(self, parent):
+        """Pestaña para gestionar y limpiar cachés."""
+        frame = ttk.Frame(parent, padding=15)
+        frame.pack(fill=tk.BOTH, expand=True)
+        
+        ttk.Label(frame, text="Gestionar Cachés del Sistema", font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=10)
+        
+        # Información de cachés
+        info_frame = ttk.LabelFrame(frame, text="Cachés Disponibles", padding=10)
+        info_frame.pack(fill=tk.X, padx=5, pady=10)
+        
+        import os
+        caches = [
+            ("productos_jerarquia_cache.json", "Jerarquía de Productos"),
+            ("jerarquia_cache.json", "Jerarquía TRA/MBRP"),
+            ("stock_depositos_preference.json", "Preferencias de Depósitos"),
+        ]
+        
+        cache_info = ttk.Frame(info_frame)
+        cache_info.pack(fill=tk.BOTH, expand=True)
+        
+        for cache_file, desc in caches:
+            cache_row = ttk.Frame(cache_info)
+            cache_row.pack(fill=tk.X, pady=5)
+            
+            exists = os.path.exists(cache_file)
+            status = "✔️" if exists else "❌"
+            size = f"{os.path.getsize(cache_file) / 1024:.1f} KB" if exists else "No existe"
+            
+            ttk.Label(cache_row, text=f"{status} {desc}").pack(side=tk.LEFT, padx=5)
+            ttk.Label(cache_row, text=size, foreground="gray").pack(side=tk.RIGHT, padx=5)
+        
+        # Botones de limpieza
+        action_frame = ttk.LabelFrame(frame, text="Limpiar Caché", padding=10)
+        action_frame.pack(fill=tk.X, padx=5, pady=10)
+        
+        btn1 = ttk.Button(
+            action_frame,
+            text="🗑️ Limpiar Jerarquía de Productos",
+            command=lambda: self._clear_cache_file("productos_jerarquia_cache.json")
+        )
+        btn1.pack(fill=tk.X, pady=5)
+        
+        btn2 = ttk.Button(
+            action_frame,
+            text="🗑️ Limpiar Caché TRA/MBRP",
+            command=lambda: self._clear_cache_file("jerarquia_cache.json")
+        )
+        btn2.pack(fill=tk.X, pady=5)
+        
+        btn3 = ttk.Button(
+            action_frame,
+            text="🗑️ Limpiar Preferencias de Depósitos",
+            command=lambda: self._clear_cache_file("stock_depositos_preference.json")
+        )
+        btn3.pack(fill=tk.X, pady=5)
+        
+        # Botón para limpiar TODO
+        btn_all = ttk.Button(
+            action_frame,
+            text="🗑️ LIMPIAR TODO",
+            command=self._clear_all_caches
+        )
+        btn_all.pack(fill=tk.X, pady=10)
+        
+        # Nota informativa
+        info_text = ttk.Frame(frame)
+        info_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=10)
+        
+        ttk.Label(
+            info_text,
+            text="⚠️ Nota: Limpiar el caché forzará que el sistema recargue los datos desde la base de datos.\n"
+                 "Esto puede tomar más tiempo la próxima vez que cargues los módulos.",
+            foreground="orange",
+            wraplength=500,
+            justify=tk.LEFT
+        ).pack(fill=tk.BOTH, expand=True)
+    
+    def _clear_cache_file(self, filename):
+        """Limpia un archivo de caché específíco."""
+        try:
+            import os
+            if os.path.exists(filename):
+                os.remove(filename)
+                self.log(f"✅ Caché '{filename}' eliminado", "SUCCESS")
+                messagebox.showinfo("Listo", f"✅ Caché '{filename}' eliminado exitosamente")
+            else:
+                messagebox.showinfo("Info", f"ℹ️ El archivo '{filename}' no existe")
+        except Exception as e:
+            self.log(f"❌ Error eliminando caché: {e}", "ERROR")
+            messagebox.showerror("Error", f"❌ No se pudo eliminar el caché:\n{e}")
+    
+    def _clear_all_caches(self):
+        """Limpia todos los cachés del sistema."""
+        if not messagebox.askyesno("Confirmar", 
+                                   "🗑️ ¿Está seguro de que desea limpiar TODO el caché?\n\n"
+                                   "Esto incluirá:\n"
+                                   "• Jerarquía de Productos\n"
+                                   "• Caché TRA/MBRP\n"
+                                   "• Preferencias de Depósitos"):
+            return
+        
+        import os
+        caches = [
+            "productos_jerarquia_cache.json",
+            "jerarquia_cache.json",
+            "stock_depositos_preference.json",
+        ]
+        
+        count = 0
+        for cache_file in caches:
+            try:
+                if os.path.exists(cache_file):
+                    os.remove(cache_file)
+                    count += 1
+            except Exception as e:
+                self.log(f"❌ Error eliminando {cache_file}: {e}", "ERROR")
+        
+        self.log(f"✅ {count} archivo(s) de caché eliminados", "SUCCESS")
+        messagebox.showinfo("Listo", f"✅ Se eliminaron {count} archivo(s) de caché exitosamente")
+    
     def _create_user_management_tab(self, parent):
         """Pestaña para gestionar usuarios y sus módulos (sólo admin)."""
         frame = ttk.Frame(parent, padding=15)
@@ -6136,6 +6515,7 @@ class DatabaseApp:
     def _background_load_alertas_stock(self):
         """Carga todas las alertas en segundo plano, en bloques, y refresca UI al llegar datos.
         Usa chunks adaptativos para optimizar latencia y rendimiento.
+        Soporta múltiples depósitos seleccionados.
         """
         from pal.core.chunks import AdaptiveChunkController
         total_loaded = 0
@@ -6143,6 +6523,13 @@ class DatabaseApp:
         load_start_time = time.perf_counter()
         
         try:
+            # Obtener depósitos seleccionados o usar valor por defecto
+            depositos = getattr(self, 'stock_depositos_seleccionados', ['0301'])
+            if not depositos:
+                depositos = ['0301']
+            
+            self.stock_debug_log(f"Cargando alertas para depósitos: {', '.join(depositos)}")
+            
             start = 1
             controller = AdaptiveChunkController(initial=500, min_size=100, max_size=2000, target_latency=2.0)
             # Usar dict para evitar duplicados por código
@@ -6157,7 +6544,8 @@ class DatabaseApp:
             while True:
                 chunk_size = controller.size
                 chunk_start_time = time.perf_counter()
-                rows = self.db_manager.obtener_alertas_stock_chunk(start_row=start, fetch_size=chunk_size, deposito='0301')
+                # Usar función para múltiples depósitos
+                rows = self.db_manager.obtener_alertas_stock_multiples(start_row=start, fetch_size=chunk_size, depositos=depositos)
                 chunk_query_time = time.perf_counter() - chunk_start_time
                 
                 if not rows:

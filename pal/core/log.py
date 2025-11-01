@@ -13,7 +13,38 @@ import threading
 import inspect
 from typing import Optional
 
-_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "SUCCESS"}
+# Niveles y umbrales
+_LEVEL_ORDER = {"DEBUG": 10, "INFO": 20, "SUCCESS": 25, "WARNING": 30, "ERROR": 40}
+_LEVELS = set(_LEVEL_ORDER.keys())
+
+# Configuración global de niveles por componente
+_default_level = "INFO"
+_component_levels = {}
+
+
+def set_level(level: str):
+    global _default_level
+    level = (level or "INFO").upper()
+    if level in _LEVELS:
+        _default_level = level
+
+
+def set_component_level(component: str, level: str):
+    if not component:
+        return
+    lvl = (level or "INFO").upper()
+    if lvl in _LEVELS:
+        _component_levels[component.upper()] = lvl
+
+
+def _should_emit(component: str, level: str) -> bool:
+    comp = (component or "APP").upper()
+    lvl = (level or "INFO").upper()
+    if lvl not in _LEVELS:
+        lvl = "INFO"
+    min_level = _component_levels.get(comp, _default_level)
+    return _LEVEL_ORDER[lvl] >= _LEVEL_ORDER[min_level]
+
 
 class Logger:
     def __init__(self, component: str):
@@ -37,6 +68,9 @@ class Logger:
         return f"{prefix} {message}"
 
     def log(self, level: str, message: str):
+        # Filtrar por nivel efectivo
+        if not _should_emit(self.component, level):
+            return
         try:
             print(self._format(level, message, caller_offset=3))
         except Exception:
@@ -58,7 +92,9 @@ class Logger:
         self.log("ERROR", message)
 
     def success(self, message: str):
+        # Tratar SUCCESS entre INFO y WARNING
         self.log("SUCCESS", message)
+
 
 def get_logger(component: Optional[str] = None) -> Logger:
     return Logger(component or "APP")

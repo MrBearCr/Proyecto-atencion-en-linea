@@ -12,6 +12,18 @@ def setup_stock_tab(app):
     main_frame = ttk.Frame(app.stock_tab)
     main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
+    # ① --- Frame superior con Depósitos y Acciones ---
+    top_frame = ttk.Frame(main_frame)
+    top_frame.pack(fill=tk.X, pady=5)
+    
+    # Botón para configurar depósitos
+    ttk.Label(top_frame, text="Depósitos:").pack(side=tk.LEFT, padx=5)
+    app.stock_depositos_label = ttk.Label(top_frame, text="[Sin seleccionar]", foreground="#FF6B6B", font=('', 10, 'bold'))
+    app.stock_depositos_label.pack(side=tk.LEFT, padx=5)
+    
+    ttk.Button(top_frame, text="⚙️ Configurar Depósitos", 
+               command=lambda: getattr(app, 'abrir_menu_depositos_stock', lambda: None)()).pack(side=tk.LEFT, padx=5)
+    
     # ① --- Filtros jerárquicos ---
     hier_frame = ttk.Frame(main_frame)
     hier_frame.pack(fill=tk.X, pady=5)

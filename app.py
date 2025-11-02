@@ -1620,6 +1620,10 @@ class DatabaseApp:
     def exportar_excel(self):
         """Exporta datos de stock en formato Excel con múltiples hojas y formato avanzado - ASYNC"""
         import threading
+        import time
+        
+        tiempo_inicio_total = time.time()
+        self.log("[EXPORT TIMER] ⏱️ Iniciando proceso de exportación...", "INFO")
         
         try:
             # Permisos: STOCK.exportar
@@ -1652,57 +1656,31 @@ class DatabaseApp:
                 )
                 return
             
-            # 1. Mostrar diálogo para seleccionar ubicaciones (igual que CSV)
-            dialog = tk.Toplevel(self.root)
-            dialog.title("Exportar a Excel - Seleccionar Ubicaciones")
-            dialog.transient(self.root)
-            dialog.grab_set()
-            dialog.geometry("400x300")
-        
-            ubicaciones_vars = {
-                ubicacion: tk.BooleanVar(value=True)
-                for ubicacion in LOCATION_GROUPS
-            }
-
-            # Título del diálogo
-            ttk.Label(dialog, text="Exportación Excel - Formato Profesional", 
-                     font=("Arial", 12, "bold")).pack(pady=10)
-            ttk.Label(dialog, text="Incluye: Tablas con filtros, formato condicional,\nresumen por niveles y hoja de productos críticos", 
-                     font=("Arial", 9)).pack(pady=(0,10))
-            
-            ttk.Label(dialog, text="Seleccione las ubicaciones a incluir:").pack(pady=10)
-            
-            for ubicacion in LOCATION_GROUPS:
-                frame = ttk.Frame(dialog)
-                frame.pack(anchor='w', padx=20, pady=2)
-                cb = ttk.Checkbutton(
-                    frame,
-                    text=f"{ubicacion}",
-                    variable=ubicaciones_vars[ubicacion]
-                )
-                cb.pack(side=tk.LEFT)
-                ttk.Label(frame, text=f"({len(LOCATION_GROUPS[ubicacion])} depósitos)", 
-                         foreground="gray").pack(side=tk.LEFT, padx=(5,0))
-
-            seleccionadas = []
-            def confirmar():
-                nonlocal seleccionadas
-                seleccionadas = [u for u, var in ubicaciones_vars.items() if var.get()]
-                dialog.destroy()
-        
-            btn_frame = ttk.Frame(dialog)
-            btn_frame.pack(pady=20)
-            ttk.Button(btn_frame, text="📈 Exportar Excel", command=confirmar).pack(side=tk.LEFT, padx=5)
-            ttk.Button(btn_frame, text="Cancelar", command=dialog.destroy).pack(side=tk.RIGHT, padx=5)
-
-            dialog.wait_window()
-            if not seleccionadas:
+            # Verificar que existan localidades y depósitos configurados
+            if not hasattr(self, 'stock_localidades') or not self.stock_localidades:
+                messagebox.showwarning("Depósitos", "No hay depósitos configurados. Configure primero los depósitos.")
                 return
+            
+            # Mostrar diálogo para seleccionar sedes/localidades a exportar
+            tiempo_pre_dialogo = time.time()
+            seleccionadas = self._seleccionar_sedes_para_exportar()
+            tiempo_post_dialogo = time.time()
+            self.log(f"[EXPORT TIMER] 📊 Diálogo de selección: {tiempo_post_dialogo - tiempo_pre_dialogo:.2f}s", "INFO")
+            
+            if not seleccionadas:
+                return  # Usuario canceló o no seleccionó ninguna sede
+            
+            # Mapear cada depósito como una "ubicación" independiente
+            location_groups_dynamic = {dep: [dep] for dep in seleccionadas}
 
-            # 2. Obtener datos filtrados
-            datos_exportar = self._obtener_datos_filtrados()
+            # 2. Obtener datos filtrados por los depósitos seleccionados para exportar
+            tiempo_pre_filtrado = time.time()
+            datos_exportar = self._obtener_datos_filtrados_por_depositos(seleccionadas)
+            tiempo_post_filtrado = time.time()
+            self.log(f"[EXPORT TIMER] 🔍 Filtrado de datos: {tiempo_post_filtrado - tiempo_pre_filtrado:.2f}s ({len(datos_exportar)} registros)", "INFO")
+            
             if not datos_exportar:
-                messagebox.showwarning("Sin datos", "No hay registros para exportar")
+                messagebox.showwarning("Sin datos", "No hay registros para exportar en las sedes seleccionadas")
                 return
 
             # 3. Configurar progreso
@@ -1723,20 +1701,32 @@ class DatabaseApp:
 
             # Función para ejecutar la exportación en hilo separado
             def export_thread():
+                tiempo_inicio_export = time.time()
                 try:
                     from pal.services.exports import export_stock_excel
+                    
+                    self.root.after(0, lambda: self.log(f"[EXPORT TIMER] 📝 Iniciando escritura de Excel ({len(datos_exportar)} registros, {len(seleccionadas)} depósitos)...", "INFO"))
                     
                     total_registros = export_stock_excel(
                         filename=filename,
                         datos_exportar=datos_exportar,
                         seleccionadas=seleccionadas,
-                        location_groups=LOCATION_GROUPS,
+                        location_groups=location_groups_dynamic,
                         db_manager=self.db_manager,
                         progress_cb=progress_cb,
                     )
                     
+                    tiempo_fin_export = time.time()
+                    tiempo_total_export = tiempo_fin_export - tiempo_inicio_export
+                    tiempo_total_proceso = tiempo_fin_export - tiempo_inicio_total
+                    
+                    self.root.after(0, lambda: self.log(
+                        f"[EXPORT TIMER] ✅ Excel completado en {tiempo_total_export:.2f}s | Proceso total: {tiempo_total_proceso:.2f}s", 
+                        "SUCCESS"
+                    ))
+                    
                     # Notificar éxito en el hilo principal
-                    ubicaciones_info = f"🗺️ Ubicaciones: {len(seleccionadas)}\n🏢 Depósitos: {sum(len(LOCATION_GROUPS[u]) for u in seleccionadas)}\n\n"
+                    ubicaciones_info = f"🏢 Depósitos: {len(seleccionadas)}\n\n"
                     self.root.after(0, lambda: self._export_success(
                         "Stock",
                         total_registros,
@@ -1785,6 +1775,68 @@ class DatabaseApp:
                 
             
             
+    def _obtener_datos_filtrados_por_depositos(self, depositos_seleccionados):
+        """Obtiene datos filtrados específicamente para los depósitos seleccionados en exportación"""
+        try:
+            # Si los depósitos seleccionados son los mismos que en configuración, usar cached_alertas
+            depositos_configurados = set(getattr(self, 'stock_depositos_seleccionados', []) or [])
+            depositos_exportar = set(depositos_seleccionados)
+            
+            # Si son exactamente los mismos, usar el cache
+            if depositos_exportar == depositos_configurados:
+                datos_base = list(self.cached_alertas)
+            else:
+                # Si son diferentes, recargar desde BD solo para los depósitos de exportación
+                from pal.services.stock import get_alertas_stock
+                
+                # Obtener alertas para los depósitos específicos
+                alertas_filtradas = get_alertas_stock(
+                    self.db_manager, 
+                    ubicaciones=list(depositos_seleccionados)
+                )
+                
+                if not alertas_filtradas:
+                    return []
+                
+                datos_base = list(alertas_filtradas)
+            
+            # Aplicar mismos filtros de UI que en aplicar_filtro_stock
+            datos_filtrados = datos_base
+            
+            # Filtro jerárquico
+            dept_code = self.dept_dict.get(self.dept_var.get()) if hasattr(self, 'dept_dict') else None
+            group_code = self.group_dict.get(self.group_var.get()) if hasattr(self, 'group_dict') else None
+            sub_code = self.sub_dict.get(self.sub_var.get()) if hasattr(self, 'sub_dict') else None
+        
+            if any([dept_code, group_code, sub_code]):
+                datos_filtrados = [
+                    r for r in datos_filtrados 
+                    if self._coincide_jerarquia(r[0], dept_code, group_code, sub_code)
+                ]
+        
+            # Filtro texto
+            texto_busqueda = self.search_var.get().strip().lower() if hasattr(self, 'search_var') else ''
+            if texto_busqueda:
+                datos_filtrados = [
+                    r for r in datos_filtrados 
+                    if texto_busqueda in (r[1].lower() + r[0].lower())
+                ]
+        
+            # Filtro nivel
+            filtro_nivel = self.filter_var.get().upper() if hasattr(self, 'filter_var') else 'TODAS'
+            if filtro_nivel != 'TODAS':
+                datos_filtrados = [r for r in datos_filtrados if r[3].upper() == filtro_nivel]
+        
+            # Ordenar por favoritos
+            favoritos = self._get_favoritos_local()
+            return sorted(datos_filtrados, key=lambda x: x[0] not in favoritos)
+            
+        except Exception as e:
+            self.log(f"Error filtrando datos por depósitos: {e}", "ERROR")
+            import traceback
+            self.log(f"Traceback: {traceback.format_exc()}", "ERROR")
+            return []
+    
     def _obtener_datos_filtrados(self):
         """Réplica de la lógica de filtrado SIN paginación"""
         # Aplicar mismos filtros que en aplicar_filtro_stock
@@ -2501,7 +2553,7 @@ class DatabaseApp:
             # Crear ventana emergente
             ventana = tk.Toplevel(self.root)
             ventana.title("Configurar Localidad y Depósitos")
-            ventana.geometry("600x450")
+            ventana.geometry("720x520")
             ventana.resizable(False, False)
             ventana.grab_set()
             
@@ -2619,6 +2671,168 @@ class DatabaseApp:
             
         except Exception as e:
             self.log(f"Error abriendo menú de depósitos: {e}", "ERROR")
+    
+    def _seleccionar_sedes_para_exportar(self):
+        """Muestra diálogo para que el usuario seleccione qué sedes/localidades exportar"""
+        import tkinter as tk
+        from tkinter import ttk
+        
+        resultado = []
+        
+        try:
+            # Crear ventana emergente
+            ventana = tk.Toplevel(self.root)
+            ventana.title("Seleccionar Sedes para Exportar")
+            ventana.geometry("600x450")
+            ventana.resizable(False, False)
+            ventana.grab_set()
+            
+            # Título
+            ttk.Label(
+                ventana, 
+                text="Seleccione las sedes/localidades que desea incluir en la exportación:",
+                font=('Arial', 10, 'bold')
+            ).pack(pady=15, padx=10)
+            
+            # Frame principal con scrollbar
+            frame_main = ttk.Frame(ventana)
+            frame_main.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+            
+            canvas = tk.Canvas(frame_main)
+            scrollbar = ttk.Scrollbar(frame_main, orient="vertical", command=canvas.yview)
+            frame_sedes = ttk.Frame(canvas)
+            
+            frame_sedes.bind(
+                "<Configure>",
+                lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+            )
+            
+            canvas.create_window((0, 0), window=frame_sedes, anchor="nw")
+            canvas.configure(yscrollcommand=scrollbar.set)
+            
+            canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+            
+            # Variables para cada sede
+            vars_sedes = {}
+            depositos_por_sede = {}
+            
+            # Obtener depósitos seleccionados en la configuración
+            depositos_configurados = list(getattr(self, 'stock_depositos_seleccionados', []) or [])
+            
+            # Crear checkboxes por cada localidad/sede
+            for localidad in sorted(self.stock_localidades.keys()):
+                depositos = self.stock_localidades[localidad]
+                # FILTRAR: solo incluir depósitos que están en la configuración seleccionada
+                depositos_filtrados = [d for d in depositos if d['codigo'] in depositos_configurados]
+                
+                # Si no hay depósitos configurados para esta sede, omitirla
+                if not depositos_filtrados:
+                    continue
+                
+                depositos_codigos = [d['codigo'] for d in depositos_filtrados]
+                depositos_por_sede[localidad] = depositos_codigos
+                
+                # Frame para cada sede
+                frame_sede = ttk.LabelFrame(frame_sedes, text=f"🏢 {localidad}", padding=10)
+                frame_sede.pack(fill=tk.X, padx=10, pady=5)
+                
+                # Variable de checkbox para la sede
+                var_sede = tk.BooleanVar(value=False)
+                vars_sedes[localidad] = var_sede
+                
+                # Checkbox principal de la sede
+                chk_sede = ttk.Checkbutton(
+                    frame_sede,
+                    text=f"Incluir toda la sede ({len(depositos_filtrados)} depósito{'s' if len(depositos_filtrados) > 1 else ''})",
+                    variable=var_sede,
+                    style='Bold.TCheckbutton'
+                )
+                chk_sede.pack(anchor=tk.W, pady=(0, 5))
+                
+                # Mostrar depósitos de esta sede
+                frame_deps = ttk.Frame(frame_sede)
+                frame_deps.pack(fill=tk.X, padx=20)
+                
+                for deposito in depositos_filtrados:
+                    ttk.Label(
+                        frame_deps,
+                        text=f"  • {deposito['codigo']} - {deposito['descripcion']}",
+                        foreground="#666"
+                    ).pack(anchor=tk.W, pady=2)
+            
+            # Botones de selección rápida
+            frame_quick = ttk.Frame(ventana)
+            frame_quick.pack(fill=tk.X, padx=10, pady=5)
+            
+            def seleccionar_todas():
+                for var in vars_sedes.values():
+                    var.set(True)
+            
+            def deseleccionar_todas():
+                for var in vars_sedes.values():
+                    var.set(False)
+            
+            ttk.Button(frame_quick, text="✅ Seleccionar Todas", command=seleccionar_todas).pack(side=tk.LEFT, padx=5)
+            ttk.Button(frame_quick, text="❌ Deseleccionar Todas", command=deseleccionar_todas).pack(side=tk.LEFT, padx=5)
+            
+            # Frame de botones principales
+            frame_botones = ttk.Frame(ventana)
+            frame_botones.pack(fill=tk.X, padx=10, pady=10)
+            
+            def confirmar_exportacion():
+                """Confirma la selección y cierra el diálogo"""
+                # Recopilar depósitos de las sedes seleccionadas
+                depositos_seleccionados = []
+                sedes_seleccionadas = []
+                
+                for localidad, var in vars_sedes.items():
+                    if var.get():
+                        sedes_seleccionadas.append(localidad)
+                        depositos_seleccionados.extend(depositos_por_sede[localidad])
+                
+                if not depositos_seleccionados:
+                    messagebox.showwarning(
+                        "Sin Selección",
+                        "Debe seleccionar al menos una sede para exportar",
+                        parent=ventana
+                    )
+                    return
+                
+                resultado.extend(depositos_seleccionados)
+                self.log(f"✅ Sedes seleccionadas para exportar: {', '.join(sedes_seleccionadas)}", "INFO")
+                ventana.destroy()
+            
+            def cancelar_exportacion():
+                """Cancela la exportación"""
+                ventana.destroy()
+            
+            ttk.Button(
+                frame_botones, 
+                text="✅ Exportar Selección", 
+                command=confirmar_exportacion,
+                style='Accent.TButton'
+            ).pack(side=tk.LEFT, padx=5)
+            ttk.Button(
+                frame_botones, 
+                text="❌ Cancelar", 
+                command=cancelar_exportacion
+            ).pack(side=tk.LEFT, padx=5)
+            
+            # Centrar ventana
+            ventana.update_idletasks()
+            x = (ventana.winfo_screenwidth() // 2) - (ventana.winfo_width() // 2)
+            y = (ventana.winfo_screenheight() // 2) - (ventana.winfo_height() // 2)
+            ventana.geometry(f"+{x}+{y}")
+            
+            # Esperar a que se cierre la ventana
+            ventana.wait_window()
+            
+        except Exception as e:
+            self.log(f"Error en diálogo de selección de sedes: {e}", "ERROR")
+            messagebox.showerror("Error", f"Error al mostrar diálogo de selección:\n{str(e)}")
+        
+        return resultado
     
     def _save_stock_depositos_preference(self):
         """Guarda preferencia de localidad y depósitos seleccionados en archivo local"""

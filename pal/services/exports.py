@@ -340,13 +340,18 @@ def export_stock_excel(filename: str, datos_exportar: List, seleccionadas: List[
         raise ImportError("openpyxl es requerido para exportación Excel")
         
     from datetime import datetime
+    import time
+    
     try:
+        tiempo_inicio = time.time()
         total_registros = len(datos_exportar)
-        logger.info(f"Iniciando exportación Excel de {total_registros} registros a {filename}")
+        logger.info(f"[EXPORT TIMER] Iniciando exportación Excel de {total_registros} registros a {filename}")
         
         # Crear workbook
+        tiempo_pre_wb = time.time()
         wb = Workbook()
         wb.remove(wb.active)  # Remover hoja por defecto
+        logger.info(f"[EXPORT TIMER] Workbook creado en {time.time() - tiempo_pre_wb:.2f}s")
         
         # === HOJA 1: DATOS PRINCIPALES ===
         ws_main = wb.create_sheet("Alertas de Stock")
@@ -364,9 +369,21 @@ def export_stock_excel(filename: str, datos_exportar: List, seleccionadas: List[
         ws_main['A1'].fill = header_fill
         ws_main.merge_cells('A1:G1')
         
-        # Headers de la tabla (fila 8)
-        headers = ['Código', 'Descripción', 'Stock Principal', 'Nivel', 'Total Existencias']
-        headers.extend([f'{ubicacion}' for ubicacion in seleccionadas])
+        # Obtener nombres de depósitos desde la BD antes de crear headers
+        depositos_info = {}
+        try:
+            depositos_result = db_manager.obtener_depositos()  # Retorna [(codigo, descripcion), ...]
+            depositos_info = {codigo: descripcion for codigo, descripcion in depositos_result}
+            logger.info(f"[EXPORT TIMER] Cargados {len(depositos_info)} nombres de depósitos")
+        except Exception as e:
+            logger.warning(f"No se pudieron cargar nombres de depósitos: {e}")
+        
+        # Headers de la tabla (fila 8) - Mostrar código y nombre del depósito
+        headers = ['Código', 'Descripción', 'Nivel', 'Total Existencias']
+        for ubicacion in seleccionadas:
+            nombre_deposito = depositos_info.get(ubicacion, ubicacion)
+            header_text = f'{ubicacion} - {nombre_deposito}' if nombre_deposito != ubicacion else ubicacion
+            headers.append(header_text)
         
         start_row = 8
         for col, header in enumerate(headers, 1):
@@ -375,8 +392,82 @@ def export_stock_excel(filename: str, datos_exportar: List, seleccionadas: List[
             cell.fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
             cell.alignment = Alignment(horizontal="center", vertical="center")
         
-        # Datos de productos
+        # Datos de productos - OPTIMIZADO: Obtener todas las existencias en una sola consulta
+        tiempo_pre_datos = time.time()
+        
+        # Obtener todos los códigos de productos
+        codigos_productos = [codigo for codigo, _, _, _ in datos_exportar]
+        
+        # Obtener existencias en BATCH con chunking para evitar límites de parámetros SQL
+        logger.info(f"[EXPORT TIMER] Obteniendo existencias batch para {len(codigos_productos)} productos x {len(seleccionadas)} depósitos...")
+        tiempo_pre_batch = time.time()
+        
+        try:
+            # Inicializar mapa de existencias
+            existencias_map = {codigo: {} for codigo in codigos_productos}
+            for deposito in seleccionadas:
+                for codigo in codigos_productos:
+                    existencias_map[codigo][deposito] = 0
+            
+            # SQL Server tiene un límite de ~2100 parámetros
+            # Con N depósitos, podemos usar (2000 - N) / 1 productos por chunk para seguridad
+            max_params_per_chunk = 2000 - len(seleccionadas)
+            chunk_size = max(100, max_params_per_chunk)  # Al menos 100, pero respetar límite
+            
+            total_chunks = (len(codigos_productos) + chunk_size - 1) // chunk_size
+            logger.info(f"[EXPORT TIMER] Procesando en {total_chunks} chunks de máximo {chunk_size} productos")
+            
+            # Procesar en chunks con progreso
+            result_batch = []
+            # Reservar 10% del progreso total para la carga de chunks
+            chunk_progress_weight = 0.10
+            data_progress_weight = 0.90
+            
+            for chunk_idx in range(0, len(codigos_productos), chunk_size):
+                chunk_productos = codigos_productos[chunk_idx:chunk_idx + chunk_size]
+                chunk_num = (chunk_idx // chunk_size) + 1
+                
+                # Construir consulta para este chunk
+                codigo_placeholders = ','.join('?' * len(chunk_productos))
+                deposito_placeholders = ','.join('?' * len(seleccionadas))
+                
+                sql_chunk = (
+                    f"SELECT c_codarticulo, c_coddeposito, ISNULL(SUM(n_cantidad), 0) as total "
+                    f"FROM MA_DEPOPROD WITH (NOLOCK) "
+                    f"WHERE c_codarticulo IN ({codigo_placeholders}) "
+                    f"AND c_coddeposito IN ({deposito_placeholders}) "
+                    f"GROUP BY c_codarticulo, c_coddeposito "
+                    f"HAVING ISNULL(SUM(n_cantidad), 0) != 0"
+                )
+                
+                params_chunk = chunk_productos + seleccionadas
+                logger.info(f"[EXPORT TIMER] Ejecutando chunk {chunk_num}/{total_chunks} ({len(chunk_productos)} productos, {len(params_chunk)} params)")
+                
+                chunk_result = db_manager.fetch_data(sql_chunk, params_chunk)
+                if chunk_result:
+                    result_batch.extend(chunk_result)
+                
+                # Reportar progreso de carga de chunks (0-10% del total)
+                if progress_cb:
+                    chunk_progress = int((chunk_num / total_chunks) * chunk_progress_weight * total_registros)
+                    progress_cb(chunk_progress, total_registros)
+            
+            # Poblar mapa con resultados
+            if result_batch:
+                for codigo, deposito, cantidad in result_batch:
+                    if codigo in existencias_map:
+                        existencias_map[codigo][deposito] = int(cantidad or 0)
+            
+            tiempo_post_batch = time.time()
+            logger.info(f"[EXPORT TIMER] Existencias batch obtenidas en {tiempo_post_batch - tiempo_pre_batch:.2f}s ({total_chunks} consultas chunked, {len(result_batch)} resultados)")
+            
+        except Exception as e:
+            logger.error(f"Error en consulta batch: {e}")
+            existencias_map = {codigo: {dep: 0 for dep in seleccionadas} for codigo in codigos_productos}
+        
+        # Ahora procesar los datos usando el mapa precargado
         data_start_row = start_row + 1
+        
         for i, (codigo, desc, stock, nivel) in enumerate(datos_exportar):
             try:
                 row = data_start_row + i
@@ -384,31 +475,34 @@ def export_stock_excel(filename: str, datos_exportar: List, seleccionadas: List[
                 # Limpiar caracteres inválidos para Excel
                 ws_main.cell(row=row, column=1, value=clean_for_excel(codigo))
                 ws_main.cell(row=row, column=2, value=clean_for_excel(desc))
-                ws_main.cell(row=row, column=3, value=int(stock))
-                ws_main.cell(row=row, column=4, value=clean_for_excel(nivel.upper()))
+                ws_main.cell(row=row, column=3, value=clean_for_excel(nivel.capitalize()))
                 
-                total_existencias = int(stock)
+                # Calcular total de existencias sumando todos los depósitos
+                total_existencias = 0
                 
-                # Existencias por ubicación
+                # Existencias por ubicación - usando el mapa precargado (sin consultas BD)
                 for j, ubicacion in enumerate(seleccionadas):
-                    deps = location_groups.get(ubicacion, [])
-                    try:
-                        from pal.services.stock import get_existencias_por_ubicacion
-                        existencias = get_existencias_por_ubicacion(db_manager, codigo, deps)
-                        ws_main.cell(row=row, column=6+j, value=int(existencias))
-                        total_existencias += existencias
-                    except Exception as e:
-                        ws_main.cell(row=row, column=6+j, value=0)
-                        logger.warning(f"Error consultando {ubicacion} para {codigo}: {e}")
+                    existencias = existencias_map.get(codigo, {}).get(ubicacion, 0)
+                    ws_main.cell(row=row, column=5+j, value=int(existencias))
+                    total_existencias += existencias
                 
-                ws_main.cell(row=row, column=5, value=total_existencias)
+                ws_main.cell(row=row, column=4, value=total_existencias)
                 
+                # Reportar progreso de procesamiento de datos (10-100% del total)
+                # Los primeros 10% fueron para chunks, ahora 90% restante para datos
                 if progress_cb:
-                    progress_cb(i + 1, total_registros)
+                    chunk_progress_weight = 0.10
+                    data_progress_weight = 0.90
+                    base_progress = int(chunk_progress_weight * total_registros)
+                    data_progress = int(((i + 1) / total_registros) * data_progress_weight * total_registros)
+                    progress_cb(base_progress + data_progress, total_registros)
                     
             except Exception as e:
                 logger.error(f"Error procesando registro {i}: {codigo} - {e}")
                 continue
+        
+        tiempo_post_datos = time.time()
+        logger.info(f"[EXPORT TIMER] Procesamiento de datos: {tiempo_post_datos - tiempo_pre_datos:.2f}s (1 consulta batch)")
         
         # Crear tabla con filtros
         table_range = f"A{start_row}:{chr(65 + len(headers) - 1)}{data_start_row + total_registros - 1}"
@@ -420,7 +514,7 @@ def export_stock_excel(filename: str, datos_exportar: List, seleccionadas: List[
         ws_main.add_table(table)
         
         # Formato condicional para niveles
-        data_range = f"D{data_start_row}:D{data_start_row + total_registros - 1}"
+        data_range = f"C{data_start_row}:C{data_start_row + total_registros - 1}"
         
         # Crítica = Rojo
         ws_main.conditional_formatting.add(data_range, 
@@ -440,12 +534,11 @@ def export_stock_excel(filename: str, datos_exportar: List, seleccionadas: List[
         # Ajustar anchos de columna
         ws_main.column_dimensions['A'].width = 12  # Código
         ws_main.column_dimensions['B'].width = 40  # Descripción
-        ws_main.column_dimensions['C'].width = 15  # Stock
-        ws_main.column_dimensions['D'].width = 12  # Nivel
-        ws_main.column_dimensions['E'].width = 15  # Total
+        ws_main.column_dimensions['C'].width = 12  # Nivel
+        ws_main.column_dimensions['D'].width = 15  # Total
         
         for i in range(len(seleccionadas)):
-            col_letter = chr(70 + i)  # F, G, H...
+            col_letter = chr(69 + i)  # E, F, G...
             ws_main.column_dimensions[col_letter].width = 15
         
         # === HOJA 2: RESUMEN POR NIVEL ===
@@ -512,7 +605,13 @@ def export_stock_excel(filename: str, datos_exportar: List, seleccionadas: List[
         ws_critical.column_dimensions['D'].width = 20
         
         # Guardar archivo
+        tiempo_pre_save = time.time()
         wb.save(filename)
+        tiempo_post_save = time.time()
+        logger.info(f"[EXPORT TIMER] Guardado de archivo: {tiempo_post_save - tiempo_pre_save:.2f}s")
+        
+        tiempo_total = tiempo_post_save - tiempo_inicio
+        logger.info(f"[EXPORT TIMER] TOTAL exportación Excel: {tiempo_total:.2f}s para {total_registros} registros")
         logger.info(f"Exportación Excel completada: {total_registros} registros en {filename}")
         return total_registros
         

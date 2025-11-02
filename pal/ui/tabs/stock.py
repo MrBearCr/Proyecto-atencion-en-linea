@@ -16,13 +16,7 @@ def setup_stock_tab(app):
     top_frame = ttk.Frame(main_frame)
     top_frame.pack(fill=tk.X, pady=5)
     
-    # Botón para configurar depósitos
-    ttk.Label(top_frame, text="Depósitos:").pack(side=tk.LEFT, padx=5)
-    app.stock_depositos_label = ttk.Label(top_frame, text="[Sin seleccionar]", foreground="#FF6B6B", font=('', 10, 'bold'))
-    app.stock_depositos_label.pack(side=tk.LEFT, padx=5)
-    
-    ttk.Button(top_frame, text="⚙️ Configurar Depósitos", 
-               command=lambda: getattr(app, 'abrir_menu_depositos_stock', lambda: None)()).pack(side=tk.LEFT, padx=5)
+    # Botón de configurar depósitos se moverá junto al botón Exportar más abajo
     
     # ① --- Filtros jerárquicos ---
     hier_frame = ttk.Frame(main_frame)
@@ -107,9 +101,13 @@ def setup_stock_tab(app):
             can_export_stock = True
     except Exception:
         can_export_stock = False
-    btn_export_stock = ttk.Button(action_frame, text="📈 Exportar Excel", 
+    btn_export_stock = ttk.Button(action_frame, text="Exportar", 
                command=lambda: getattr(app, 'exportar_excel', lambda: None)())
     btn_export_stock.pack(side=tk.LEFT, padx=5)
+    
+    # Mover "Configurar Depósitos" al lado de Exportar
+    ttk.Button(action_frame, text="⚙️ Configurar Depósitos", 
+               command=lambda: getattr(app, 'abrir_menu_depositos_stock', lambda: None)()).pack(side=tk.LEFT, padx=5)
     if not can_export_stock:
         try:
             btn_export_stock.state(["disabled"])  # ttk style

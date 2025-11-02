@@ -144,12 +144,19 @@ def filter_alertas(alertas, producto_jerarquia, dept_code=None, group_code=None,
         except Exception:
             return 1
 
+    # Favoritos primero, luego severidad (CRÍTICA, MEDIA, LEVE), luego stock asc, luego código
+    def _fav_rank(code):
+        try:
+            return 0 if str(code) in favoritos else 1
+        except Exception:
+            return 1
+
     datos_ordenados = sorted(
         datos_filtrados,
         key=lambda r: (
+            _fav_rank(r[0]),
             _rank(r[3] if len(r) > 3 else ''),
             int(r[2] or 0) if len(r) > 2 and r[2] is not None else 0,
-            _fav(r[0]),
             str(r[0])
         )
     )

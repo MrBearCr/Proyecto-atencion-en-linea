@@ -1670,8 +1670,16 @@ class DatabaseApp:
             if not seleccionadas:
                 return  # Usuario canceló o no seleccionó ninguna sede
             
-            # Mapear cada depósito como una "ubicación" independiente
-            location_groups_dynamic = {dep: [dep] for dep in seleccionadas}
+            # Construir grupos por sede para exportar (usando selección marcada en el diálogo si está disponible)
+            location_groups_dynamic = getattr(self, '_export_selected_location_groups', None)
+            if not location_groups_dynamic:
+                # Derivar de stock_localidades según intersección con seleccionadas
+                location_groups_dynamic = {}
+                locs = getattr(self, 'stock_localidades', {}) or {}
+                for sede, deps in locs.items():
+                    codes = [d['codigo'] for d in deps if d['codigo'] in seleccionadas]
+                    if codes:
+                        location_groups_dynamic[sede] = codes
 
             # 2. Obtener datos filtrados por los depósitos seleccionados para exportar
             tiempo_pre_filtrado = time.time()
@@ -1843,9 +1851,9 @@ class DatabaseApp:
             return sorted(
                 datos_filtrados,
                 key=lambda r: (
+                    _fav(r[0]),
                     _rank(r[3] if len(r) > 3 else ''),
                     int(r[2] or 0) if len(r) > 2 and r[2] is not None else 0,
-                    _fav(r[0]),
                     str(r[0])
                 )
             )
@@ -1900,9 +1908,9 @@ class DatabaseApp:
         return sorted(
             datos_filtrados,
             key=lambda r: (
+                _fav(r[0]),
                 _rank(r[3] if len(r) > 3 else ''),
                 int(r[2] or 0) if len(r) > 2 and r[2] is not None else 0,
-                _fav(r[0]),
                 str(r[0])
             )
         )
@@ -2519,14 +2527,14 @@ class DatabaseApp:
         self.btn_next['state'] = 'normal' if self.current_page < total_paginas else 'disabled'    
     
     def load_depositos_stock(self):
-        """Carga lista de depósitos desde la base de datos"""
+        """Carga lista de depósitos desde la base de datos y aplica sedes personalizadas (opcional)"""
         try:
             depositos = self.db_manager.obtener_depositos()
             if not depositos:
                 self.log("No se encontraron depósitos en la BD", "WARNING")
                 return
             
-            # Agrupar por localidad según prefijo
+            # Agrupar por localidad según prefijo (base por defecto)
             localidades = {}
             for cod, desc in depositos:
                 cod = str(cod).strip()
@@ -2546,18 +2554,47 @@ class DatabaseApp:
                     localidades[localidad] = []
                 localidades[localidad].append({'codigo': cod, 'descripcion': desc})
             
+            # Map rápido código->descripción
+            self.stock_depositos_por_codigo = {str(c).strip(): str(d).strip() for c, d in depositos}
+
+            # Aplicar sedes personalizadas si existen en preferencias
+            sedes_custom = getattr(self, 'stock_localidades_custom', {}) or {}
+            if sedes_custom:
+                # Remover códigos personalizados de sus sedes originales
+                custom_all_codes = set()
+                for sede, codes in sedes_custom.items():
+                    for cod in (codes or []):
+                        custom_all_codes.add(str(cod).strip())
+                if custom_all_codes:
+                    for sede_base, lst in list(localidades.items()):
+                        localidades[sede_base] = [d for d in lst if d['codigo'] not in custom_all_codes]
+                # Agregar sedes personalizadas con sus depósitos
+                for sede, codes in sedes_custom.items():
+                    sede = str(sede).strip()
+                    if sede not in localidades:
+                        localidades[sede] = []
+                    for cod in (codes or []):
+                        c = str(cod).strip()
+                        desc = self.stock_depositos_por_codigo.get(c, c)
+                        if all(d['codigo'] != c for d in localidades[sede]):
+                            localidades[sede].append({'codigo': c, 'descripcion': desc})
+            
             # Guardar en atributos
             self.stock_localidades = localidades
-            self.stock_depositos_por_codigo = {cod: desc for cod, desc in depositos}
             
             # Inicializar seleccionados (default a Cabudare)
             if not hasattr(self, 'stock_depositos_seleccionados'):
                 self.stock_depositos_seleccionados = [d['codigo'] for d in localidades.get('Cabudare', [])]
             
-            # Actualizar label de depósitos
+            # Actualizar label de depósitos y columnas del tree si existe
             self._update_stock_depositos_label()
+            if hasattr(self, '_rebuild_stock_tree_columns') and hasattr(self, 'stock_tree') and self.stock_tree:
+                try:
+                    self._rebuild_stock_tree_columns()
+                except Exception:
+                    pass
             
-            self.log(f"✅ Depósitos cargados: {len(depositos)} depósitos en {len(localidades)} localidades", "SUCCESS")
+            self.log(f"✅ Depósitos cargados: {len(depositos)} depósitos en {len(localidades)} localidades (incluye personalizadas: {len(sedes_custom)})", "SUCCESS")
             
         except Exception as e:
             self.log(f"Error cargando depósitos: {e}", "ERROR")
@@ -2589,7 +2626,7 @@ class DatabaseApp:
             
             ventana = tk.Toplevel(self.root)
             ventana.title("Configurar Localidad y Depósitos")
-            ventana.geometry("820x600")
+            ventana.geometry("900x680")
             ventana.resizable(False, False)
             ventana.grab_set()
 
@@ -2601,8 +2638,68 @@ class DatabaseApp:
             ttk.Combobox(frame_loc, textvariable=loc_var, state='readonly',
                          values=sorted(self.stock_localidades.keys()), width=20).pack(side=tk.LEFT, padx=8)
 
+            # Gestión de sedes personalizadas
+            frame_custom = ttk.LabelFrame(ventana, text="2. Sedes personalizadas (agrupaciones manuales)", padding=10)
+            frame_custom.pack(fill=tk.X, padx=10, pady=5)
+
+            # Controles para crear sede personalizada
+            new_sede_var = tk.StringVar()
+            ttk.Label(frame_custom, text="Nueva sede:").pack(side=tk.LEFT)
+            entry_new_sede = ttk.Entry(frame_custom, textvariable=new_sede_var, width=20)
+            entry_new_sede.pack(side=tk.LEFT, padx=5)
+            def add_sede():
+                nombre = (new_sede_var.get() or '').strip()
+                if not nombre:
+                    return
+                if not hasattr(self, 'stock_localidades_custom') or self.stock_localidades_custom is None:
+                    self.stock_localidades_custom = {}
+                if nombre in (self.stock_localidades_custom or {}):
+                    messagebox.showinfo("Info", f"La sede '{nombre}' ya existe")
+                    return
+                self.stock_localidades_custom[nombre] = []
+                # Reaplicar y reabrir diálogo para refrescar UI
+                self.load_depositos_stock()
+                ventana.destroy()
+                self.abrir_menu_depositos_stock()
+            ttk.Button(frame_custom, text="➕ Agregar sede", command=add_sede).pack(side=tk.LEFT, padx=5)
+
+            # Mover depósito a sede
+            ttk.Label(frame_custom, text="   |   Mover depósito:").pack(side=tk.LEFT, padx=5)
+            all_deps = sorted([(c, self.stock_depositos_por_codigo.get(c, c)) for c in self.stock_depositos_por_codigo.keys()])
+            move_dep_var = tk.StringVar()
+            cb_dep = ttk.Combobox(frame_custom, textvariable=move_dep_var, width=12, values=[c for c,_ in all_deps])
+            cb_dep.pack(side=tk.LEFT, padx=3)
+            ttk.Label(frame_custom, text="a sede:").pack(side=tk.LEFT)
+            move_sede_var = tk.StringVar()
+            sedes_names = sorted((self.stock_localidades or {}).keys())
+            cb_sede = ttk.Combobox(frame_custom, textvariable=move_sede_var, width=18, values=sedes_names, state='readonly')
+            cb_sede.pack(side=tk.LEFT, padx=3)
+            def mover_dep():
+                dep = (move_dep_var.get() or '').strip()
+                sede_dest = (move_sede_var.get() or '').strip()
+                if not dep or not sede_dest:
+                    return
+                if not hasattr(self, 'stock_localidades_custom') or self.stock_localidades_custom is None:
+                    self.stock_localidades_custom = {}
+                # Remover de cualquier sede personalizada previa
+                for s in list(self.stock_localidades_custom.keys()):
+                    lst = self.stock_localidades_custom.get(s) or []
+                    if dep in lst:
+                        lst = [x for x in lst if x != dep]
+                        self.stock_localidades_custom[s] = lst
+                # Si el destino es una sede personalizada, asignar ahí; si es base, no lo incluimos en custom (volverá a su sede por prefijo)
+                if sede_dest not in ['Cabudare','Barinas','Guanare','Otra']:
+                    self.stock_localidades_custom.setdefault(sede_dest, [])
+                    if dep not in self.stock_localidades_custom[sede_dest]:
+                        self.stock_localidades_custom[sede_dest].append(dep)
+                # Reaplicar y recargar UI
+                self.load_depositos_stock()
+                ventana.destroy()
+                self.abrir_menu_depositos_stock()
+            ttk.Button(frame_custom, text="➡️ Mover", command=mover_dep).pack(side=tk.LEFT, padx=5)
+
             # Depósitos por sede
-            frame_deps = ttk.LabelFrame(ventana, text="2. Seleccionar Depósitos por sede", padding=10)
+            frame_deps = ttk.LabelFrame(ventana, text="3. Seleccionar Depósitos por sede (visibilidad)", padding=10)
             frame_deps.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
 
             canvas = tk.Canvas(frame_deps)
@@ -2651,12 +2748,12 @@ class DatabaseApp:
             
             def guardar():
                 self.stock_localidad_actual = loc_var.get() or 'Cabudare'
-                # Recolectar por sede y combinado
+                # Recolectar por sede y combinado (visibilidad)
                 self.stock_depositos_por_sede = {sede: [cod for cod, v in vars_por_sede[sede].items() if v.get()] for sede in vars_por_sede}
                 self.stock_depositos_seleccionados = []
                 for lst in self.stock_depositos_por_sede.values():
                     self.stock_depositos_seleccionados.extend(lst)
-                # Actualizar label y guardar
+                # Actualizar columnas dinámicas y guardar preferencias (incluye sedes_custom)
                 self._update_stock_depositos_label()
                 self._save_stock_depositos_preference()
                 # Recargar
@@ -2716,7 +2813,7 @@ class DatabaseApp:
             vars_sedes = {}
             depositos_por_sede = {}
             
-            # Crear checkboxes por cada localidad/sede (solo depósitos configurados por sede)
+            # Crear checkboxes por cada localidad/sede (incluye sedes personalizadas)
             for localidad in sorted(self.stock_localidades.keys()):
                 depositos = self.stock_localidades[localidad]
                 # Preferir selección por sede; fallback a selección combinada
@@ -2786,11 +2883,14 @@ class DatabaseApp:
                 # Recopilar depósitos de las sedes seleccionadas
                 depositos_seleccionados = []
                 sedes_seleccionadas = []
+                export_groups = {}
                 
                 for localidad, var in vars_sedes.items():
                     if var.get():
                         sedes_seleccionadas.append(localidad)
-                        depositos_seleccionados.extend(depositos_por_sede[localidad])
+                        sel_codes = depositos_por_sede[localidad]
+                        export_groups[localidad] = sel_codes
+                        depositos_seleccionados.extend(sel_codes)
                 
                 if not depositos_seleccionados:
                     messagebox.showwarning(
@@ -2800,6 +2900,8 @@ class DatabaseApp:
                     )
                     return
                 
+                # Guardar grupos seleccionados para la exportación actual
+                self._export_selected_location_groups = export_groups
                 resultado.extend(depositos_seleccionados)
                 self.log(f"✅ Sedes seleccionadas para exportar: {', '.join(sedes_seleccionadas)}", "INFO")
                 ventana.destroy()
@@ -2844,6 +2946,7 @@ class DatabaseApp:
                 'localidad': getattr(self, 'stock_localidad_actual', 'Cabudare'),
                 'depositos': self.stock_depositos_seleccionados,
                 'depositos_por_sede': getattr(self, 'stock_depositos_por_sede', {}),
+                'sedes_custom': getattr(self, 'stock_localidades_custom', {}),
                 'timestamp': str(time.time())
             }
             with open(pref_file, 'w', encoding='utf-8') as f:
@@ -2864,6 +2967,8 @@ class DatabaseApp:
                     self.stock_localidad_actual = pref_data.get('localidad', 'Cabudare')
                     # Soportar nuevo formato por sede
                     self.stock_depositos_por_sede = pref_data.get('depositos_por_sede', {}) or {}
+                    # Sedes personalizadas (agrupaciones manuales)
+                    self.stock_localidades_custom = pref_data.get('sedes_custom', {}) or {}
                     if self.stock_depositos_por_sede:
                         # Combinar todas las sedes
                         self.stock_depositos_seleccionados = []
@@ -2956,20 +3061,36 @@ class DatabaseApp:
             pass
 
     def _build_existencias_sedes_map(self, codigos):
-        """Devuelve map {codigo: {'Cabudare':x,'Barinas':y,'Guanare':z}} para los códigos dados (consulta batch)"""
+        """Devuelve map {codigo: {sede_name: total}} usando SOLO los depósitos seleccionados por sede (visibilidad)."""
         try:
             if not codigos:
                 return {}
-            # Obtener listas de depósitos por sede
             locs = getattr(self, 'stock_localidades', {}) or {}
-            deps_cabu = [d['codigo'] for d in locs.get('Cabudare', [])]
-            deps_bari = [d['codigo'] for d in locs.get('Barinas', [])]
-            deps_guan = [d['codigo'] for d in locs.get('Guanare', [])]
-            all_deps = deps_cabu + deps_bari + deps_guan
-            if not all_deps:
-                return {}
+            sel_por_sede = getattr(self, 'stock_depositos_por_sede', {}) or {}
+            seleccionados_global = set(getattr(self, 'stock_depositos_seleccionados', []) or [])
 
-            # Chunk simple (página <= 250)
+            # Construir lista de depósitos visibles por sede (prioriza 'por_sede'; fallback al set global; luego todos)
+            dep_to_sede = {}
+            all_deps = []
+            for sede, deps in locs.items():
+                # Preferir selección por sede si existe
+                codes_sel = sel_por_sede.get(sede)
+                if codes_sel:
+                    codes_visibles = set(str(c) for c in codes_sel)
+                elif seleccionados_global:
+                    codes_visibles = {str(d['codigo']) for d in deps if str(d['codigo']) in seleccionados_global}
+                else:
+                    codes_visibles = {str(d['codigo']) for d in deps}
+                for d in deps:
+                    cod_dep = str(d['codigo'])
+                    if cod_dep in codes_visibles:
+                        dep_to_sede[cod_dep] = sede
+                        all_deps.append(cod_dep)
+            all_deps = list(dict.fromkeys(all_deps))  # únicos
+            if not all_deps:
+                return {c: {s:0 for s in locs.keys()} for c in codigos}
+
+            # Consulta por artículos y depósitos visibles
             codigo_placeholders = ','.join('?' * len(codigos))
             deposito_placeholders = ','.join('?' * len(all_deps))
             sql = (
@@ -2980,12 +3101,11 @@ class DatabaseApp:
             )
             params = codigos + all_deps
             rows = self.db_manager.fetch_data(sql, params) or []
-            # Agregar
-            res = {c: {'Cabudare': 0, 'Barinas': 0, 'Guanare': 0} for c in codigos}
+            # Acumular por sede dinámica
+            res = {c: {sede: 0 for sede in locs.keys()} for c in codigos}
             for codigo, deposito, total in rows:
                 try:
-                    pref = str(deposito)[:2]
-                    sede = 'Cabudare' if pref == '03' else 'Barinas' if pref == '01' else 'Guanare' if pref == '04' else None
+                    sede = dep_to_sede.get(str(deposito))
                     if sede and codigo in res:
                         res[codigo][sede] += int(total or 0)
                 except Exception:
@@ -3014,11 +3134,10 @@ class DatabaseApp:
             es_favorito = codigo in favoritos
             estado = "✓" if es_favorito else "☐"
 
-            # Determinar stocks por sede
-            sede_vals = sede_map.get(codigo, {'Cabudare':0,'Barinas':0,'Guanare':0})
-            stock_local = int(sede_vals.get(localidad, 0))
-            stock_o1 = int(sede_vals.get(otras[0], 0))
-            stock_o2 = int(sede_vals.get(otras[1], 0))
+            # Determinar stocks por sede según columnas actuales
+            sede_vals = sede_map.get(codigo, {})
+            sede_order = getattr(self, '_stock_sedes_order', [])
+            cols_stocks = [int(sede_vals.get(s, 0)) for s in sede_order]
             
             # Tags
             if es_favorito:
@@ -3027,9 +3146,10 @@ class DatabaseApp:
                 nivel_base = str(nivel).lower().replace('ítica', 'itica')
                 tags = ((nivel_base,) if idx % 2 == 0 else (f"{nivel_base}_alt",))
             
+            row_values = [estado, codigo, desc] + cols_stocks + [nivel]
             self.stock_tree.insert(
                 "", tk.END, 
-                values=(estado, codigo, desc, stock_local, stock_o1, stock_o2, nivel),
+                values=tuple(row_values),
                 tags=tags)
         
     def aplicar_filtro(self):

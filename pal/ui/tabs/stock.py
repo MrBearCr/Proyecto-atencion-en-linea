@@ -132,15 +132,27 @@ def setup_stock_tab(app):
     tree_frame = ttk.Frame(main_frame)
     tree_frame.pack(fill=tk.BOTH, expand=True)
 
+    # Construcción dinámica de columnas según sedes
+    def _build_sede_columns():
+        localidad = getattr(app, 'stock_localidad_actual', 'Cabudare')
+        sedes_dict = getattr(app, 'stock_localidades', {}) or {}
+        sedes = list(sorted(sedes_dict.keys())) if sedes_dict else ['Cabudare','Barinas','Guanare']
+        if localidad in sedes:
+            sedes.remove(localidad)
+            sedes.insert(0, localidad)
+        return sedes
+
+    app._stock_sedes_order = _build_sede_columns()
+
     columns_config = {
         "Favorito": {"width": 50, "anchor": "center", "stretch": False},
         "Código": {"width": 100, "anchor": "center"},
         "Descripción": {"width": 320, "anchor": "w"},
-        "Stock": {"width": 90, "anchor": "center"},
-        "Stock Sede 1": {"width": 110, "anchor": "center"},
-        "Stock Sede 2": {"width": 110, "anchor": "center"},
-        "Nivel": {"width": 100, "anchor": "center"}
     }
+    # Agregar una columna por cada sede
+    for sede_name in app._stock_sedes_order:
+        columns_config[f"Stock {sede_name}"] = {"width": 110, "anchor": "center"}
+    columns_config["Nivel"] = {"width": 100, "anchor": "center"}
 
     app.stock_tree = ttk.Treeview(tree_frame, columns=list(columns_config.keys()), show="headings", height=10)
     
@@ -164,9 +176,28 @@ def setup_stock_tab(app):
         app.stock_tree.heading(col, text=col)
         app.stock_tree.column(col, **config)
 
-    # Ajustar encabezados dinámicos para columnas de sedes adicionales según localidad actual
-    if hasattr(app, '_update_stock_extra_columns_headings'):
-        app._update_stock_extra_columns_headings()
+    # Ajustar encabezados dinámicos cuando cambien las sedes/localidad
+    def _rebuild_columns():
+        try:
+            # Guardar selección actual
+            sel = app.stock_tree.selection()
+            # Reconfigurar columnas
+            app._stock_sedes_order = _build_sede_columns()
+            new_columns = ["Favorito","Código","Descripción"] + [f"Stock {s}" for s in app._stock_sedes_order] + ["Nivel"]
+            app.stock_tree['columns'] = new_columns
+            for col in new_columns:
+                if col not in columns_config:
+                    # Default width for new sede columns
+                    columns_config[col] = {"width": 110, "anchor": "center"}
+                app.stock_tree.heading(col, text=col)
+                app.stock_tree.column(col, **columns_config[col])
+            # Restaurar selección
+            if sel:
+                app.stock_tree.selection_set(sel)
+        except Exception:
+            pass
+    app._rebuild_stock_tree_columns = _rebuild_columns
+    app._rebuild_stock_tree_columns()
 
     # Estilos de filas con bordes visuales (colores más oscuros para resaltar líneas)
     app.stock_tree.tag_configure('leve', background='#4CAF50', foreground='#FFFFFF', font=('', 11))  # Verde vibrante

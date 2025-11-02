@@ -378,12 +378,16 @@ def export_stock_excel(filename: str, datos_exportar: List, seleccionadas: List[
         except Exception as e:
             logger.warning(f"No se pudieron cargar nombres de depósitos: {e}")
         
-        # Headers de la tabla (fila 8)
-        # Determinar nombres de columnas por sede según localidad actual
-        sede_names = ['Cabudare', 'Barinas', 'Guanare']
-        loc_actual = current_localidad if current_localidad in sede_names else 'Cabudare'
-        otras = [s for s in sede_names if s != loc_actual]
-        headers = ['Código', 'Descripción', 'Nivel', f'Stock {loc_actual}', f'Stock {otras[0]}', f'Stock {otras[1]}', 'Total Existencias']
+        # Headers de la tabla (fila 8) con sedes dinámicas
+        # construir sedes dinámicas desde location_groups (sede->lista de depósitos)
+        sedes_dynamic = list((location_groups or {}).keys()) if isinstance(location_groups, dict) else []
+        if not sedes_dynamic:
+            # Fallback a sedes por prefijo
+            sedes_dynamic = ['Cabudare','Barinas','Guanare']
+        # Ordenar con localidad actual primero
+        loc_actual = current_localidad if current_localidad in sedes_dynamic else (sedes_dynamic[0] if sedes_dynamic else 'Cabudare')
+        sedes_order = [loc_actual] + [s for s in sedes_dynamic if s != loc_actual]
+        headers = ['Código', 'Descripción', 'Nivel'] + [f'Stock {s}' for s in sedes_order] + ['Total Existencias']
         for ubicacion in seleccionadas:
             nombre_deposito = depositos_info.get(ubicacion, ubicacion)
             header_text = f'{ubicacion} - {nombre_deposito}' if nombre_deposito != ubicacion else ubicacion
@@ -506,12 +510,15 @@ def export_stock_excel(filename: str, datos_exportar: List, seleccionadas: List[
             )
         )
 
-        # Precalcular depósitos seleccionados por sede (solo los elegidos en exportación)
-        selected_by_sede = {
-            'Cabudare': [d for d in seleccionadas if str(d).startswith('03')],
-            'Barinas':  [d for d in seleccionadas if str(d).startswith('01')],
-            'Guanare':  [d for d in seleccionadas if str(d).startswith('04')],
-        }
+        # Precalcular depósitos seleccionados por sede (dinámico desde location_groups)
+        if isinstance(location_groups, dict) and location_groups:
+            selected_by_sede = {sede: [d for d in (location_groups.get(sede, []) or []) if d in seleccionadas] for sede in location_groups.keys()}
+        else:
+            selected_by_sede = {
+                'Cabudare': [d for d in seleccionadas if str(d).startswith('03')],
+                'Barinas':  [d for d in seleccionadas if str(d).startswith('01')],
+                'Guanare':  [d for d in seleccionadas if str(d).startswith('04')],
+            }
         
         for i, (codigo, desc, stock, nivel) in enumerate(datos_exportar):
             try:
@@ -531,38 +538,27 @@ def export_stock_excel(filename: str, datos_exportar: List, seleccionadas: List[
                 sum_bari = sum(int(dep_qty.get(d, 0)) for d in selected_by_sede['Barinas'])
                 sum_guan = sum(int(dep_qty.get(d, 0)) for d in selected_by_sede['Guanare'])
 
-                # Determinar orden según localidad actual (si se pasó)
-                try:
-                    current_localidad = locals().get('current_localidad', None)
-                except Exception:
-                    current_localidad = None
-                if not current_localidad:
-                    current_localidad = 'Cabudare'
-                sede_order = ['Cabudare', 'Barinas', 'Guanare']
-                if current_localidad in sede_order:
-                    sede_order.remove(current_localidad)
-                    sede_order.insert(0, current_localidad)
-                # Map sede->valor
+                # Determinar orden de sedes dinámicas
+                sedes_dynamic = list(selected_by_sede.keys())
+                sede_order = [current_localidad] + [s for s in sedes_dynamic if s != current_localidad] if current_localidad in sedes_dynamic else sedes_dynamic
+                # Map sede->valor calculado
                 sede_vals = {
                     'Cabudare': sum_cabu,
                     'Barinas': sum_bari,
                     'Guanare': sum_guan
                 }
-                stock_local = sede_vals.get(sede_order[0], 0)
-                stock_o1 = sede_vals.get(sede_order[1], 0)
-                stock_o2 = sede_vals.get(sede_order[2], 0)
-
-                # Escribir columnas especiales: Stock Localidad, Stock Otras, Total
-                ws_main.cell(row=row, column=4, value=int(stock_local))
-                ws_main.cell(row=row, column=5, value=int(stock_o1))
-                ws_main.cell(row=row, column=6, value=int(stock_o2))
-
-                # Calcular total de existencias sumando todos los depósitos
-                total_existencias = int(stock_local + stock_o1 + stock_o2)
-                ws_main.cell(row=row, column=7, value=total_existencias)
+                # Escribir columnas Stock por sede dinámica
+                start_sede_col = 4
+                total_existencias = 0
+                for idx_s, sede in enumerate(sede_order):
+                    val = int(sede_vals.get(sede, 0))
+                    ws_main.cell(row=row, column=start_sede_col + idx_s, value=val)
+                    total_existencias += val
+                # Total existencias
+                ws_main.cell(row=row, column=start_sede_col + len(sede_order), value=total_existencias)
                 
                 # Existencias por ubicación seleccionada (mantener columnas por depósito)
-                start_dep_col = 8
+                start_dep_col = start_sede_col + len(sede_order) + 1
                 for j, ubicacion in enumerate(seleccionadas):
                     existencias = existencias_map.get(codigo, {}).get(ubicacion, 0)
                     ws_main.cell(row=row, column=start_dep_col + j, value=int(existencias))

@@ -1714,6 +1714,7 @@ class DatabaseApp:
                         location_groups=location_groups_dynamic,
                         db_manager=self.db_manager,
                         progress_cb=progress_cb,
+                        current_localidad=getattr(self, 'stock_localidad_actual', 'Cabudare'),
                     )
                     
                     tiempo_fin_export = time.time()
@@ -1827,9 +1828,27 @@ class DatabaseApp:
             if filtro_nivel != 'TODAS':
                 datos_filtrados = [r for r in datos_filtrados if r[3].upper() == filtro_nivel]
         
-            # Ordenar por favoritos
+            # Ordenar por severidad local (CRÍTICA, MEDIA, LEVE) y por stock de la localidad activa
             favoritos = self._get_favoritos_local()
-            return sorted(datos_filtrados, key=lambda x: x[0] not in favoritos)
+            def _norm_nivel(n):
+                s = str(n or '').upper()
+                for a,b in [('Á','A'),('É','E'),('Í','I'),('Ó','O'),('Ú','U')]:
+                    s = s.replace(a,b)
+                return s
+            def _rank(n):
+                s = _norm_nivel(n)
+                return 0 if s == 'CRITICA' else 1 if s == 'MEDIA' else 2 if s == 'LEVE' else 3
+            def _fav(code):
+                return 0 if str(code) in favoritos else 1
+            return sorted(
+                datos_filtrados,
+                key=lambda r: (
+                    _rank(r[3] if len(r) > 3 else ''),
+                    int(r[2] or 0) if len(r) > 2 and r[2] is not None else 0,
+                    _fav(r[0]),
+                    str(r[0])
+                )
+            )
             
         except Exception as e:
             self.log(f"Error filtrando datos por depósitos: {e}", "ERROR")
@@ -1866,9 +1885,27 @@ class DatabaseApp:
         if filtro_nivel != 'TODAS':
             datos_filtrados = [r for r in datos_filtrados if r[3].upper() == filtro_nivel]
     
-        # Ordenar por favoritos
+        # Ordenar por severidad local (CRÍTICA, MEDIA, LEVE) y por stock de la localidad activa
         favoritos = self._get_favoritos_local()
-        return sorted(datos_filtrados, key=lambda x: x[0] not in favoritos)
+        def _norm_nivel(n):
+            s = str(n or '').upper()
+            for a,b in [('Á','A'),('É','E'),('Í','I'),('Ó','O'),('Ú','U')]:
+                s = s.replace(a,b)
+            return s
+        def _rank(n):
+            s = _norm_nivel(n)
+            return 0 if s == 'CRITICA' else 1 if s == 'MEDIA' else 2 if s == 'LEVE' else 3
+        def _fav(code):
+            return 0 if str(code) in favoritos else 1
+        return sorted(
+            datos_filtrados,
+            key=lambda r: (
+                _rank(r[3] if len(r) > 3 else ''),
+                int(r[2] or 0) if len(r) > 2 and r[2] is not None else 0,
+                _fav(r[0]),
+                str(r[0])
+            )
+        )
     
     # === Funciones auxiliares para exportación asíncrona ===
     
@@ -2541,134 +2578,96 @@ class DatabaseApp:
             self.log(f"Error actualizando label de depósitos: {e}", "DEBUG")
     
     def abrir_menu_depositos_stock(self):
-        """Abre diálogo para configurar localidad y depósitos"""
+        """Abre diálogo para configurar localidad activa y depósitos por cada sede (persistentes)."""
         try:
             import tkinter as tk
             from tkinter import ttk
             
-            if not hasattr(self, 'stock_localidades'):
+            if not hasattr(self, 'stock_localidades') or not self.stock_localidades:
                 self.log("Cargando depósitos...", "INFO")
                 return
             
-            # Crear ventana emergente
             ventana = tk.Toplevel(self.root)
             ventana.title("Configurar Localidad y Depósitos")
-            ventana.geometry("720x520")
+            ventana.geometry("820x600")
             ventana.resizable(False, False)
             ventana.grab_set()
-            
-            # Frame de selección de localidad
-            frame_localidad_sel = ttk.LabelFrame(ventana, text="1. Seleccionar Localidad", padding=10)
-            frame_localidad_sel.pack(fill=tk.X, padx=10, pady=10)
-            
-            localidad_var = tk.StringVar()
-            
-            def on_localidad_selected(event=None):
-                """Handler cuando se selecciona una localidad"""
-                localidad_sel = localidad_var.get()
-                # Limpiar y actualizar checkboxes de depósitos
-                for widget in frame_depositos_inner.winfo_children():
-                    widget.destroy()
-                
-                if localidad_sel and localidad_sel in self.stock_localidades:
-                    for deposito in self.stock_localidades[localidad_sel]:
-                        cod = deposito['codigo']
-                        desc = deposito['descripcion']
-                        var = tk.BooleanVar(value=cod in self.stock_depositos_seleccionados)
-                        vars_depositos[cod] = var
-                        ttk.Checkbutton(
-                            frame_depositos_inner,
-                            text=f"{cod} - {desc}",
-                            variable=var
-                        ).pack(anchor=tk.W, padx=10, pady=3)
-            
-            # Combobox de localidades
-            ttk.Label(frame_localidad_sel, text="Localidad:").pack(side=tk.LEFT, padx=5)
-            combo_localidad = ttk.Combobox(
-                frame_localidad_sel,
-                textvariable=localidad_var,
-                values=sorted(self.stock_localidades.keys()),
-                state='readonly',
-                width=30
-            )
-            combo_localidad.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
-            combo_localidad.bind('<<ComboboxSelected>>', on_localidad_selected)
-            
-            # Obtener localidad actual del primer depósito seleccionado
-            localidad_actual = None
-            if hasattr(self, 'stock_depositos_seleccionados') and self.stock_depositos_seleccionados:
-                for loc, deps in self.stock_localidades.items():
-                    for dep in deps:
-                        if dep['codigo'] == self.stock_depositos_seleccionados[0]:
-                            localidad_actual = loc
-                            break
-                    if localidad_actual:
-                        break
-            
-            if localidad_actual:
-                localidad_var.set(localidad_actual)
-            
-            # Frame de selección de depósitos
-            frame_depositos_label = ttk.LabelFrame(ventana, text="2. Seleccionar Depósitos", padding=10)
-            frame_depositos_label.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-            
-            # Canvas con scrollbar para los depósitos
-            canvas = tk.Canvas(frame_depositos_label)
-            scrollbar = ttk.Scrollbar(frame_depositos_label, orient="vertical", command=canvas.yview)
-            frame_depositos_inner = ttk.Frame(canvas)
-            
-            frame_depositos_inner.bind(
-                "<Configure>",
-                lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
-            )
-            
-            canvas.create_window((0, 0), window=frame_depositos_inner, anchor="nw")
-            canvas.configure(yscrollcommand=scrollbar.set)
-            
+
+            # Localidad activa
+            frame_loc = ttk.LabelFrame(ventana, text="1. Localidad activa", padding=10)
+            frame_loc.pack(fill=tk.X, padx=10, pady=(10,5))
+            ttk.Label(frame_loc, text="Localidad:" ).pack(side=tk.LEFT)
+            loc_var = tk.StringVar(value=getattr(self, 'stock_localidad_actual', 'Cabudare'))
+            ttk.Combobox(frame_loc, textvariable=loc_var, state='readonly',
+                         values=sorted(self.stock_localidades.keys()), width=20).pack(side=tk.LEFT, padx=8)
+
+            # Depósitos por sede
+            frame_deps = ttk.LabelFrame(ventana, text="2. Seleccionar Depósitos por sede", padding=10)
+            frame_deps.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+            canvas = tk.Canvas(frame_deps)
+            vsb = ttk.Scrollbar(frame_deps, orient="vertical", command=canvas.yview)
+            inner = ttk.Frame(canvas)
+            inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+            canvas.create_window((0,0), window=inner, anchor="nw")
+            canvas.configure(yscrollcommand=vsb.set)
             canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-            scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+            vsb.pack(side=tk.RIGHT, fill=tk.Y)
+
+            # Estado inicial: usar mapa por sede si existe, si no derivar de lista combinada
+            if not hasattr(self, 'stock_depositos_por_sede') or not self.stock_depositos_por_sede:
+                self.stock_depositos_por_sede = {}
+                seleccionados = set(getattr(self, 'stock_depositos_seleccionados', []) or [])
+                for sede, deps in (self.stock_localidades or {}).items():
+                    self.stock_depositos_por_sede[sede] = [d['codigo'] for d in deps if d['codigo'] in seleccionados]
+            vars_por_sede = {}
+
+            # Construir columnas por sede
+            for sede in sorted(self.stock_localidades.keys()):
+                lf = ttk.LabelFrame(inner, text=f"🏢 {sede}", padding=8)
+                lf.pack(fill=tk.X, padx=6, pady=6)
+                vars_por_sede[sede] = {}
+
+                # Botones rápidos
+                quick = ttk.Frame(lf)
+                quick.pack(fill=tk.X, pady=(0,6))
+                def _select_all(s=sede):
+                    for v in vars_por_sede[s].values(): v.set(True)
+                def _clear_all(s=sede):
+                    for v in vars_por_sede[s].values(): v.set(False)
+                ttk.Button(quick, text="Seleccionar todo", command=_select_all).pack(side=tk.LEFT)
+                ttk.Button(quick, text="Limpiar", command=_clear_all).pack(side=tk.LEFT, padx=5)
+
+                # Lista de depósitos
+                for dep in self.stock_localidades[sede]:
+                    cod = dep['codigo']; desc = dep['descripcion']
+                    var = tk.BooleanVar(value=cod in (self.stock_depositos_por_sede.get(sede, []) or []))
+                    vars_por_sede[sede][cod] = var
+                    ttk.Checkbutton(lf, text=f"{cod} - {desc}", variable=var).pack(anchor=tk.W, padx=10)
+
+            # Guardar
+            frame_btns = ttk.Frame(ventana)
+            frame_btns.pack(fill=tk.X, padx=10, pady=10)
             
-            vars_depositos = {}
-            
-            # Mostrar depósitos de la localidad seleccionada
-            if localidad_actual:
-                on_localidad_selected()
-            
-            # Frame de botones
-            frame_botones = ttk.Frame(ventana)
-            frame_botones.pack(fill=tk.X, padx=10, pady=10)
-            
-            def guardar_seleccion():
-                """Guarda la selección de localidad y depósitos"""
-                localidad_sel = localidad_var.get()
-                if not localidad_sel:
-                    self.log("Debe seleccionar una localidad", "WARNING")
-                    return
-                
-                seleccionados = [cod for cod, var in vars_depositos.items() if var.get()]
-                
-                if not seleccionados:
-                    self.log("Debe seleccionar al menos un depósito", "WARNING")
-                    return
-                
-                # Guardar localidad actual
-                self.stock_localidad_actual = localidad_sel
-                self.stock_depositos_seleccionados = seleccionados
+            def guardar():
+                self.stock_localidad_actual = loc_var.get() or 'Cabudare'
+                # Recolectar por sede y combinado
+                self.stock_depositos_por_sede = {sede: [cod for cod, v in vars_por_sede[sede].items() if v.get()] for sede in vars_por_sede}
+                self.stock_depositos_seleccionados = []
+                for lst in self.stock_depositos_por_sede.values():
+                    self.stock_depositos_seleccionados.extend(lst)
+                # Actualizar label y guardar
                 self._update_stock_depositos_label()
-                
-                # Guardar preferencia
                 self._save_stock_depositos_preference()
-                
-                # Recargar datos
+                # Recargar
                 self.current_page = 1
                 self.recargar_stock()
-                
                 ventana.destroy()
-                self.log(f"✅ Localidad: {localidad_sel} | Depósitos: {', '.join(seleccionados)}", "SUCCESS")
-            
-            ttk.Button(frame_botones, text="✅ Guardar", command=guardar_seleccion).pack(side=tk.LEFT, padx=5)
-            ttk.Button(frame_botones, text="❌ Cancelar", command=ventana.destroy).pack(side=tk.LEFT, padx=5)
-            
+                self.log(f"✅ Localidad: {self.stock_localidad_actual} | Depósitos seleccionados: {', '.join(self.stock_depositos_seleccionados)}", "SUCCESS")
+
+            ttk.Button(frame_btns, text="✅ Guardar", command=guardar).pack(side=tk.LEFT, padx=5)
+            ttk.Button(frame_btns, text="❌ Cancelar", command=ventana.destroy).pack(side=tk.LEFT, padx=5)
+
         except Exception as e:
             self.log(f"Error abriendo menú de depósitos: {e}", "ERROR")
     
@@ -2717,14 +2716,16 @@ class DatabaseApp:
             vars_sedes = {}
             depositos_por_sede = {}
             
-            # Obtener depósitos seleccionados en la configuración
-            depositos_configurados = list(getattr(self, 'stock_depositos_seleccionados', []) or [])
-            
-            # Crear checkboxes por cada localidad/sede
+            # Crear checkboxes por cada localidad/sede (solo depósitos configurados por sede)
             for localidad in sorted(self.stock_localidades.keys()):
                 depositos = self.stock_localidades[localidad]
-                # FILTRAR: solo incluir depósitos que están en la configuración seleccionada
-                depositos_filtrados = [d for d in depositos if d['codigo'] in depositos_configurados]
+                # Preferir selección por sede; fallback a selección combinada
+                conf_por_sede = getattr(self, 'stock_depositos_por_sede', {}) or {}
+                if localidad in conf_por_sede and conf_por_sede[localidad]:
+                    depositos_filtrados = [d for d in depositos if d['codigo'] in conf_por_sede[localidad]]
+                else:
+                    seleccionados = set(getattr(self, 'stock_depositos_seleccionados', []) or [])
+                    depositos_filtrados = [d for d in depositos if d['codigo'] in seleccionados]
                 
                 # Si no hay depósitos configurados para esta sede, omitirla
                 if not depositos_filtrados:
@@ -2828,10 +2829,10 @@ class DatabaseApp:
             # Esperar a que se cierre la ventana
             ventana.wait_window()
             
+            return resultado
         except Exception as e:
-            self.log(f"Error en diálogo de selección de sedes: {e}", "ERROR")
-            messagebox.showerror("Error", f"Error al mostrar diálogo de selección:\n{str(e)}")
-        
+            self.log(f"Error seleccionando sedes: {e}", "ERROR")
+            return []
         return resultado
     
     def _save_stock_depositos_preference(self):
@@ -2842,6 +2843,7 @@ class DatabaseApp:
             pref_data = {
                 'localidad': getattr(self, 'stock_localidad_actual', 'Cabudare'),
                 'depositos': self.stock_depositos_seleccionados,
+                'depositos_por_sede': getattr(self, 'stock_depositos_por_sede', {}),
                 'timestamp': str(time.time())
             }
             with open(pref_file, 'w', encoding='utf-8') as f:
@@ -2860,7 +2862,16 @@ class DatabaseApp:
                 with open(pref_file, 'r', encoding='utf-8') as f:
                     pref_data = json.load(f)
                     self.stock_localidad_actual = pref_data.get('localidad', 'Cabudare')
-                    self.stock_depositos_seleccionados = pref_data.get('depositos', ['0301'])
+                    # Soportar nuevo formato por sede
+                    self.stock_depositos_por_sede = pref_data.get('depositos_por_sede', {}) or {}
+                    if self.stock_depositos_por_sede:
+                        # Combinar todas las sedes
+                        self.stock_depositos_seleccionados = []
+                        for lst in self.stock_depositos_por_sede.values():
+                            self.stock_depositos_seleccionados.extend(lst or [])
+                    else:
+                        # Compatibilidad con formato viejo
+                        self.stock_depositos_seleccionados = pref_data.get('depositos', ['0301'])
                     self.log(f"📂 Preferencia cargada - Localidad: {self.stock_localidad_actual}", "DEBUG")
             else:
                 self.stock_localidad_actual = 'Cabudare'
@@ -2930,29 +2941,96 @@ class DatabaseApp:
         return 0
         
 
+    def _update_stock_extra_columns_headings(self):
+        """Actualiza los encabezados de las columnas 'Stock Sede 1' y 'Stock Sede 2' según la localidad actual"""
+        try:
+            localidad = getattr(self, 'stock_localidad_actual', 'Cabudare')
+            sedes = ['Cabudare', 'Barinas', 'Guanare']
+            if localidad not in sedes:
+                localidad = 'Cabudare'
+            otras = [s for s in sedes if s != localidad]
+            self.stock_tree.heading('Stock', text=f"Stock {localidad}")
+            self.stock_tree.heading('Stock Sede 1', text=f"Stock {otras[0]}")
+            self.stock_tree.heading('Stock Sede 2', text=f"Stock {otras[1]}")
+        except Exception:
+            pass
+
+    def _build_existencias_sedes_map(self, codigos):
+        """Devuelve map {codigo: {'Cabudare':x,'Barinas':y,'Guanare':z}} para los códigos dados (consulta batch)"""
+        try:
+            if not codigos:
+                return {}
+            # Obtener listas de depósitos por sede
+            locs = getattr(self, 'stock_localidades', {}) or {}
+            deps_cabu = [d['codigo'] for d in locs.get('Cabudare', [])]
+            deps_bari = [d['codigo'] for d in locs.get('Barinas', [])]
+            deps_guan = [d['codigo'] for d in locs.get('Guanare', [])]
+            all_deps = deps_cabu + deps_bari + deps_guan
+            if not all_deps:
+                return {}
+
+            # Chunk simple (página <= 250)
+            codigo_placeholders = ','.join('?' * len(codigos))
+            deposito_placeholders = ','.join('?' * len(all_deps))
+            sql = (
+                f"SELECT c_codarticulo, c_coddeposito, ISNULL(SUM(n_cantidad),0) AS total "
+                f"FROM MA_DEPOPROD WITH (NOLOCK) "
+                f"WHERE c_codarticulo IN ({codigo_placeholders}) AND c_coddeposito IN ({deposito_placeholders}) "
+                f"GROUP BY c_codarticulo, c_coddeposito"
+            )
+            params = codigos + all_deps
+            rows = self.db_manager.fetch_data(sql, params) or []
+            # Agregar
+            res = {c: {'Cabudare': 0, 'Barinas': 0, 'Guanare': 0} for c in codigos}
+            for codigo, deposito, total in rows:
+                try:
+                    pref = str(deposito)[:2]
+                    sede = 'Cabudare' if pref == '03' else 'Barinas' if pref == '01' else 'Guanare' if pref == '04' else None
+                    if sede and codigo in res:
+                        res[codigo][sede] += int(total or 0)
+                except Exception:
+                    continue
+            return res
+        except Exception as e:
+            self.stock_debug_log(f"Error construyendo existencias por sede: {e}", "ERROR")
+            return {}
+
     def mostrar_alertas_paginadas(self, datos):
-        """Mostrar datos con estado de favoritos y filas alternadas"""
+        """Mostrar datos con estado de favoritos y filas alternadas, incluyendo columnas por sede"""
         self.stock_tree.delete(*self.stock_tree.get_children())
         favoritos = self._get_favoritos_local()
         
-        for idx, (codigo, desc, stock, nivel) in enumerate(datos):
+        # Preparar mapa de existencias por sede para los códigos de la página
+        codigos = [r[0] for r in datos]
+        sede_map = self._build_existencias_sedes_map(codigos)
+        localidad = getattr(self, 'stock_localidad_actual', 'Cabudare')
+        sedes = ['Cabudare', 'Barinas', 'Guanare']
+        if localidad not in sedes:
+            localidad = 'Cabudare'
+        otras = [s for s in sedes if s != localidad]
+        self._update_stock_extra_columns_headings()
+        
+        for idx, (codigo, desc, stock_total, nivel) in enumerate(datos):
             es_favorito = codigo in favoritos
             estado = "✓" if es_favorito else "☐"
+
+            # Determinar stocks por sede
+            sede_vals = sede_map.get(codigo, {'Cabudare':0,'Barinas':0,'Guanare':0})
+            stock_local = int(sede_vals.get(localidad, 0))
+            stock_o1 = int(sede_vals.get(otras[0], 0))
+            stock_o2 = int(sede_vals.get(otras[1], 0))
             
-            # Si es favorito, usar estilo de favorito
+            # Tags
             if es_favorito:
                 tags = ('favorito',)
             else:
-                # Usar estilo alternado basado en el índice
-                nivel_base = nivel.lower().replace('ítica', 'itica')
-                if idx % 2 == 0:
-                    tags = (nivel_base,)  # Filas pares: colores claros
-                else:
-                    tags = (f"{nivel_base}_alt",)  # Filas impares: colores oscuros
+                nivel_base = str(nivel).lower().replace('ítica', 'itica')
+                tags = ((nivel_base,) if idx % 2 == 0 else (f"{nivel_base}_alt",))
             
-            self.stock_tree.insert("", tk.END, 
-                                values=(estado, codigo, desc, stock, nivel),
-                                tags=tags)
+            self.stock_tree.insert(
+                "", tk.END, 
+                values=(estado, codigo, desc, stock_local, stock_o1, stock_o2, nivel),
+                tags=tags)
         
     def aplicar_filtro(self):
         self.current_filter = self.filter_var.get()
@@ -6745,10 +6823,11 @@ class DatabaseApp:
         load_start_time = time.perf_counter()
         
         try:
-            # Obtener depósitos seleccionados o usar valor por defecto
-            depositos = getattr(self, 'stock_depositos_seleccionados', ['0301'])
-            if not depositos:
-                depositos = ['0301']
+            # Usar SOLO depósitos de la localidad actual para la carga y el ordenamiento
+            localidad = getattr(self, 'stock_localidad_actual', 'Cabudare')
+            locs = getattr(self, 'stock_localidades', {}) or {}
+            deps_loc = [d['codigo'] for d in locs.get(localidad, [])]
+            depositos = deps_loc if deps_loc else (getattr(self, 'stock_depositos_seleccionados', ['0301']) or ['0301'])
             
             self.stock_debug_log(f"Cargando alertas para depósitos: {', '.join(depositos)}")
             

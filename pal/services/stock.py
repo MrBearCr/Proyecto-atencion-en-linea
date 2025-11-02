@@ -129,10 +129,29 @@ def filter_alertas(alertas, producto_jerarquia, dept_code=None, group_code=None,
     if filtro_nivel != 'TODAS':
         datos_filtrados = [r for r in datos_filtrados if str(r[3]).upper() == filtro_nivel]
     
-    # Ordenar por favoritos (favoritos primero)
+    # Ordenar por severidad (CRÍTICA, MEDIA, LEVE), luego por stock asc, luego favoritos (como desempate), luego código
+    def _norm_nivel(n):
+        s = str(n or '').upper()
+        for a,b in [('Á','A'),('É','E'),('Í','I'),('Ó','O'),('Ú','U')]:
+            s = s.replace(a,b)
+        return s
+    def _rank(n):
+        s = _norm_nivel(n)
+        return 0 if s == 'CRITICA' else 1 if s == 'MEDIA' else 2 if s == 'LEVE' else 3
+    def _fav(code):
+        try:
+            return 0 if str(code) in favoritos else 1
+        except Exception:
+            return 1
+
     datos_ordenados = sorted(
         datos_filtrados,
-        key=lambda x: str(x[0]) not in favoritos  # Favoritos primero
+        key=lambda r: (
+            _rank(r[3] if len(r) > 3 else ''),
+            int(r[2] or 0) if len(r) > 2 and r[2] is not None else 0,
+            _fav(r[0]),
+            str(r[0])
+        )
     )
     
     return datos_ordenados

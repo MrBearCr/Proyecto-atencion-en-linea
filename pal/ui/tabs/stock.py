@@ -135,8 +135,10 @@ def setup_stock_tab(app):
     columns_config = {
         "Favorito": {"width": 50, "anchor": "center", "stretch": False},
         "Código": {"width": 100, "anchor": "center"},
-        "Descripción": {"width": 350, "anchor": "w"},
-        "Stock": {"width": 80, "anchor": "center"},
+        "Descripción": {"width": 320, "anchor": "w"},
+        "Stock": {"width": 90, "anchor": "center"},
+        "Stock Sede 1": {"width": 110, "anchor": "center"},
+        "Stock Sede 2": {"width": 110, "anchor": "center"},
         "Nivel": {"width": 100, "anchor": "center"}
     }
 
@@ -161,6 +163,10 @@ def setup_stock_tab(app):
     for col, config in columns_config.items():
         app.stock_tree.heading(col, text=col)
         app.stock_tree.column(col, **config)
+
+    # Ajustar encabezados dinámicos para columnas de sedes adicionales según localidad actual
+    if hasattr(app, '_update_stock_extra_columns_headings'):
+        app._update_stock_extra_columns_headings()
 
     # Estilos de filas con bordes visuales (colores más oscuros para resaltar líneas)
     app.stock_tree.tag_configure('leve', background='#4CAF50', foreground='#FFFFFF', font=('', 11))  # Verde vibrante

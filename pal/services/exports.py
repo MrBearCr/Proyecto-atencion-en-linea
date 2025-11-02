@@ -24,9 +24,10 @@ def clean_for_excel(text):
 try:
     from openpyxl import Workbook
     from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
-    from openpyxl.formatting.rule import ColorScaleRule, CellIsRule
+    from openpyxl.formatting.rule import ColorScaleRule, CellIsRule, FormulaRule
     from openpyxl.utils.dataframe import dataframe_to_rows
     from openpyxl.worksheet.table import Table, TableStyleInfo
+    from openpyxl.utils import get_column_letter
     EXCEL_AVAILABLE = True
 except ImportError:
     EXCEL_AVAILABLE = False
@@ -319,7 +320,8 @@ def export_mbrp_csv(filename: str, datos_mbrp: List, progress_cb: Optional[Calla
 
 def export_stock_excel(filename: str, datos_exportar: List, seleccionadas: List[str], 
                       location_groups: Dict[str, List[str]], db_manager, 
-                      progress_cb: Optional[Callable[[int, int], None]] = None) -> int:
+                      progress_cb: Optional[Callable[[int, int], None]] = None,
+                      current_localidad: Optional[str] = None) -> int:
     """
     Exporta datos de stock a un archivo Excel con formato profesional,
     filtros, formato condicional y múltiples hojas de análisis.
@@ -351,10 +353,8 @@ def export_stock_excel(filename: str, datos_exportar: List, seleccionadas: List[
         tiempo_pre_wb = time.time()
         wb = Workbook()
         wb.remove(wb.active)  # Remover hoja por defecto
-        logger.info(f"[EXPORT TIMER] Workbook creado en {time.time() - tiempo_pre_wb:.2f}s")
-        
-        # === HOJA 1: DATOS PRINCIPALES ===
         ws_main = wb.create_sheet("Alertas de Stock")
+        logger.info(f"[EXPORT TIMER] Workbook preparado en {time.time() - tiempo_pre_wb:.2f}s")
         
         # Encabezado del reporte
         ws_main['A1'] = f'REPORTE DE ALERTAS DE STOCK'
@@ -378,8 +378,12 @@ def export_stock_excel(filename: str, datos_exportar: List, seleccionadas: List[
         except Exception as e:
             logger.warning(f"No se pudieron cargar nombres de depósitos: {e}")
         
-        # Headers de la tabla (fila 8) - Mostrar código y nombre del depósito
-        headers = ['Código', 'Descripción', 'Nivel', 'Total Existencias']
+        # Headers de la tabla (fila 8)
+        # Determinar nombres de columnas por sede según localidad actual
+        sede_names = ['Cabudare', 'Barinas', 'Guanare']
+        loc_actual = current_localidad if current_localidad in sede_names else 'Cabudare'
+        otras = [s for s in sede_names if s != loc_actual]
+        headers = ['Código', 'Descripción', 'Nivel', f'Stock {loc_actual}', f'Stock {otras[0]}', f'Stock {otras[1]}', 'Total Existencias']
         for ubicacion in seleccionadas:
             nombre_deposito = depositos_info.get(ubicacion, ubicacion)
             header_text = f'{ubicacion} - {nombre_deposito}' if nombre_deposito != ubicacion else ubicacion
@@ -467,6 +471,47 @@ def export_stock_excel(filename: str, datos_exportar: List, seleccionadas: List[
         
         # Ahora procesar los datos usando el mapa precargado
         data_start_row = start_row + 1
+
+        # Reordenar datos por severidad y por stock de la localidad actual para que las CRÍTICAS queden primero
+        def _norm_nivel(n):
+            s = str(n or '').upper()
+            for a,b in [('Á','A'),('É','E'),('Í','I'),('Ó','O'),('Ú','U')]:
+                s = s.replace(a,b)
+            return s
+        def _rank(n):
+            s = _norm_nivel(n)
+            return 0 if s == 'CRITICA' else 1 if s == 'MEDIA' else 2 if s == 'LEVE' else 3
+
+        # Determinar orden de sedes según localidad actual (ya calculado arriba)
+        sede_order = ['Cabudare', 'Barinas', 'Guanare']
+        if current_localidad in sede_order:
+            sede_order.remove(current_localidad)
+            sede_order.insert(0, current_localidad)
+        selected_by_sede = {
+            'Cabudare': [d for d in seleccionadas if str(d).startswith('03')],
+            'Barinas':  [d for d in seleccionadas if str(d).startswith('01')],
+            'Guanare':  [d for d in seleccionadas if str(d).startswith('04')],
+        }
+        def _local_stock(codigo):
+            dep_qty = existencias_map.get(codigo, {})
+            deps_local = selected_by_sede.get(sede_order[0], [])
+            return sum(int(dep_qty.get(d, 0)) for d in deps_local)
+
+        datos_exportar = sorted(
+            datos_exportar,
+            key=lambda r: (
+                _rank(r[3] if len(r) > 3 else ''),
+                _local_stock(r[0]),
+                str(r[0])
+            )
+        )
+
+        # Precalcular depósitos seleccionados por sede (solo los elegidos en exportación)
+        selected_by_sede = {
+            'Cabudare': [d for d in seleccionadas if str(d).startswith('03')],
+            'Barinas':  [d for d in seleccionadas if str(d).startswith('01')],
+            'Guanare':  [d for d in seleccionadas if str(d).startswith('04')],
+        }
         
         for i, (codigo, desc, stock, nivel) in enumerate(datos_exportar):
             try:
@@ -475,21 +520,54 @@ def export_stock_excel(filename: str, datos_exportar: List, seleccionadas: List[
                 # Limpiar caracteres inválidos para Excel
                 ws_main.cell(row=row, column=1, value=clean_for_excel(codigo))
                 ws_main.cell(row=row, column=2, value=clean_for_excel(desc))
-                ws_main.cell(row=row, column=3, value=clean_for_excel(nivel.capitalize()))
-                
+                # Normalizar nivel a MAYÚSCULAS sin acento
+                nivel_excel = str(nivel).upper().replace('Á','A').replace('É','E').replace('Í','I').replace('Ó','O').replace('Ú','U')
+                ws_main.cell(row=row, column=3, value=clean_for_excel(nivel_excel))
+
+                # Calcular stock por sedes (según prefijo de depósito)
+                # Construir map rápido depósito->cantidad (filtrando SOLO los depósitos seleccionados)
+                dep_qty = existencias_map.get(codigo, {})
+                sum_cabu = sum(int(dep_qty.get(d, 0)) for d in selected_by_sede['Cabudare'])
+                sum_bari = sum(int(dep_qty.get(d, 0)) for d in selected_by_sede['Barinas'])
+                sum_guan = sum(int(dep_qty.get(d, 0)) for d in selected_by_sede['Guanare'])
+
+                # Determinar orden según localidad actual (si se pasó)
+                try:
+                    current_localidad = locals().get('current_localidad', None)
+                except Exception:
+                    current_localidad = None
+                if not current_localidad:
+                    current_localidad = 'Cabudare'
+                sede_order = ['Cabudare', 'Barinas', 'Guanare']
+                if current_localidad in sede_order:
+                    sede_order.remove(current_localidad)
+                    sede_order.insert(0, current_localidad)
+                # Map sede->valor
+                sede_vals = {
+                    'Cabudare': sum_cabu,
+                    'Barinas': sum_bari,
+                    'Guanare': sum_guan
+                }
+                stock_local = sede_vals.get(sede_order[0], 0)
+                stock_o1 = sede_vals.get(sede_order[1], 0)
+                stock_o2 = sede_vals.get(sede_order[2], 0)
+
+                # Escribir columnas especiales: Stock Localidad, Stock Otras, Total
+                ws_main.cell(row=row, column=4, value=int(stock_local))
+                ws_main.cell(row=row, column=5, value=int(stock_o1))
+                ws_main.cell(row=row, column=6, value=int(stock_o2))
+
                 # Calcular total de existencias sumando todos los depósitos
-                total_existencias = 0
+                total_existencias = int(stock_local + stock_o1 + stock_o2)
+                ws_main.cell(row=row, column=7, value=total_existencias)
                 
-                # Existencias por ubicación - usando el mapa precargado (sin consultas BD)
+                # Existencias por ubicación seleccionada (mantener columnas por depósito)
+                start_dep_col = 8
                 for j, ubicacion in enumerate(seleccionadas):
                     existencias = existencias_map.get(codigo, {}).get(ubicacion, 0)
-                    ws_main.cell(row=row, column=5+j, value=int(existencias))
-                    total_existencias += existencias
-                
-                ws_main.cell(row=row, column=4, value=total_existencias)
+                    ws_main.cell(row=row, column=start_dep_col + j, value=int(existencias))
                 
                 # Reportar progreso de procesamiento de datos (10-100% del total)
-                # Los primeros 10% fueron para chunks, ahora 90% restante para datos
                 if progress_cb:
                     chunk_progress_weight = 0.10
                     data_progress_weight = 0.90
@@ -505,49 +583,71 @@ def export_stock_excel(filename: str, datos_exportar: List, seleccionadas: List[
         logger.info(f"[EXPORT TIMER] Procesamiento de datos: {tiempo_post_datos - tiempo_pre_datos:.2f}s (1 consulta batch)")
         
         # Crear tabla con filtros
-        table_range = f"A{start_row}:{chr(65 + len(headers) - 1)}{data_start_row + total_registros - 1}"
-        table = Table(displayName="TablaStock", ref=table_range)
-        table.tableStyleInfo = TableStyleInfo(
-            name="TableStyleMedium9", showFirstColumn=False,
-            showLastColumn=False, showRowStripes=True, showColumnStripes=False
-        )
-        ws_main.add_table(table)
+        end_col_letter = get_column_letter(len(headers))
+        table_range = f"A{start_row}:{end_col_letter}{data_start_row + total_registros - 1}"
+        # Actualizar o crear tabla 'TablaStock'
+        existing_table = None
+        try:
+            for tbl in getattr(ws_main, 'tables', {}).values():
+                if getattr(tbl, 'displayName', '') == 'TablaStock':
+                    existing_table = tbl
+                    break
+        except Exception:
+            pass
+        if existing_table:
+            existing_table.ref = table_range
+        else:
+            table = Table(displayName="TablaStock", ref=table_range)
+            table.tableStyleInfo = TableStyleInfo(
+                name="TableStyleMedium9", showFirstColumn=False,
+                showLastColumn=False, showRowStripes=True, showColumnStripes=False
+            )
+            ws_main.add_table(table)
         
-        # Formato condicional para niveles
+        # Formato condicional solo para la columna Nivel
         data_range = f"C{data_start_row}:C{data_start_row + total_registros - 1}"
         
-        # Crítica = Rojo
-        ws_main.conditional_formatting.add(data_range, 
-            CellIsRule(operator='equal', formula=['"CRITICA"'], 
-                      fill=PatternFill(start_color="FF6B6B", end_color="FF6B6B")))
+        # Crítica = Rojo (valor normalizado a MAYÚSCULAS sin acentos)
+        ws_main.conditional_formatting.add(
+            data_range,
+            CellIsRule(operator='equal', formula=['"CRITICA"'],
+                       fill=PatternFill(start_color="FF6B6B", end_color="FF6B6B"))
+        )
         
-        # Media = Amarillo  
-        ws_main.conditional_formatting.add(data_range,
+        # Media = Amarillo
+        ws_main.conditional_formatting.add(
+            data_range,
             CellIsRule(operator='equal', formula=['"MEDIA"'],
-                      fill=PatternFill(start_color="FFD93D", end_color="FFD93D")))
+                       fill=PatternFill(start_color="FFD93D", end_color="FFD93D"))
+        )
         
         # Leve = Verde
-        ws_main.conditional_formatting.add(data_range,
+        ws_main.conditional_formatting.add(
+            data_range,
             CellIsRule(operator='equal', formula=['"LEVE"'],
-                      fill=PatternFill(start_color="6BCF7F", end_color="6BCF7F")))
+                       fill=PatternFill(start_color="6BCF7F", end_color="6BCF7F"))
+        )
         
         # Ajustar anchos de columna
         ws_main.column_dimensions['A'].width = 12  # Código
         ws_main.column_dimensions['B'].width = 40  # Descripción
         ws_main.column_dimensions['C'].width = 12  # Nivel
-        ws_main.column_dimensions['D'].width = 15  # Total
-        
+        ws_main.column_dimensions['D'].width = 15  # Stock Localidad
+        ws_main.column_dimensions['E'].width = 15  # Stock Sede 1
+        ws_main.column_dimensions['F'].width = 15  # Stock Sede 2
+        ws_main.column_dimensions['G'].width = 15  # Total
+        # Columnas por depósito comienzan en H
         for i in range(len(seleccionadas)):
-            col_letter = chr(69 + i)  # E, F, G...
+            col_letter = get_column_letter(8 + i)  # 8 -> H, luego I, J, ... AA, AB, etc.
             ws_main.column_dimensions[col_letter].width = 15
         
         # === HOJA 2: RESUMEN POR NIVEL ===
         ws_summary = wb.create_sheet("Resumen por Nivel")
         
-        # Contar por niveles
+        # Contar por niveles (normalizando acentos)
         nivel_counts = {'CRITICA': 0, 'MEDIA': 0, 'LEVE': 0}
         for _, _, _, nivel in datos_exportar:
-            nivel_upper = nivel.upper()
+            nivel_upper = str(nivel).upper().replace('Á','A').replace('É','E').replace('Í','I').replace('Ó','O').replace('Ú','U')
             if nivel_upper in nivel_counts:
                 nivel_counts[nivel_upper] += 1
         
@@ -577,7 +677,7 @@ def export_stock_excel(filename: str, datos_exportar: List, seleccionadas: List[
         ws_critical = wb.create_sheet("Productos Críticos")
         
         productos_criticos = [(codigo, desc, stock, nivel) for codigo, desc, stock, nivel in datos_exportar 
-                             if nivel.upper() == 'CRITICA']
+                             if str(nivel).upper().replace('Á','A').replace('É','E').replace('Í','I').replace('Ó','O').replace('Ú','U') == 'CRITICA']
         
         ws_critical['A1'] = f'PRODUCTOS CRÍTICOS ({len(productos_criticos)} productos)'
         ws_critical['A1'].font = Font(size=12, bold=True, color="FFFFFF")
@@ -748,7 +848,8 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
                 continue
         
         # Crear tabla con filtros
-        table_range = f"A{start_row}:{chr(65 + len(headers) - 1)}{data_start_row + total_registros - 1}"
+        end_col_letter = get_column_letter(len(headers))
+        table_range = f"A{start_row}:{end_col_letter}{data_start_row + total_registros - 1}"
         table = Table(displayName="TablaTRA", ref=table_range)
         table.tableStyleInfo = TableStyleInfo(
             name="TableStyleMedium9", showFirstColumn=False,
@@ -954,7 +1055,8 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
                 continue
         
         # Crear tabla con filtros
-        table_range = f"A{start_row}:{chr(65 + len(headers) - 1)}{data_start_row + total_registros - 1}"
+        end_col_letter = get_column_letter(len(headers))
+        table_range = f"A{start_row}:{end_col_letter}{data_start_row + total_registros - 1}"
         table = Table(displayName="TablaMBRP", ref=table_range)
         table.tableStyleInfo = TableStyleInfo(
             name="TableStyleMedium9", showFirstColumn=False,

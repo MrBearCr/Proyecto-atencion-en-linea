@@ -47,10 +47,26 @@ def setup_tra_tab(app):
 
     ttk.Label(fecha_frame, text="Sede:").pack(side=tk.LEFT, padx=10)
     app.sede_var = tk.StringVar()
-    app.sede_combo = ttk.Combobox(fecha_frame, textvariable=app.sede_var, state='readonly', width=15)
-    app.sede_combo['values'] = ["0301 - Cabudare", "0401 - Guanare", "0101 - Barinas"]
-    app.sede_combo.current(0)  # Seleccionar primer elemento por defecto
+    app.sede_combo = ttk.Combobox(fecha_frame, textvariable=app.sede_var, state='readonly', width=18)
+    app.sede_combo['values'] = ["00 - ICH", "0301 - Cabudare", "0401 - Guanare", "0101 - Barinas"]
+    app.sede_combo.current(1)  # Por defecto 0301
     app.sede_combo.pack(side=tk.LEFT)
+
+    # Aviso al seleccionar ICH (consulta global)
+    def _on_sede_selected(event=None):
+        try:
+            sel = (app.sede_var.get() or '')
+            if sel.startswith('00'):
+                if hasattr(app, 'notification_manager'):
+                    app.notification_manager.show_banner(
+                        "Filtro ICH seleccionado: consulta global de todas las sedes; puede tardar más en procesar.",
+                        bg="#FFB81C",
+                        fg="black",
+                        duration=5500,
+                    )
+        except Exception:
+            pass
+    app.sede_combo.bind('<<ComboboxSelected>>', _on_sede_selected)
 
     # Botones de acción
     # Exportar (respetar permisos)

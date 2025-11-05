@@ -1121,7 +1121,7 @@ class DatabaseManager:
     
     def obtener_ventas_por_producto_chunk(self, fecha_inicio, fecha_fin, sede_codigo, 
                                          start_row=1, fetch_size=1000):
-        """Obtiene ventas TRA en chunks para carga paralela - OPTIMIZADO
+        """Obtiene ventas TRA en chunks para carga paralela - OPTIMIZADO (soporta consulta global ICH)
         
         Args:
             fecha_inicio: Fecha inicio del rango
@@ -1140,39 +1140,73 @@ class DatabaseManager:
         - Filtra neto > 0: Solo productos con ventas reales
         """
         try:
-            # OPTIMIZACIÓN CRÍTICA: CTE + NOLOCK + = en lugar de LIKE
-            query = """
-                WITH VentasAgregadas AS (
-                    SELECT 
-                        i.c_Codarticulo AS codigo,
-                        SUM(CASE 
+            # OPTIMIZACIÓN CRÍTICA: CTE + NOLOCK + filtro dinámico por depósito
+            global_query = (sede_codigo in (None, '%', '00', 'ICH', 'ALL'))
+            if global_query:
+                query = """
+                    WITH VentasAgregadas AS (
+                        SELECT 
+                            i.c_Codarticulo AS codigo,
+                            SUM(CASE 
+                                WHEN i.c_Concepto = 'VEN' THEN i.n_Cantidad
+                                WHEN i.c_Concepto = 'DEV' THEN -i.n_Cantidad 
+                                ELSE 0 
+                            END) AS neto
+                        FROM TR_INVENTARIO i WITH (NOLOCK)
+                        WHERE i.f_fecha BETWEEN CONVERT(DATE, ?, 105) AND CONVERT(DATE, ?, 105)
+                            AND i.c_Concepto IN ('VEN', 'DEV')
+                        GROUP BY i.c_Codarticulo
+                        HAVING SUM(CASE 
                             WHEN i.c_Concepto = 'VEN' THEN i.n_Cantidad
                             WHEN i.c_Concepto = 'DEV' THEN -i.n_Cantidad 
                             ELSE 0 
-                        END) AS neto
-                    FROM TR_INVENTARIO i WITH (NOLOCK)
-                    WHERE i.f_fecha BETWEEN CONVERT(DATE, ?, 105) AND CONVERT(DATE, ?, 105)
-                        AND i.c_Concepto IN ('VEN', 'DEV')
-                        AND i.c_Deposito = ?
-                    GROUP BY i.c_Codarticulo
-                    HAVING SUM(CASE 
-                        WHEN i.c_Concepto = 'VEN' THEN i.n_Cantidad
-                        WHEN i.c_Concepto = 'DEV' THEN -i.n_Cantidad 
-                        ELSE 0 
-                    END) > 0
-                )
-                SELECT 
-                    v.codigo,
-                    COALESCE(p.cu_descripcion_corta, p.C_DESCRI, 'SIN DESCRIPCIÓN') AS descripcion,
-                    COALESCE(p.C_DEPARTAMENTO, '') AS departamento,
-                    COALESCE(p.C_GRUPO, '') AS grupo,
-                    COALESCE(p.C_SUBGRUPO, '') AS subgrupo,
-                    v.neto
-                FROM VentasAgregadas v
-                LEFT JOIN MA_PRODUCTOS p WITH (NOLOCK) ON v.codigo = p.C_CODIGO
-                ORDER BY v.neto DESC
-                OFFSET ? ROWS FETCH NEXT ? ROWS ONLY
-            """
+                        END) > 0
+                    )
+                    SELECT 
+                        v.codigo,
+                        COALESCE(p.cu_descripcion_corta, p.C_DESCRI, 'SIN DESCRIPCIÓN') AS descripcion,
+                        COALESCE(p.C_DEPARTAMENTO, '') AS departamento,
+                        COALESCE(p.C_GRUPO, '') AS grupo,
+                        COALESCE(p.C_SUBGRUPO, '') AS subgrupo,
+                        v.neto
+                    FROM VentasAgregadas v
+                    LEFT JOIN MA_PRODUCTOS p WITH (NOLOCK) ON v.codigo = p.C_CODIGO
+                    ORDER BY v.neto DESC
+                    OFFSET ? ROWS FETCH NEXT ? ROWS ONLY
+                """
+            else:
+                query = """
+                    WITH VentasAgregadas AS (
+                        SELECT 
+                            i.c_Codarticulo AS codigo,
+                            SUM(CASE 
+                                WHEN i.c_Concepto = 'VEN' THEN i.n_Cantidad
+                                WHEN i.c_Concepto = 'DEV' THEN -i.n_Cantidad 
+                                ELSE 0 
+                            END) AS neto
+                        FROM TR_INVENTARIO i WITH (NOLOCK)
+                        WHERE i.f_fecha BETWEEN CONVERT(DATE, ?, 105) AND CONVERT(DATE, ?, 105)
+                            AND i.c_Concepto IN ('VEN', 'DEV')
+                            AND i.c_Deposito = ?
+                        GROUP BY i.c_Codarticulo
+                        HAVING SUM(CASE 
+                            WHEN i.c_Concepto = 'VEN' THEN i.n_Cantidad
+                            WHEN i.c_Concepto = 'DEV' THEN -i.n_Cantidad 
+                            ELSE 0 
+                        END) > 0
+                    )
+                    SELECT 
+                        v.codigo,
+                        COALESCE(p.cu_descripcion_corta, p.C_DESCRI, 'SIN DESCRIPCIÓN') AS descripcion,
+                        COALESCE(p.C_DEPARTAMENTO, '') AS departamento,
+                        COALESCE(p.C_GRUPO, '') AS grupo,
+                        COALESCE(p.C_SUBGRUPO, '') AS subgrupo,
+                        v.neto
+                    FROM VentasAgregadas v
+                    LEFT JOIN MA_PRODUCTOS p WITH (NOLOCK) ON v.codigo = p.C_CODIGO
+                    ORDER BY v.neto DESC
+                    OFFSET ? ROWS FETCH NEXT ? ROWS ONLY
+                """
             
             fecha_inicio_str = fecha_inicio.strftime("%d-%m-%Y")
             fecha_fin_str = fecha_fin.strftime("%d-%m-%Y")
@@ -1183,7 +1217,10 @@ class DatabaseManager:
             if not thread_conn:
                 return []
             cursor = thread_conn.cursor()
-            cursor.execute(query, (fecha_inicio_str, fecha_fin_str, sede_codigo, offset, fetch_size))
+            if global_query:
+                cursor.execute(query, (fecha_inicio_str, fecha_fin_str, offset, fetch_size))
+            else:
+                cursor.execute(query, (fecha_inicio_str, fecha_fin_str, sede_codigo, offset, fetch_size))
             rows = cursor.fetchall()
             cursor.close()
             return rows

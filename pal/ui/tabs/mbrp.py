@@ -45,10 +45,26 @@ def setup_mbrp_tab(app):
 
     ttk.Label(fecha_frame, text="Sede:").pack(side=tk.LEFT, padx=10)
     app.mbrp_sede_var = tk.StringVar()
-    app.mbrp_sede_combo = ttk.Combobox(fecha_frame, textvariable=app.mbrp_sede_var, state='readonly', width=15)
-    app.mbrp_sede_combo['values'] = ["0301 - Cabudare", "0401 - Guanare", "0101 - Barinas"]
-    app.mbrp_sede_combo.current(0)
+    app.mbrp_sede_combo = ttk.Combobox(fecha_frame, textvariable=app.mbrp_sede_var, state='readonly', width=18)
+    app.mbrp_sede_combo['values'] = ["00 - ICH", "0301 - Cabudare", "0401 - Guanare", "0101 - Barinas"]
+    app.mbrp_sede_combo.current(1)
     app.mbrp_sede_combo.pack(side=tk.LEFT)
+
+    # Aviso al seleccionar ICH (consulta global)
+    def _on_mbrp_sede_selected(event=None):
+        try:
+            sel = (app.mbrp_sede_var.get() or '')
+            if sel.startswith('00'):
+                if hasattr(app, 'notification_manager'):
+                    app.notification_manager.show_banner(
+                        "Filtro ICH seleccionado (MBRP): consulta global; puede tardar más en procesar.",
+                        bg="#FFB81C",
+                        fg="black",
+                        duration=5500,
+                    )
+        except Exception:
+            pass
+    app.mbrp_sede_combo.bind('<<ComboboxSelected>>', _on_mbrp_sede_selected)
 
     # Botones de acción
     ttk.Button(top_controls, text="Cargar", command=app.cargar_mbrp_base).pack(side=tk.RIGHT, padx=10)

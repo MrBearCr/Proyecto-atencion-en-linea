@@ -953,7 +953,7 @@ class DatabaseApp:
                 return
             # Actualizar status con estadísticas de rendimiento
             if hasattr(self, 'api_status') and self.api_status.winfo_exists():
-                status_text = f"TRA: {total_records} registros"
+                status_text = f"RI: {total_records} registros"
                 if records_per_sec > 0:
                     status_text += f" | {records_per_sec:.0f} reg/s"
                 self.api_status.config(text=status_text, foreground="#004C97")
@@ -1113,7 +1113,7 @@ class DatabaseApp:
             phase_name = phase_names.get(phase, f"Fase {phase}")
             
             self.api_status.config(
-                text=f"TRA: {phase_name} - {count} registros ({elapsed_time:.1f}s)", 
+                text=f"RI: {phase_name} - {count} registros ({elapsed_time:.1f}s)", 
                 foreground="#004C97"
             )
             
@@ -1129,7 +1129,7 @@ class DatabaseApp:
         """Actualiza progreso durante carga por chunks"""
         try:
             self.api_status.config(
-                text=f"TRA: Chunk {chunk_num} - {total_records} registros", 
+                text=f"RI: Chunk {chunk_num} - {total_records} registros", 
                 foreground="#004C97"
             )
             
@@ -1142,7 +1142,7 @@ class DatabaseApp:
     def _finalize_tra_loading(self):
         """Finaliza la carga TRA"""
         try:
-            self.api_status.config(text="TRA: Completo", foreground="green")
+            self.api_status.config(text="RI: Completo", foreground="green")
             self.aplicar_filtro_tra()
             self.log("🎉 TRA: Carga finalizada - datos listos", "SUCCESS")
         except Exception as e:
@@ -1157,7 +1157,7 @@ class DatabaseApp:
                     "", "No se encontraron ventas para este rango", "", "", "", "", "", ""
                 ), tags=("no_data",))
             
-            self.api_status.config(text="TRA: Sin datos", foreground="orange")
+            self.api_status.config(text="RI: Sin datos", foreground="orange")
             messagebox.showinfo("Sin resultados", "No se encontraron ventas para ese rango y sede.")
             
         except Exception as e:
@@ -1172,7 +1172,7 @@ class DatabaseApp:
                     "ERROR", f"Error cargando datos: {error_msg[:50]}...", "", "", "", "", "", ""
                 ), tags=("error",))
             
-            self.api_status.config(text="TRA: Error", foreground="red")
+            self.api_status.config(text="RI: Error", foreground="red")
             
         except Exception as e:
             self.tra_debug_log(f"Error mostrando error: {e}")
@@ -1369,7 +1369,7 @@ class DatabaseApp:
             except Exception:
                 allowed = False
             if not allowed:
-                messagebox.showwarning("Permiso denegado", "No tienes permiso para exportar datos de TRA")
+                messagebox.showwarning("Permiso denegado", "No tienes permiso para exportar datos de RI")
                 try:
                     if hasattr(self, 'audit_db') and self.current_user:
                         self.audit_db.log_action(
@@ -1379,7 +1379,7 @@ class DatabaseApp:
                 return
             # Verificar si hay datos para exportar
             if not hasattr(self, 'cached_ventas_tra') or not self.cached_ventas_tra:
-                messagebox.showwarning("Sin datos", "No hay datos TRA cargados para exportar")
+                messagebox.showwarning("Sin datos", "No hay datos RI cargados para exportar")
                 return
             
             # Verificar si openpyxl está disponible
@@ -1396,7 +1396,7 @@ class DatabaseApp:
             
             # Obtener los mismos datos filtrados que se muestran en la interfaz
             if not hasattr(self, 'cached_ventas_tra') or not self.cached_ventas_tra:
-                messagebox.showwarning("Sin datos", "No hay datos TRA cargados para exportar")
+                messagebox.showwarning("Sin datos", "No hay datos RI cargados para exportar")
                 return
             
             # Aplicar los mismos filtros que se usan en la interfaz
@@ -1441,7 +1441,7 @@ class DatabaseApp:
                     self.log(f"[EXPORT DEBUG] Neto raw del primer item: {neto_raw} (tipo: {type(neto_raw)})", "DEBUG")
             
             if not datos_exportar:
-                messagebox.showwarning("Sin datos", "No hay registros TRA para exportar")
+                messagebox.showwarning("Sin datos", "No hay registros RI para exportar")
                 return
             
             # Configurar progreso
@@ -1449,7 +1449,7 @@ class DatabaseApp:
             self.global_progress.pack(side=tk.RIGHT, padx=10)
             self.global_progress['value'] = 0
             self.global_progress['maximum'] = total_registros
-            self.api_status.config(text="Exportando TRA: 0%", foreground="#004C97")
+            self.api_status.config(text="Exportando RI: 0%", foreground="#004C97")
             
             filename = f"reporte_tra_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
             
@@ -1474,7 +1474,7 @@ class DatabaseApp:
                     
                     # Notificar éxito en el hilo principal
                     self.root.after(0, lambda: self._export_success(
-                        "TRA",
+                        "RI",
                         total_registros,
                         filename,
                         "• Hojas incluidas: Datos principales, Resumen por rotación, Productos de baja rotación\n"
@@ -1489,7 +1489,7 @@ class DatabaseApp:
                     
                 except Exception as e:
                     # Notificar error en el hilo principal
-                    self.root.after(0, lambda err=str(e): self._export_error("TRA", err))
+                    self.root.after(0, lambda err=str(e): self._export_error("RI", err))
                     try:
                         if hasattr(self, 'audit_db') and self.current_user:
                             self.audit_db.log_action(
@@ -1504,7 +1504,7 @@ class DatabaseApp:
         except Exception as e:
             self.log(f"Error iniciando exportación TRA: {str(e)}", "ERROR")
             self.api_status.config(text="API: Error", foreground="red")
-            messagebox.showerror("Error en Exportación TRA", f"Error durante la exportación:\n{str(e)}")
+            messagebox.showerror("Error en Exportación RI", f"Error durante la exportación:\n{str(e)}")
             self._cleanup_export_progress()
     
     def exportar_mbrp_excel(self):
@@ -3209,7 +3209,7 @@ class DatabaseApp:
         # Pestaña T.R.A (Rotación de Ventas)
         if self.modules_enabled.get("tra", False):
             self.tra_tab = ttk.Frame(self.main_notebook)
-            self.main_notebook.add(self.tra_tab, text="📈 T.R.A")
+            self.main_notebook.add(self.tra_tab, text="📈 RI")
             from pal.ui.tabs.tra import setup_tra_tab as setup_tra_tab_ui
             setup_tra_tab_ui(self)
             self.root.after(500, self._update_hierarchy_combos)
@@ -4334,6 +4334,19 @@ class DatabaseApp:
                 return
             
             sede = self.sede_var.get().split(" - ")[0]
+            # Mapear ICH a consulta global
+            if sede == '00':
+                sede = '%'
+                try:
+                    if hasattr(self, 'notification_manager'):
+                        self.notification_manager.show_banner(
+                            "Filtro ICH (RI): consulta global de todas las sedes; puede tardar más en procesar.",
+                            bg="#FFB81C",
+                            fg="black",
+                            duration=5500,
+                        )
+                except Exception:
+                    pass
             
             # Si ya hay una carga en curso, evitar lanzar otra simultáneamente
             try:
@@ -4585,25 +4598,35 @@ class DatabaseApp:
             return 0
     
     def obtener_stock_actual_bulk(self, codigos: list, deposito: str) -> dict:
-        """Obtiene stock actual por código en un depósito específico usando una sola consulta"""
+        """Obtiene stock actual por código; si deposito es global ('%' o '00'), suma en todas las sedes."""
         try:
             if not codigos:
                 return {}
             # Evitar IN () muy grande dividiendo en chunks si es necesario
             MAX_IN = 900  # límite seguro para SQL Server
             resultado = {}
+            global_query = (deposito in (None, '%', '00', 'ICH', 'ALL'))
             for i in range(0, len(codigos), MAX_IN):
                 chunk = codigos[i:i+MAX_IN]
                 placeholders = ",".join(["?"] * len(chunk))
-                sql = (
-                    f"SELECT c_codarticulo, SUM(n_cantidad) "
-                    f"FROM MA_DEPOPROD WITH (NOLOCK) "
-                    f"WHERE c_coddeposito = ? AND c_codarticulo IN ({placeholders}) "
-                    f"GROUP BY c_codarticulo"
-                )
-                params = [deposito] + chunk
+                if global_query:
+                    sql = (
+                        f"SELECT c_codarticulo, SUM(n_cantidad) "
+                        f"FROM MA_DEPOPROD WITH (NOLOCK) "
+                        f"WHERE c_codarticulo IN ({placeholders}) "
+                        f"GROUP BY c_codarticulo"
+                    )
+                    params = chunk
+                else:
+                    sql = (
+                        f"SELECT c_codarticulo, SUM(n_cantidad) "
+                        f"FROM MA_DEPOPROD WITH (NOLOCK) "
+                        f"WHERE c_coddeposito = ? AND c_codarticulo IN ({placeholders}) "
+                        f"GROUP BY c_codarticulo"
+                    )
+                    params = [deposito] + chunk
                 rows = self.db_manager.fetch_data(sql, params)
-                for cod, sum_qty in rows:
+                for cod, sum_qty in (rows or []):
                     try:
                         resultado[str(cod)] = int(sum_qty or 0)
                     except Exception:
@@ -6614,15 +6637,54 @@ class DatabaseApp:
         def _show_notification(self, title, message, color):
             notification = tk.Toplevel(self.root)
             notification.wm_overrideredirect(True)
+            notification.attributes('-topmost', True)
             notification.geometry(f"+{self.root.winfo_rootx()+self.root.winfo_width()-300}+{self.root.winfo_rooty()+50}")
         
             frame = ttk.Frame(notification, relief="solid", borderwidth=1)
             frame.pack(padx=10, pady=10)
         
-            ttk.Label(frame, text=title, foreground="#155724", font=("Arial", 9, "bold")).pack()
+            ttk.Label(frame, text=title, foreground="#155724", font=("Segoe UI", 10, "bold")).pack()
             ttk.Label(frame, text=message).pack()
         
             notification.after(3000, notification.destroy)
+        
+        def show_banner(self, message, bg="#FFB81C", fg="white", duration=5000):
+            """Muestra una banda superior no modal y auto-ocultable"""
+            try:
+                banner = tk.Toplevel(self.root)
+                banner.wm_overrideredirect(True)
+                banner.attributes('-topmost', True)
+                # Dimensiones
+                width = min(max(480, int(self.root.winfo_width()*0.6)), 900)
+                height = 60
+                # Posición centrada arriba
+                x = self.root.winfo_rootx() + (self.root.winfo_width() - width)//2
+                y = self.root.winfo_rooty() + 10
+                banner.geometry(f"{width}x{height}+{x}+{y}")
+                # Contenido
+                frame = tk.Frame(banner, bg=bg, bd=2, relief="ridge")
+                frame.pack(fill=tk.BOTH, expand=True)
+                label = tk.Label(
+                    frame,
+                    text=message,
+                    bg=bg,
+                    fg=fg,
+                    font=("Segoe UI", 12, "bold"),
+                    padx=16,
+                    pady=10,
+                    wraplength=width-40,
+                    justify="center"
+                )
+                label.pack(fill=tk.BOTH, expand=True)
+                # Auto-ocultar
+                banner.after(max(1500, int(duration)), banner.destroy)
+            except Exception:
+                # Fallback a messagebox no modal-like (evitar bloqueo): usar _safe_update_api_status
+                try:
+                    from tkinter import messagebox
+                    messagebox.showinfo("Aviso", message)
+                except Exception:
+                    pass
 
     class HelpTooltips:
         def __init__(self, root):
@@ -7259,7 +7321,7 @@ class DatabaseApp:
                         self.tra_debug_log(f"+{last} (total {total}) en {dt_ms:.0f}ms, next_chunk={next_size}")
                         # Actualizar estado textual
                         try:
-                            self.api_status.config(text=f"Cargando TRA: {total} filas...", foreground="#004C97")
+                            self.api_status.config(text=f"RI: Cargando {total} filas...", foreground="#004C97")
                         except Exception:
                             pass
                         # Primer chunk: refrescar vistas para feedback temprano
@@ -8028,6 +8090,19 @@ class DatabaseApp:
             self.cached_ventas_mbrp = []
             self.mbrp_fecha_inicio = fecha_inicio
             self.mbrp_fecha_fin = fecha_fin
+            # Mapear ICH a consulta global
+            if sede == '00':
+                sede = '%'
+                try:
+                    if hasattr(self, 'notification_manager'):
+                        self.notification_manager.show_banner(
+                            "Filtro ICH (MBRP): consulta global de todas las sedes; puede tardar más en procesar.",
+                            bg="#FFB81C",
+                            fg="black",
+                            duration=5500,
+                        )
+                except Exception:
+                    pass
             self.mbrp_sede_codigo = sede
             
             # Invalidar caché de últimas ventas al cargar nuevos datos

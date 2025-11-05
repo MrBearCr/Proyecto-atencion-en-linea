@@ -106,10 +106,10 @@ def setup_dashboard_tab(app):
             'tab_text': '🚨 Alertas Stock',  # Tab exacto con emoji
             'tab_attr': 'stock_tab',
         },
-        'tra': {
+'tra': {
             'icon': '📈',
-            'name': 'T.R.A',
-            'tab_text': '📈 T.R.A',  # Tab exacto con emoji
+            'name': 'RI',
+            'tab_text': '📈 RI',  # Tab exacto con emoji
             'tab_attr': 'tra_tab',
         },
         'mbrp': {

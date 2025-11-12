@@ -444,6 +444,8 @@ class DatabaseApp:
                 self.cached_alertas = self.db_manager.obtener_alertas_stock(limit=300)
                 self.last_refresh = datetime.now()
                 self.ultimas_notificaciones.clear()  # <-- Limpiar notificaciones
+                # Reconstruir vistas efectivas (sin departamentos excluidos)
+                self._rebuild_effective_views()
                 # Resumen de distribución por nivel para diagnóstico rápido
                 try:
                     leves = medias = criticas = 0
@@ -601,6 +603,11 @@ class DatabaseApp:
             self.root.after(0, self.aplicar_filtro_stock)
             time.sleep(0.5)
             
+            # Reconstruir vistas efectivas (aplicar exclusiones una vez)
+            try:
+                self._rebuild_effective_views()
+            except Exception:
+                pass
             self._update_stock_reload_progress(90, "Filtros aplicados")
             
             # FASE 6: Iniciar carga completa en segundo plano (100%)
@@ -1428,6 +1435,10 @@ class DatabaseApp:
                 filter_rotacion='TODAS',
                 favoritos=favoritos
             )
+            # Exclusión global por departamento (para exportación RI)
+            excluded_set = getattr(self, '_excluded_depts_set', set())
+            if excluded_set:
+                datos_exportar = [r for r in datos_exportar if len(r) > 2 and str(r[2]) not in excluded_set]
             
             # DEBUG: Log para diagnosticar discrepancias
             self.log(f"[EXPORT DEBUG] Datos originales en cache: {len(self.cached_ventas_tra)} registros", "DEBUG")
@@ -1477,8 +1488,8 @@ class DatabaseApp:
                         "RI",
                         total_registros,
                         filename,
-                        "• Hojas incluidas: Datos principales, Resumen por rotación, Productos de baja rotación\n"
-                        "• Formato: Tablas con filtros y formato condicional"
+                        "• Hojas incluidas: Datos principales, Resumen por rotación, Productos de baja rotación, Resumen jerárquico (con gráfico)\n"
+                        "• Formato: Tablas con filtros, formatos condicionales y gráficos"
                     ))
                     try:
                         if hasattr(self, 'audit_db') and self.current_user:
@@ -1810,7 +1821,15 @@ class DatabaseApp:
                 datos_base = list(alertas_filtradas)
             
             # Aplicar mismos filtros de UI que en aplicar_filtro_stock
-            datos_filtrados = datos_base
+            datos_filtrados = list(getattr(self, 'cached_alertas_effective', datos_base))
+
+            # Exclusión por departamento (global)
+            excluded_set = getattr(self, '_excluded_depts_set', set())
+            if excluded_set:
+                datos_filtrados = [
+                    r for r in datos_filtrados
+                    if not self._esta_excluido_por_departamento(r[0], excluded_set)
+                ]
             
             # Filtro jerárquico
             dept_code = self.dept_dict.get(self.dept_var.get()) if hasattr(self, 'dept_dict') else None
@@ -1867,12 +1886,20 @@ class DatabaseApp:
     def _obtener_datos_filtrados(self):
         """Réplica de la lógica de filtrado SIN paginación"""
         # Aplicar mismos filtros que en aplicar_filtro_stock
-        datos_filtrados = list(self.cached_alertas)
+        datos_filtrados = list(getattr(self, 'cached_alertas_effective', self.cached_alertas))
     
+        # Exclusión por departamento (global)
+        excluded_set = getattr(self, '_excluded_depts_set', set())
+        if excluded_set:
+            datos_filtrados = [
+                r for r in datos_filtrados
+                if not self._esta_excluido_por_departamento(r[0], excluded_set)
+            ]
+
         # Filtro jerárquico
         dept_code = self.dept_dict.get(self.dept_var.get())
         group_code = self.group_dict.get(self.group_var.get())
-        sub_code = self.sub_dict.get(self.sub_var.get())
+        sub_code = self.sub_var.get() and self.sub_dict.get(self.sub_var.get())
     
         if any([dept_code, group_code, sub_code]):
             datos_filtrados = [
@@ -2382,13 +2409,17 @@ class DatabaseApp:
         if not hasattr(self, 'cached_alertas') or not self.cached_alertas:
             self.actualizar_alertas_stock(force_refresh=True)
         
+        # Asegurar que existe la vista efectiva (sin departamentos excluidos)
+        if not hasattr(self, 'cached_alertas_effective'):
+            self._rebuild_effective_views()
+        
         # Verificar y manejar jerarquía de productos
         if not hasattr(self, 'producto_jerarquia'):
             self.producto_jerarquia = {}
         
         # DEBUG: Verificar estado de jerarquía
         jerarquia_count = len(self.producto_jerarquia)
-        alertas_count = len(self.cached_alertas)
+        alertas_count = len(getattr(self, 'cached_alertas_effective', []))
         self.stock_debug_log(f"Filtro Stock - Jerarquía: {jerarquia_count} productos, Alertas: {alertas_count}")
         
         # Filtros actuales (robustos aunque aún no se hayan cargado dicts)
@@ -2428,8 +2459,9 @@ class DatabaseApp:
                 from pal.services.stock import load_all_jerarquia, build_producto_jerarquia
                 if hasattr(self, 'all_jerarquia') and self.all_jerarquia:
                     # Si tenemos all_jerarquia, crear producto_jerarquia filtrado
-                    # Normalizar códigos antes de construir
-                    codigos_en_alerta = {str(r[0]).strip() for r in self.cached_alertas}
+                    # Normalizar códigos antes de construir - usar vista efectiva
+                    alertas_to_use = getattr(self, 'cached_alertas_effective', self.cached_alertas)
+                    codigos_en_alerta = {str(r[0]).strip() for r in alertas_to_use}
                     self.producto_jerarquia = build_producto_jerarquia(self.all_jerarquia, codigos_en_alerta)
                     self.stock_debug_log(f"Jerarquía reconstruida desde all_jerarquia: {len(self.producto_jerarquia)} productos")
                 else:
@@ -2440,9 +2472,12 @@ class DatabaseApp:
                 self.stock_debug_log(f"Error intentando recargar jerarquía: {e}")
 
         from pal.services.stock import filter_alertas, paginate
+        # Usar vista efectiva (sin departamentos excluidos)
+        alertas_to_filter = getattr(self, 'cached_alertas_effective', self.cached_alertas)
+        
         # Filtrar y ordenar
         filtrados = filter_alertas(
-            alertas=self.cached_alertas,
+            alertas=alertas_to_filter,
             producto_jerarquia=self.producto_jerarquia,
             dept_code=dept_code,
             group_code=group_code,
@@ -2519,6 +2554,71 @@ class DatabaseApp:
         return  (not tra_dept_code or dep == tra_dept_code) and \
                 (not tra_group_code or grp == tra_group_code) and \
                 (not tra_sub_code or sub == tra_sub_code)
+
+    def _esta_excluido_por_departamento(self, codigo, excluded_depts_set):
+        """Devuelve True si el producto pertenece a un departamento excluido."""
+        try:
+            jerarquia = self.producto_jerarquia.get(codigo)
+            if not jerarquia:
+                return False
+            dep = str(jerarquia[0])
+            return dep in excluded_depts_set
+        except Exception:
+            return False
+
+    def _update_excluded_set(self):
+        """Construye y cachea el set de departamentos excluidos para uso rápido."""
+        try:
+            self._excluded_depts_set = set(str(x) for x in (getattr(self, 'excluded_depts', []) or []))
+        except Exception:
+            self._excluded_depts_set = set()
+
+    def _rebuild_effective_views(self):
+        """Reconstruye vistas 'efectivas' sin departamentos excluidos para evitar filtrar en cada refresco."""
+        try:
+            # Asegurar set cacheado
+            self._update_excluded_set()
+            excluded = getattr(self, '_excluded_depts_set', set())
+
+            # Stock: excluir por códigos mapeados a depto
+            try:
+                if hasattr(self, 'cached_alertas') and self.cached_alertas:
+                    if hasattr(self, 'producto_jerarquia') and self.producto_jerarquia and excluded:
+                        # Construir set de códigos excluidos una sola vez
+                        excl_codes = {str(code) for code, (dep, *_rest) in self.producto_jerarquia.items() if str(dep) in excluded}
+                        self.cached_alertas_effective = [r for r in self.cached_alertas if str(r[0]) not in excl_codes]
+                    else:
+                        self.cached_alertas_effective = list(self.cached_alertas)
+                else:
+                    self.cached_alertas_effective = []
+            except Exception:
+                self.cached_alertas_effective = list(getattr(self, 'cached_alertas', []) or [])
+
+            # TRA: índice 2 es depto
+            try:
+                if hasattr(self, 'cached_ventas_tra') and self.cached_ventas_tra:
+                    if excluded:
+                        self.cached_ventas_tra_effective = [r for r in self.cached_ventas_tra if len(r) > 2 and str(r[2]) not in excluded]
+                    else:
+                        self.cached_ventas_tra_effective = list(self.cached_ventas_tra)
+                else:
+                    self.cached_ventas_tra_effective = []
+            except Exception:
+                self.cached_ventas_tra_effective = list(getattr(self, 'cached_ventas_tra', []) or [])
+
+            # MBRP: índice 2 es depto
+            try:
+                if hasattr(self, 'cached_ventas_mbrp') and self.cached_ventas_mbrp:
+                    if excluded:
+                        self.cached_ventas_mbrp_effective = [r for r in self.cached_ventas_mbrp if len(r) > 2 and str(r[2]) not in excluded]
+                    else:
+                        self.cached_ventas_mbrp_effective = list(self.cached_ventas_mbrp)
+                else:
+                    self.cached_ventas_mbrp_effective = []
+            except Exception:
+                self.cached_ventas_mbrp_effective = list(getattr(self, 'cached_ventas_mbrp', []) or [])
+        except Exception:
+            pass
         
     def actualizar_controles_paginacion(self, total_paginas):
         """Actualiza los controles de paginación"""
@@ -2642,11 +2742,13 @@ class DatabaseApp:
             frame_custom = ttk.LabelFrame(ventana, text="2. Sedes personalizadas (agrupaciones manuales)", padding=10)
             frame_custom.pack(fill=tk.X, padx=10, pady=5)
 
-            # Controles para crear sede personalizada
+            # Fila 1: Crear sede personalizada
+            row_add = ttk.Frame(frame_custom)
+            row_add.pack(fill=tk.X, pady=3)
             new_sede_var = tk.StringVar()
-            ttk.Label(frame_custom, text="Nueva sede:").pack(side=tk.LEFT)
-            entry_new_sede = ttk.Entry(frame_custom, textvariable=new_sede_var, width=20)
-            entry_new_sede.pack(side=tk.LEFT, padx=5)
+            ttk.Label(row_add, text="Nueva sede:").pack(side=tk.LEFT)
+            entry_new_sede = ttk.Entry(row_add, textvariable=new_sede_var, width=22)
+            entry_new_sede.pack(side=tk.LEFT, padx=6)
             def add_sede():
                 nombre = (new_sede_var.get() or '').strip()
                 if not nombre:
@@ -2661,19 +2763,48 @@ class DatabaseApp:
                 self.load_depositos_stock()
                 ventana.destroy()
                 self.abrir_menu_depositos_stock()
-            ttk.Button(frame_custom, text="➕ Agregar sede", command=add_sede).pack(side=tk.LEFT, padx=5)
+            ttk.Button(row_add, text="➕ Agregar sede", command=add_sede).pack(side=tk.LEFT, padx=6)
 
-            # Mover depósito a sede
-            ttk.Label(frame_custom, text="   |   Mover depósito:").pack(side=tk.LEFT, padx=5)
+            # Fila 2: Eliminar sede personalizada
+            row_del = ttk.Frame(frame_custom)
+            row_del.pack(fill=tk.X, pady=3)
+            ttk.Label(row_del, text="Eliminar sede:").pack(side=tk.LEFT)
+            del_sede_var = tk.StringVar()
+            def _custom_sedes_list():
+                sc = getattr(self, 'stock_localidades_custom', {}) or {}
+                return sorted([s for s in sc.keys() if s not in ['Cabudare','Barinas','Guanare','Otra']])
+            cb_del_sede = ttk.Combobox(row_del, textvariable=del_sede_var, width=22, values=_custom_sedes_list(), state='readonly')
+            cb_del_sede.pack(side=tk.LEFT, padx=6)
+            def eliminar_sede():
+                sede = (del_sede_var.get() or '').strip()
+                if not sede:
+                    return
+                if messagebox.askyesno("Confirmar", f"¿Eliminar la sede personalizada '{sede}'?\nLos depósitos volverán a su sede base.", parent=ventana):
+                    try:
+                        if hasattr(self, 'stock_localidades_custom') and sede in (self.stock_localidades_custom or {}):
+                            self.stock_localidades_custom.pop(sede, None)
+                        if hasattr(self, 'stock_depositos_por_sede') and isinstance(self.stock_depositos_por_sede, dict):
+                            self.stock_depositos_por_sede.pop(sede, None)
+                    except Exception:
+                        pass
+                    self.load_depositos_stock()
+                    ventana.destroy()
+                    self.abrir_menu_depositos_stock()
+            ttk.Button(row_del, text="🗑️ Eliminar", command=eliminar_sede).pack(side=tk.LEFT, padx=6)
+
+            # Fila 3: Mover depósito a sede
+            row_move = ttk.Frame(frame_custom)
+            row_move.pack(fill=tk.X, pady=3)
+            ttk.Label(row_move, text="Mover depósito:").pack(side=tk.LEFT)
             all_deps = sorted([(c, self.stock_depositos_por_codigo.get(c, c)) for c in self.stock_depositos_por_codigo.keys()])
             move_dep_var = tk.StringVar()
-            cb_dep = ttk.Combobox(frame_custom, textvariable=move_dep_var, width=12, values=[c for c,_ in all_deps])
-            cb_dep.pack(side=tk.LEFT, padx=3)
-            ttk.Label(frame_custom, text="a sede:").pack(side=tk.LEFT)
+            cb_dep = ttk.Combobox(row_move, textvariable=move_dep_var, width=14, values=[c for c,_ in all_deps])
+            cb_dep.pack(side=tk.LEFT, padx=6)
+            ttk.Label(row_move, text="a sede:").pack(side=tk.LEFT)
             move_sede_var = tk.StringVar()
             sedes_names = sorted((self.stock_localidades or {}).keys())
-            cb_sede = ttk.Combobox(frame_custom, textvariable=move_sede_var, width=18, values=sedes_names, state='readonly')
-            cb_sede.pack(side=tk.LEFT, padx=3)
+            cb_sede = ttk.Combobox(row_move, textvariable=move_sede_var, width=20, values=sedes_names, state='readonly')
+            cb_sede.pack(side=tk.LEFT, padx=6)
             def mover_dep():
                 dep = (move_dep_var.get() or '').strip()
                 sede_dest = (move_sede_var.get() or '').strip()
@@ -2696,7 +2827,7 @@ class DatabaseApp:
                 self.load_depositos_stock()
                 ventana.destroy()
                 self.abrir_menu_depositos_stock()
-            ttk.Button(frame_custom, text="➡️ Mover", command=mover_dep).pack(side=tk.LEFT, padx=5)
+            ttk.Button(row_move, text="➡️ Mover", command=mover_dep).pack(side=tk.LEFT, padx=6)
 
             # Depósitos por sede
             frame_deps = ttk.LabelFrame(ventana, text="3. Seleccionar Depósitos por sede (visibilidad)", padding=10)
@@ -2947,6 +3078,7 @@ class DatabaseApp:
                 'depositos': self.stock_depositos_seleccionados,
                 'depositos_por_sede': getattr(self, 'stock_depositos_por_sede', {}),
                 'sedes_custom': getattr(self, 'stock_localidades_custom', {}),
+                'excluded_depts': list(getattr(self, 'excluded_depts', []) or []),
                 'timestamp': str(time.time())
             }
             with open(pref_file, 'w', encoding='utf-8') as f:
@@ -2969,6 +3101,9 @@ class DatabaseApp:
                     self.stock_depositos_por_sede = pref_data.get('depositos_por_sede', {}) or {}
                     # Sedes personalizadas (agrupaciones manuales)
                     self.stock_localidades_custom = pref_data.get('sedes_custom', {}) or {}
+                    # Departamentos excluidos
+                    excl = pref_data.get('excluded_depts', []) or []
+                    self.excluded_depts = set(str(x) for x in excl)
                     if self.stock_depositos_por_sede:
                         # Combinar todas las sedes
                         self.stock_depositos_seleccionados = []
@@ -2977,6 +3112,9 @@ class DatabaseApp:
                     else:
                         # Compatibilidad con formato viejo
                         self.stock_depositos_seleccionados = pref_data.get('depositos', ['0301'])
+                    # Actualizar set y vistas efectivas con las exclusiones cargadas
+                    self._update_excluded_set()
+                    self._rebuild_effective_views()
                     self.log(f"📂 Preferencia cargada - Localidad: {self.stock_localidad_actual}", "DEBUG")
             else:
                 self.stock_localidad_actual = 'Cabudare'
@@ -3542,6 +3680,10 @@ class DatabaseApp:
             favoritos=favoritos,
             alertas_stock=alertas_para_filtro  # Pasar alertas para ordenamiento prioritario
         )
+        # Exclusión global por departamento en RI
+        excluded_set = getattr(self, '_excluded_depts_set', set())
+        if excluded_set:
+            datos_filtrados = [r for r in datos_filtrados if len(r) > 2 and str(r[2]) not in excluded_set]
         
         self.tra_debug_log(
             f"Resultado filtrado: {len(datos_filtrados)} registros",
@@ -4994,6 +5136,136 @@ class DatabaseApp:
             text="Guardar Depuración",
             command=self._save_debug_config
         ).grid(row=4, column=0, sticky="e", pady=10, padx=10)
+        
+        # Pestaña de Preferencias (exclusiones, etc.)
+        prefs_frame = ttk.Frame(notebook)
+        notebook.add(prefs_frame, text="Preferencias")
+
+        # Sección: Excluir departamentos globalmente
+        prefs_excl = ttk.LabelFrame(prefs_frame, text="Excluir departamentos (no considerar en reportes)", padding=10)
+        prefs_excl.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        row1 = ttk.Frame(prefs_excl)
+        row1.pack(fill=tk.X, pady=(0,6))
+        ttk.Label(row1, text="Departamento:").pack(side=tk.LEFT)
+        dep_ex_var = tk.StringVar()
+        dep_names = sorted(list(getattr(self, 'tra_dept_dict', {}).keys())) if hasattr(self, 'tra_dept_dict') and self.tra_dept_dict else []
+        cb_dep_ex = ttk.Combobox(row1, textvariable=dep_ex_var, state='readonly', values=dep_names, width=32)
+        cb_dep_ex.pack(side=tk.LEFT, padx=6)
+
+        def _refresh_excl_list():
+            # Reconstruir listado a partir de códigos
+            excl_codes = list(set(str(x) for x in (getattr(self, 'excluded_depts', []) or [])))
+            # Convertir a nombres usando tra_dept_dict
+            names = []
+            for code in sorted(excl_codes):
+                desc = None
+                for d, c in (getattr(self, 'tra_dept_dict', {}) or {}).items():
+                    if str(c) == str(code):
+                        desc = d; break
+                names.append(desc or code)
+            excl_listbox.delete(0, tk.END)
+            for n in names:
+                excl_listbox.insert(tk.END, n)
+
+        def _prefs_exclude_add():
+            sel_desc = (dep_ex_var.get() or '').strip()
+            if not sel_desc:
+                return
+            code = (getattr(self, 'tra_dept_dict', {}) or {}).get(sel_desc)
+            if not code:
+                return
+            if not hasattr(self, 'excluded_depts') or self.excluded_depts is None:
+                self.excluded_depts = set()
+            self.excluded_depts = set(str(x) for x in (self.excluded_depts or set()))
+            self.excluded_depts.add(str(code))
+            try:
+                self._save_stock_depositos_preference()
+            except Exception:
+                pass
+            # Actualizar set y vistas efectivas
+            self._update_excluded_set()
+            self._rebuild_effective_views()
+            _refresh_excl_list()
+            try:
+                self.aplicar_filtro_stock()
+            except Exception:
+                pass
+            try:
+                self.aplicar_filtro_tra()
+            except Exception:
+                pass
+
+        def _prefs_exclude_remove():
+            sel = excl_listbox.curselection()
+            if not sel:
+                return
+            name = excl_listbox.get(sel[0])
+            # map name back to code
+            code = None
+            for d, c in (getattr(self, 'tra_dept_dict', {}) or {}).items():
+                if d == name:
+                    code = c; break
+            if not code:
+                return
+            codes = set(str(x) for x in (getattr(self, 'excluded_depts', []) or []))
+            if str(code) in codes:
+                codes.discard(str(code))
+                self.excluded_depts = codes
+                try:
+                    self._save_stock_depositos_preference()
+                except Exception:
+                    pass
+                # Actualizar set y vistas efectivas
+                self._update_excluded_set()
+                self._rebuild_effective_views()
+                _refresh_excl_list()
+                try:
+                    self.aplicar_filtro_stock()
+                except Exception:
+                    pass
+                try:
+                    self.aplicar_filtro_tra()
+                except Exception:
+                    pass
+
+        def _prefs_exclude_clear():
+            self.excluded_depts = set()
+            try:
+                self._save_stock_depositos_preference()
+            except Exception:
+                pass
+            # Actualizar set y vistas efectivas
+            self._update_excluded_set()
+            self._rebuild_effective_views()
+            _refresh_excl_list()
+            try:
+                self.aplicar_filtro_stock()
+            except Exception:
+                pass
+            try:
+                self.aplicar_filtro_tra()
+            except Exception:
+                pass
+
+        ttk.Button(row1, text="➖ Excluir", command=_prefs_exclude_add).pack(side=tk.LEFT, padx=6)
+
+        # Listado actual
+        list_frame = ttk.Frame(prefs_excl)
+        list_frame.pack(fill=tk.BOTH, expand=True)
+        excl_listbox = tk.Listbox(list_frame, height=8)
+        excl_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0,6))
+        sb = ttk.Scrollbar(list_frame, orient="vertical", command=excl_listbox.yview)
+        excl_listbox.configure(yscrollcommand=sb.set)
+        sb.pack(side=tk.LEFT, fill=tk.Y)
+
+        # Botonera
+        buttons = ttk.Frame(prefs_excl)
+        buttons.pack(fill=tk.X, pady=(6,0))
+        ttk.Button(buttons, text="🗑️ Quitar seleccionado", command=_prefs_exclude_remove).pack(side=tk.LEFT)
+        ttk.Button(buttons, text="♻️ Limpiar todos", command=_prefs_exclude_clear).pack(side=tk.LEFT, padx=6)
+
+        _refresh_excl_list()
         
         # Pestaña de Caché y Limpieza
         cache_frame = ttk.Frame(notebook)
@@ -7059,6 +7331,11 @@ class DatabaseApp:
                     existentes[codigo_str] = r
                 
                 self.cached_alertas = list(existentes.values())
+                # Reconstruir vistas efectivas cada vez que se actualiza el cache
+                try:
+                    self._rebuild_effective_views()
+                except Exception:
+                    pass
                 total_loaded += len(rows)
                 
                 # Log detallado del chunk
@@ -7153,6 +7430,12 @@ class DatabaseApp:
     def _finalize_stock_loading(self, final_count):
         """Finaliza el proceso de carga de stock y actualiza estadísticas finales"""
         try:
+            # Reconstruir vistas efectivas antes de aplicar filtros
+            try:
+                self._rebuild_effective_views()
+            except Exception:
+                pass
+            
             # Aplicar filtros finales
             self.aplicar_filtro_stock()
             
@@ -7363,6 +7646,11 @@ class DatabaseApp:
 
             def _ui_finish(total=len(self.cached_ventas_tra) if self.cached_ventas_tra else 0, neto=self.tra_total_neto_scaneado, scanned=processed):
                 try:
+                    # Reconstruir vistas efectivas para TRA
+                    try:
+                        self._rebuild_effective_views()
+                    except Exception:
+                        pass
                     self.aplicar_filtro_tra()
                     # Log de cierre con resumen de escaneo
                     self.tra_debug_log(f"TRA: Escaneadas {scanned} filas | Neto total escaneado: {neto:.2f}")
@@ -8239,6 +8527,11 @@ class DatabaseApp:
                     self.log("[MBRP] _finish() iniciado", "DEBUG")
                     self.log(f"[MBRP] _finish() - cached_ventas_mbrp tiene {len(self.cached_ventas_mbrp)} productos", "DEBUG")
                     
+                    # Reconstruir vistas efectivas para MBRP
+                    try:
+                        self._rebuild_effective_views()
+                    except Exception:
+                        pass
                     self.aplicar_filtro_mbrp()
                     self.log("[MBRP] _finish() - aplicar_filtro_mbrp completado", "DEBUG")
                     
@@ -8297,7 +8590,14 @@ class DatabaseApp:
             if not hasattr(self, 'mbrp_sub_dict'):
                 self.mbrp_sub_dict = {}
             
-            # Filtros jerárquicos (similar a TRA)
+        # Exclusión por departamento (global) para MBRP
+            excluded_set = getattr(self, '_excluded_depts_set', set())
+            if excluded_set:
+                datos_filtrados = [r for r in self.cached_ventas_mbrp if len(r) > 2 and str(r[2]) not in excluded_set]
+            else:
+                datos_filtrados = list(self.cached_ventas_mbrp)
+
+            # Filtro jerárquico (similar a TRA)
             dept_cod = self.mbrp_dept_dict.get(self.mbrp_dept_var.get()) if hasattr(self, 'mbrp_dept_var') else None
             group_cod = None
             sub_cod = None

@@ -954,6 +954,352 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
         ws_low.column_dimensions['D'].width = 20
         ws_low.column_dimensions['E'].width = 20
         
+        # === HOJA 4: RESUMEN JERÁRQUICO (Depto → Grupo → Sub) ===
+        try:
+            from openpyxl.chart import PieChart, BarChart, Reference
+            chart_available = True
+        except Exception as chart_err:
+            logger.warning(f"No se pudo importar openpyxl.chart: {chart_err}")
+            PieChart = None
+            BarChart = None
+            Reference = None
+            chart_available = False
+        
+        ws_h = wb.create_sheet("Resumen Jerárquico")
+        ws_h['A1'] = 'RESUMEN JERÁRQUICO DE REPRESENTACIÓN (RI)'
+        ws_h['A1'].font = Font(size=14, bold=True, color="FFFFFF")
+        ws_h['A1'].fill = PatternFill(start_color="2F5597", end_color="2F5597", fill_type="solid")
+        ws_h.merge_cells('A1:H1')
+        
+        # Función interna para escribir una tabla de resumen y opcionalmente un gráfico
+        def _write_summary(title, rows, start_row, chart_type='pie'):
+            """Escribe tabla con columnas: Elemento, Neto, Porcentaje y agrega gráfico a la derecha.
+            
+            Args:
+                title: Título de la sección
+                rows: Lista de tuplas (nombre, valor)
+                start_row: Fila donde comenzar
+                chart_type: 'pie' o 'bar' para el tipo de gráfico
+            """
+            if not rows:
+                logger.warning(f"No hay datos para la sección: {title}")
+                return start_row
+            
+            logger.info(f"Generando sección '{title}' con {len(rows)} elementos (gráfico: {chart_type})")
+            
+            # Título de la sección
+            ws_h.cell(row=start_row, column=1, value=title).font = Font(size=12, bold=True)
+            ws_h.merge_cells(start_row=start_row, start_column=1, end_row=start_row, end_column=3)
+            start_row += 1
+            
+            # Encabezados
+            header_row = start_row
+            ws_h.cell(row=header_row, column=1, value="Elemento").font = Font(bold=True, color="FFFFFF")
+            ws_h.cell(row=header_row, column=2, value="Neto").font = Font(bold=True, color="FFFFFF")
+            ws_h.cell(row=header_row, column=3, value="Porcentaje").font = Font(bold=True, color="FFFFFF")
+            for col in (1,2,3):
+                ws_h.cell(row=header_row, column=col).fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+                ws_h.cell(row=header_row, column=col).alignment = Alignment(horizontal="center")
+            start_row += 1
+            
+            # Datos
+            total = sum(v for _, v in rows) or 1.0
+            first_data_row = start_row
+            for name, neto in rows:
+                ws_h.cell(row=start_row, column=1, value=clean_for_excel(name))
+                ws_h.cell(row=start_row, column=2, value=float(neto))
+                # Porcentaje como valor decimal (Excel lo formateará como %)
+                pct_cell = ws_h.cell(row=start_row, column=3, value=(float(neto) / total))
+                pct_cell.number_format = '0.0%'
+                start_row += 1
+            last_row = start_row - 1
+            
+            # Ajuste de anchos
+            ws_h.column_dimensions['A'].width = max(ws_h.column_dimensions.get('A', type('obj', (), {'width': 12})).width or 12, 30)
+            ws_h.column_dimensions['B'].width = 16
+            ws_h.column_dimensions['C'].width = 14
+            
+            # Generar gráfico si hay suficientes datos
+            num_categories = last_row - first_data_row + 1
+            logger.info(f"Categorías disponibles para gráfico: {num_categories}")
+            
+            if chart_available and num_categories >= 1:  # Cambiar de 2 a 1 para permitir un solo elemento
+                try:
+                    # Decidir tipo de gráfico
+                    if chart_type == 'bar' or num_categories > 8:
+                        # Usar gráfico de barras si hay muchas categorías
+                        chart = BarChart()
+                        chart.type = "col"  # Barras verticales
+                        chart.title = title
+                        chart.y_axis.title = "Ventas Netas"
+                        chart.x_axis.title = "Categorías"
+                        
+                        # Referencias para datos (sin incluir encabezado)
+                        labels = Reference(ws_h, min_col=1, min_row=first_data_row, max_row=last_row)
+                        data = Reference(ws_h, min_col=2, min_row=header_row, max_row=last_row)  # Incluir encabezado "Neto"
+                        
+                        chart.add_data(data, titles_from_data=True)
+                        chart.set_categories(labels)
+                        chart.height = 10  # Altura en cm
+                        chart.width = 18   # Ancho en cm
+                        
+                    else:
+                        # Usar gráfico de pastel para pocas categorías
+                        chart = PieChart()
+                        chart.title = title
+                        
+                        # Referencias para datos
+                        labels = Reference(ws_h, min_col=1, min_row=first_data_row, max_row=last_row)
+                        data = Reference(ws_h, min_col=2, min_row=header_row, max_row=last_row)  # Incluir encabezado "Neto"
+                        
+                        chart.add_data(data, titles_from_data=True)
+                        chart.set_categories(labels)
+                        chart.height = 10
+                        chart.width = 15
+                    
+                    # Colocar el gráfico a la derecha de la tabla (columna E)
+                    anchor_col = 5
+                    anchor_row = header_row - 1  # Comenzar una fila arriba del encabezado
+                    ws_h.add_chart(chart, f"{get_column_letter(anchor_col)}{anchor_row}")
+                    logger.info(f"Gráfico '{chart_type}' añadido exitosamente en {get_column_letter(anchor_col)}{anchor_row}")
+                    
+                except Exception as chart_err:
+                    logger.error(f"Error al crear gráfico para '{title}': {chart_err}")
+                    import traceback
+                    traceback.print_exc()
+            else:
+                if not chart_available:
+                    logger.warning(f"Gráficos no disponibles (openpyxl.chart no importado)")
+                else:
+                    logger.warning(f"Insuficientes categorías ({num_categories}) para generar gráfico")
+            
+            # Espacio para próxima sección (más espacio si hay gráfico)
+            spacing = 15 if chart_available and num_categories >= 1 else 3
+            return last_row + spacing
+        
+        # Construir jerarquía interactiva drill-down con agrupación de filas
+        try:
+            # Mapeos para nombres (fallback a código si no hay descripción)
+            dept_name = lambda code: (dept_desc_map.get(code) if code in dept_desc_map else str(code)) if code else 'Sin clasificar'
+            group_name = lambda code: (group_desc_map.get(code) if code in group_desc_map else str(code)) if code else 'Sin clasificar'
+            sub_name = lambda code: (sub_desc_map.get(code) if code in sub_desc_map else str(code)) if code else 'Sin clasificar'
+            
+            # Totales por depto/grupo/sub
+            dept_tot = {}
+            group_tot = {}
+            sub_tot = {}
+            for r in datos_tra:
+                if len(r) < 6:
+                    continue
+                dept = r[2] if len(r) > 2 else None
+                group = r[3] if len(r) > 3 else None
+                sub = r[4] if len(r) > 4 else None
+                try:
+                    neto = float(r[5] or 0)
+                except Exception:
+                    neto = 0.0
+                if dept:
+                    dept_tot[str(dept)] = dept_tot.get(str(dept), 0.0) + neto
+                if dept and group:
+                    key_g = (str(dept), str(group))
+                    group_tot[key_g] = group_tot.get(key_g, 0.0) + neto
+                if dept and group and sub:
+                    key_s = (str(dept), str(group), str(sub))
+                    sub_tot[key_s] = sub_tot.get(key_s, 0.0) + neto
+            
+            # Construir estructura jerárquica completa
+            total_general = sum(dept_tot.values()) or 1.0
+            
+            # Título y encabezados
+            row_ptr = 3
+            ws_h.cell(row=row_ptr, column=1, value="JERARQUÍA INTERACTIVA DE VENTAS").font = Font(size=12, bold=True)
+            ws_h.merge_cells(start_row=row_ptr, start_column=1, end_row=row_ptr, end_column=4)
+            row_ptr += 2
+            
+            # Instrucciones para el usuario
+            ws_h.cell(row=row_ptr, column=1, value="➡️ Haga clic en los botones [+]/[-] a la izquierda para expandir/colapsar departamentos y grupos").font = Font(size=10, italic=True, color="0066CC")
+            ws_h.merge_cells(start_row=row_ptr, start_column=1, end_row=row_ptr, end_column=4)
+            row_ptr += 2
+            
+            # Encabezados de columnas
+            header_row = row_ptr
+            headers_cols = ['Categoría', 'Ventas Netas', 'Porcentaje', '% Acumulado']
+            for col_idx, header in enumerate(headers_cols, 1):
+                cell = ws_h.cell(row=header_row, column=col_idx, value=header)
+                cell.font = Font(bold=True, color="FFFFFF")
+                cell.fill = PatternFill(start_color="2F5597", end_color="2F5597", fill_type="solid")
+                cell.alignment = Alignment(horizontal="center")
+            row_ptr += 1
+            
+            # Construir jerarquía drill-down
+            dept_rows_sorted = sorted(dept_tot.items(), key=lambda x: x[1], reverse=True)
+            acum_pct = 0.0
+            
+            for dept_code, dept_neto in dept_rows_sorted:
+                dept_pct = (dept_neto / total_general) * 100
+                acum_pct += dept_pct
+                
+                # Fila de DEPARTAMENTO (nivel 0 - no indentada)
+                dept_row = row_ptr
+                ws_h.cell(row=dept_row, column=1, value=f"📦 {dept_name(dept_code)}").font = Font(bold=True, size=11)
+                ws_h.cell(row=dept_row, column=2, value=float(dept_neto))
+                ws_h.cell(row=dept_row, column=3, value=dept_pct/100).number_format = '0.0%'
+                ws_h.cell(row=dept_row, column=4, value=acum_pct/100).number_format = '0.0%'
+                
+                # Aplicar formato de departamento
+                for col in range(1, 5):
+                    ws_h.cell(row=dept_row, column=col).fill = PatternFill(start_color="E7E6E6", end_color="E7E6E6", fill_type="solid")
+                    ws_h.cell(row=dept_row, column=col).border = Border(
+                        top=Side(style='thin'), bottom=Side(style='thin'),
+                        left=Side(style='thin'), right=Side(style='thin')
+                    )
+                row_ptr += 1
+                
+                # Obtener grupos de este departamento
+                dept_groups = sorted(
+                    [(g, v) for (d, g), v in group_tot.items() if d == dept_code],
+                    key=lambda x: x[1], reverse=True
+                )
+                
+                if dept_groups:
+                    group_start_row = row_ptr
+                    
+                    for group_code, group_neto in dept_groups:
+                        group_pct = (group_neto / dept_neto) * 100 if dept_neto > 0 else 0
+                        
+                        # Fila de GRUPO (nivel 1 - indentada)
+                        group_row = row_ptr
+                        ws_h.cell(row=group_row, column=1, value=f"  📋 {group_name(group_code)}").font = Font(size=10)
+                        ws_h.cell(row=group_row, column=2, value=float(group_neto))
+                        ws_h.cell(row=group_row, column=3, value=group_pct/100).number_format = '0.0%'
+                        ws_h.cell(row=group_row, column=4, value="-")
+                        
+                        # Aplicar formato de grupo
+                        for col in range(1, 5):
+                            ws_h.cell(row=group_row, column=col).fill = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
+                        row_ptr += 1
+                        
+                        # Obtener subgrupos de este grupo
+                        group_subs = sorted(
+                            [(s, v) for (d, g, s), v in sub_tot.items() if d == dept_code and g == group_code],
+                            key=lambda x: x[1], reverse=True
+                        )
+                        
+                        if group_subs:
+                            sub_start_row = row_ptr
+                            
+                            for sub_code, sub_neto in group_subs:
+                                sub_pct = (sub_neto / group_neto) * 100 if group_neto > 0 else 0
+                                
+                                # Fila de SUBGRUPO (nivel 2 - más indentada)
+                                sub_row = row_ptr
+                                ws_h.cell(row=sub_row, column=1, value=f"    📄 {sub_name(sub_code)}").font = Font(size=9, color="666666")
+                                ws_h.cell(row=sub_row, column=2, value=float(sub_neto))
+                                ws_h.cell(row=sub_row, column=3, value=sub_pct/100).number_format = '0.0%'
+                                ws_h.cell(row=sub_row, column=4, value="-")
+                                row_ptr += 1
+                            
+                            # Agrupar subgrupos bajo el grupo (nivel 2)
+                            if row_ptr > sub_start_row:
+                                ws_h.row_dimensions.group(sub_start_row, row_ptr - 1, outline_level=2, hidden=True)
+                    
+                    # Agrupar grupos bajo el departamento (nivel 1)
+                    if row_ptr > group_start_row:
+                        ws_h.row_dimensions.group(group_start_row, row_ptr - 1, outline_level=1, hidden=True)
+            
+            # Mensaje de ayuda al final
+            row_ptr += 2
+            help_row = row_ptr
+            ws_h.cell(row=help_row, column=1, value="ℹ️ NOTA: Si no ve los botones [+]/[-], vaya a Vista → Mostrar → Active 'Esquema'").font = Font(size=9, italic=True, color="999999")
+            ws_h.merge_cells(start_row=help_row, start_column=1, end_row=help_row, end_column=4)
+            
+            # Ajustar anchos de columnas
+            ws_h.column_dimensions['A'].width = 45
+            ws_h.column_dimensions['B'].width = 16
+            ws_h.column_dimensions['C'].width = 14
+            ws_h.column_dimensions['D'].width = 16
+            
+            # Agregar gráfico de departamentos a la derecha
+            if chart_available and len(dept_rows_sorted) >= 1:
+                try:
+                    if len(dept_rows_sorted) > 8:
+                        chart = BarChart()
+                        chart.type = "col"
+                        chart.title = "Distribución de Ventas por Departamento"
+                        chart.y_axis.title = "Ventas Netas"
+                    else:
+                        chart = PieChart()
+                        chart.title = "Distribución de Ventas por Departamento"
+                    
+                    # Referenciar solo filas de departamento (sin incluir grupos/subs)
+                    # Calcular las filas que corresponden a departamentos
+                    dept_row_indices = []
+                    current_row = header_row + 1
+                    for _ in dept_rows_sorted:
+                        dept_row_indices.append(current_row)
+                        # Contar cuántas filas tiene este departamento (grupos + subgrupos)
+                        dept_code_temp = dept_rows_sorted[len(dept_row_indices)-1][0]
+                        num_groups = len([1 for (d, g), v in group_tot.items() if d == dept_code_temp])
+                        num_subs = len([1 for (d, g, s), v in sub_tot.items() if d == dept_code_temp])
+                        current_row += 1 + num_groups + num_subs
+                    
+                    # Crear referencias no contiguas para departamentos
+                    # Por simplicidad, usamos solo los primeros N departamentos
+                    max_chart_items = min(10, len(dept_rows_sorted))
+                    chart_start = header_row + 1
+                    chart_data_rows = []
+                    temp_row = chart_start
+                    for idx in range(max_chart_items):
+                        chart_data_rows.append(temp_row)
+                        dept_code_temp = dept_rows_sorted[idx][0]
+                        num_groups = len([1 for (d, g), v in group_tot.items() if d == dept_code_temp])
+                        num_subs = len([1 for (d, g, s), v in sub_tot.items() if d == dept_code_temp])
+                        temp_row += 1 + num_groups + num_subs
+                    
+                    # Para el gráfico, simplemente usar un rango contiguo desde header hasta primera agrupación
+                    # Excel no maneja bien referencias no contiguas en gráficos, así que mostramos resumen simple
+                    labels = Reference(ws_h, min_col=1, min_row=header_row+1, max_row=header_row+len(dept_rows_sorted))
+                    data = Reference(ws_h, min_col=2, min_row=header_row, max_row=header_row+len(dept_rows_sorted))
+                    
+                    # Nota: El gráfico solo mostrará departamentos si no están colapsados
+                    # Para simplificar, usamos una tabla resumida en columnas F-H
+                    summary_start = 3
+                    ws_h.cell(row=summary_start, column=6, value="RESUMEN PARA GRÁFICO").font = Font(bold=True, size=10)
+                    ws_h.cell(row=summary_start+1, column=6, value="Departamento").font = Font(bold=True)
+                    ws_h.cell(row=summary_start+1, column=7, value="Ventas").font = Font(bold=True)
+                    
+                    for idx, (dept_code, dept_neto) in enumerate(dept_rows_sorted, summary_start+2):
+                        ws_h.cell(row=idx, column=6, value=dept_name(dept_code))
+                        ws_h.cell(row=idx, column=7, value=float(dept_neto))
+                    
+                    # Referencias para gráfico desde tabla resumida
+                    labels_summary = Reference(ws_h, min_col=6, min_row=summary_start+2, max_row=summary_start+1+len(dept_rows_sorted))
+                    data_summary = Reference(ws_h, min_col=7, min_row=summary_start+1, max_row=summary_start+1+len(dept_rows_sorted))
+                    
+                    if isinstance(chart, PieChart):
+                        chart.add_data(data_summary, titles_from_data=True)
+                        chart.set_categories(labels_summary)
+                        chart.height = 12
+                        chart.width = 18
+                    else:
+                        chart.add_data(data_summary, titles_from_data=True)
+                        chart.set_categories(labels_summary)
+                        chart.height = 12
+                        chart.width = 18
+                    
+                    ws_h.add_chart(chart, "I3")
+                    logger.info(f"Gráfico de departamentos añadido con éxito")
+                    
+                except Exception as chart_err:
+                    logger.error(f"Error al crear gráfico de departamentos: {chart_err}")
+                    import traceback
+                    traceback.print_exc()
+                    
+        except Exception as e:
+            logger.error(f"Error construyendo jerarquía interactiva: {e}")
+            import traceback
+            traceback.print_exc()
+        
         # Guardar archivo
         wb.save(filename)
         logger.info(f"Exportación TRA Excel completada: {total_registros} registros en {filename}")

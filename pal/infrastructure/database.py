@@ -465,13 +465,16 @@ class DatabaseManager:
              (N'tra.ver', N'TRA', N'Ver datos de rotación')
             ,(N'tra.exportar', N'TRA', N'Exportar reportes')
             ,(N'tra.configurar', N'TRA', N'Configurar parámetros')
+            ,(N'tra.ver_costo_utilidad', N'TRA', N'Ver costo y utilidad en reportes')
             ,(N'mbrp.ver', N'MBRP', N'Ver datos MBRP')
             ,(N'mbrp.exportar', N'MBRP', N'Exportar reportes')
             ,(N'mbrp.configurar', N'MBRP', N'Configurar umbrales')
+            ,(N'mbrp.ver_costo_utilidad', N'MBRP', N'Ver costo y utilidad en reportes')
             ,(N'stock.ver', N'STOCK', N'Ver alertas de stock')
             ,(N'stock.editar', N'STOCK', N'Marcar favoritos / edición')
             ,(N'stock.exportar', N'STOCK', N'Exportar reportes')
             ,(N'stock.configurar', N'STOCK', N'Configurar alertas')
+            ,(N'stock.ver_costo_utilidad', N'STOCK', N'Ver costo y utilidad en reportes')
             ,(N'mensajes.ver', N'MENSAJES', N'Ver mensajes programados')
             ,(N'mensajes.crear', N'MENSAJES', N'Crear mensajes')
             ,(N'mensajes.enviar', N'MENSAJES', N'Enviar mensajes')
@@ -506,12 +509,14 @@ class DatabaseManager:
             DECLARE @rp TABLE(rol_id INT, perm_code NVARCHAR(50));
             INSERT INTO @rp(rol_id, perm_code)
             SELECT @rol_admin, codigo FROM pal_permisos;
+            
+            -- Asignar ver_costo_utilidad solo a Administrador y Supervisor por defecto
 
             INSERT INTO @rp(rol_id, perm_code)
             SELECT @rol_super, codigo FROM pal_permisos WHERE codigo IN (
-                N'tra.ver', N'tra.exportar',
-                N'mbrp.ver', N'mbrp.exportar',
-                N'stock.ver', N'stock.editar', N'stock.exportar',
+                N'tra.ver', N'tra.exportar', N'tra.ver_costo_utilidad',
+                N'mbrp.ver', N'mbrp.exportar', N'mbrp.ver_costo_utilidad',
+                N'stock.ver', N'stock.editar', N'stock.exportar', N'stock.ver_costo_utilidad',
                 N'mensajes.ver', N'mensajes.crear', N'mensajes.enviar',
                 N'estadisticas.ver'
             );
@@ -1168,7 +1173,9 @@ class DatabaseManager:
                         COALESCE(p.C_DEPARTAMENTO, '') AS departamento,
                         COALESCE(p.C_GRUPO, '') AS grupo,
                         COALESCE(p.C_SUBGRUPO, '') AS subgrupo,
-                        v.neto
+                        v.neto,
+                        COALESCE(p.n_precio1, 0) AS precio,
+                        COALESCE(p.n_costoact, 0) AS costo
                     FROM VentasAgregadas v
                     LEFT JOIN MA_PRODUCTOS p WITH (NOLOCK) ON v.codigo = p.C_CODIGO
                     ORDER BY v.neto DESC
@@ -1201,7 +1208,9 @@ class DatabaseManager:
                         COALESCE(p.C_DEPARTAMENTO, '') AS departamento,
                         COALESCE(p.C_GRUPO, '') AS grupo,
                         COALESCE(p.C_SUBGRUPO, '') AS subgrupo,
-                        v.neto
+                        v.neto,
+                        COALESCE(p.n_precio1, 0) AS precio,
+                        COALESCE(p.n_costoact, 0) AS costo
                     FROM VentasAgregadas v
                     LEFT JOIN MA_PRODUCTOS p WITH (NOLOCK) ON v.codigo = p.C_CODIGO
                     ORDER BY v.neto DESC

@@ -716,14 +716,18 @@ def export_stock_excel(filename: str, datos_exportar: List, seleccionadas: List[
         raise
 
 
-def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_cb: Optional[Callable[[int, int], None]] = None) -> int:
+def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_cb: Optional[Callable[[int, int], None]] = None, 
+                     permissions_manager=None, current_user_id: int = None) -> int:
     """
     Exporta datos TRA a un archivo Excel con formato profesional y múltiples hojas de análisis.
     
     Args:
         filename: Nombre del archivo Excel a crear
         datos_tra: Lista de datos TRA a exportar
+        db_manager: Gestor de base de datos
         progress_cb: Callback opcional para reportar progreso
+        permissions_manager: Gestor de permisos (opcional, para verificar ver_costo_utilidad)
+        current_user_id: ID del usuario actual (opcional, para verificar permisos)
         
     Returns:
         int: Número total de registros exportados
@@ -777,10 +781,23 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
         header_fill = PatternFill(start_color="2F5597", end_color="2F5597", fill_type="solid")
         ws_main['A1'].font = header_font
         ws_main['A1'].fill = header_fill
-        ws_main.merge_cells('A1:H1')
+        # Ajustar merge según si incluye columnas de costo/utilidad
+        merge_range = 'A1:K1' if mostrar_costo_utilidad else 'A1:H1'
+        ws_main.merge_cells(merge_range)
+        
+        # Verificar permiso para ver costo y utilidad
+        mostrar_costo_utilidad = False
+        if permissions_manager and current_user_id:
+            try:
+                mostrar_costo_utilidad = permissions_manager.tiene_permiso(current_user_id, 'TRA', 'ver_costo_utilidad')
+                logger.info(f"Permiso ver_costo_utilidad para TRA: {mostrar_costo_utilidad}")
+            except Exception as e:
+                logger.warning(f"Error verificando permiso ver_costo_utilidad: {e}")
         
         # Headers de la tabla (fila 7)
         headers = ['Código', 'Descripción', 'Departamento', 'Grupo', 'Subgrupo', 'Ventas Netas', 'Rotación', 'Representación %']
+        if mostrar_costo_utilidad:
+            headers.extend(['Precio', 'Costo', 'Utilidad %'])
         
         start_row = 7
         for col, header in enumerate(headers, 1):
@@ -798,11 +815,19 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
                 row = data_start_row + i
                 
                 # Manejar diferentes longitudes de fila
-                if len(fila) >= 7:
+                # Con costo/precio: codigo, desc, dept, grupo, sub, neto, precio, costo, [rotacion]
+                if len(fila) >= 9:
+                    codigo, desc, dept, grupo, sub, neto, precio, costo, rotacion = fila[:9]
+                elif len(fila) >= 8:
+                    codigo, desc, dept, grupo, sub, neto, precio, costo = fila[:8]
+                    rotacion = "SIN CLASIFICAR"
+                elif len(fila) >= 7:
                     codigo, desc, dept, grupo, sub, neto, rotacion = fila[:7]
+                    precio = costo = 0
                 elif len(fila) >= 6:
                     codigo, desc, dept, grupo, sub, neto = fila[:6]
                     rotacion = "SIN CLASIFICAR"
+                    precio = costo = 0
                 else:
                     continue
                 
@@ -835,6 +860,21 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
                 total_ventas = sum(float(f[5] or 0) for f in datos_tra if len(f) >= 6)
                 porcentaje = (float(neto or 0) / total_ventas * 100) if total_ventas > 0 else 0
                 ws_main.cell(row=row, column=8, value=round(porcentaje, 2))
+                
+                # Agregar costo, precio y utilidad si el usuario tiene permiso
+                if mostrar_costo_utilidad:
+                    precio_val = float(precio or 0)
+                    costo_val = float(costo or 0)
+                    
+                    ws_main.cell(row=row, column=9, value=round(precio_val, 2))
+                    ws_main.cell(row=row, column=10, value=round(costo_val, 2))
+                    
+                    # Calcular utilidad porcentual: ((precio - costo) / costo) * 100
+                    if costo_val > 0:
+                        utilidad_pct = ((precio_val - costo_val) / costo_val) * 100
+                        ws_main.cell(row=row, column=11, value=round(utilidad_pct, 2))
+                    else:
+                        ws_main.cell(row=row, column=11, value=0)
                 
                 if progress_cb:
                     progress_cb(i + 1, total_registros)
@@ -880,6 +920,11 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
         ws_main.column_dimensions['F'].width = 15  # Neto
         ws_main.column_dimensions['G'].width = 12  # Rotación
         ws_main.column_dimensions['H'].width = 15  # Porcentaje
+        
+        if mostrar_costo_utilidad:
+            ws_main.column_dimensions['I'].width = 15  # Precio
+            ws_main.column_dimensions['J'].width = 15  # Costo
+            ws_main.column_dimensions['K'].width = 15  # Utilidad %
         
         # === HOJA 2: RESUMEN POR ROTACIÓN ===
         ws_summary = wb.create_sheet("Resumen por Rotación")
@@ -1310,14 +1355,18 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
         raise
 
 
-def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress_cb: Optional[Callable[[int, int], None]] = None) -> int:
+def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress_cb: Optional[Callable[[int, int], None]] = None,
+                      permissions_manager=None, current_user_id: int = None) -> int:
     """
     Exporta datos MBRP a un archivo Excel con formato profesional y análisis de rentabilidad.
     
     Args:
         filename: Nombre del archivo Excel a crear
         datos_mbrp: Lista de datos MBRP a exportar
+        db_manager: Gestor de base de datos
         progress_cb: Callback opcional para reportar progreso
+        permissions_manager: Gestor de permisos (opcional, para verificar ver_costo_utilidad)
+        current_user_id: ID del usuario actual (opcional, para verificar permisos)
         
     Returns:
         int: Número total de registros exportados
@@ -1343,15 +1392,28 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
         ws_main['A2'] = f'Generado el {datetime.now().strftime("%d/%m/%Y a las %H:%M:%S")}'
         ws_main['A4'] = f'Total de productos analizados: {total_registros}'
         
+        # Verificar permiso para ver costo y utilidad
+        mostrar_costo_utilidad = False
+        if permissions_manager and current_user_id:
+            try:
+                mostrar_costo_utilidad = permissions_manager.tiene_permiso(current_user_id, 'MBRP', 'ver_costo_utilidad')
+                logger.info(f"Permiso ver_costo_utilidad para MBRP: {mostrar_costo_utilidad}")
+            except Exception as e:
+                logger.warning(f"Error verificando permiso ver_costo_utilidad: {e}")
+        
         # Formato del encabezado
         header_font = Font(size=14, bold=True, color="FFFFFF")
         header_fill = PatternFill(start_color="2F5597", end_color="2F5597", fill_type="solid")
         ws_main['A1'].font = header_font
         ws_main['A1'].fill = header_fill
-        ws_main.merge_cells('A1:G1')
+        # Ajustar merge según si incluye columnas de costo/utilidad
+        merge_range = 'A1:J1' if mostrar_costo_utilidad else 'A1:G1'
+        ws_main.merge_cells(merge_range)
         
         # Headers de la tabla (fila 7)
         headers = ['Código', 'Descripción', 'Monto Vendido', 'Monto Comprado', 'Diferencia', 'Margen %', 'Estado']
+        if mostrar_costo_utilidad:
+            headers.extend(['Precio', 'Costo', 'Utilidad %'])
         
         start_row = 7
         for col, header in enumerate(headers, 1):
@@ -1364,11 +1426,17 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
         data_start_row = start_row + 1
         for i, fila in enumerate(datos_mbrp):
             try:
-                if len(fila) < 6:
+                # Manejar diferentes longitudes de fila
+                # Con costo/precio: codigo, desc, vendido, comprado, diferencia, margen, precio, costo
+                if len(fila) >= 8:
+                    codigo, desc, vendido, comprado, diferencia, margen, precio, costo = fila[:8]
+                elif len(fila) >= 6:
+                    codigo, desc, vendido, comprado, diferencia, margen = fila[:6]
+                    precio = costo = 0
+                else:
                     continue
                     
                 row = data_start_row + i
-                codigo, desc, vendido, comprado, diferencia, margen = fila[:6]
                 
                 ws_main.cell(row=row, column=1, value=clean_for_excel(codigo))
                 ws_main.cell(row=row, column=2, value=clean_for_excel(desc))
@@ -1388,6 +1456,21 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
                     estado = "REQUIERE ATENCIÓN"
                 
                 ws_main.cell(row=row, column=7, value=estado)
+                
+                # Agregar costo, precio y utilidad si el usuario tiene permiso
+                if mostrar_costo_utilidad:
+                    precio_val = float(precio or 0)
+                    costo_val = float(costo or 0)
+                    
+                    ws_main.cell(row=row, column=8, value=round(precio_val, 2))
+                    ws_main.cell(row=row, column=9, value=round(costo_val, 2))
+                    
+                    # Calcular utilidad porcentual: ((precio - costo) / costo) * 100
+                    if costo_val > 0:
+                        utilidad_pct = ((precio_val - costo_val) / costo_val) * 100
+                        ws_main.cell(row=row, column=10, value=round(utilidad_pct, 2))
+                    else:
+                        ws_main.cell(row=row, column=10, value=0)
                 
                 if progress_cb:
                     progress_cb(i + 1, total_registros)
@@ -1432,6 +1515,11 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
         ws_main.column_dimensions['E'].width = 15  # Diferencia
         ws_main.column_dimensions['F'].width = 12  # Margen
         ws_main.column_dimensions['G'].width = 18  # Estado
+        
+        if mostrar_costo_utilidad:
+            ws_main.column_dimensions['H'].width = 15  # Precio
+            ws_main.column_dimensions['I'].width = 15  # Costo
+            ws_main.column_dimensions['J'].width = 15  # Utilidad %
         
         # === HOJA 2: RESUMEN POR RENTABILIDAD ===
         ws_summary = wb.create_sheet("Resumen por Rentabilidad")

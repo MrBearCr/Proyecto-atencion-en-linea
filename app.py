@@ -1476,11 +1476,17 @@ class DatabaseApp:
                 try:
                     from pal.services.exports import export_tra_excel
                     
+                    # Pasar permisos y usuario para verificar ver_costo_utilidad
+                    permissions_mgr = getattr(self, 'permissions', None)
+                    user_id = self.current_user.get('id') if self.current_user else None
+                    
                     total_registros = export_tra_excel(
                         filename=filename,
                         datos_tra=datos_exportar,
                         db_manager=self.db_manager,
                         progress_cb=progress_cb,
+                        permissions_manager=permissions_mgr,
+                        current_user_id=user_id
                     )
                     
                     # Notificar éxito en el hilo principal
@@ -1586,11 +1592,17 @@ class DatabaseApp:
                 try:
                     from pal.services.exports import export_mbrp_excel
                     
+                    # Pasar permisos y usuario para verificar ver_costo_utilidad
+                    permissions_mgr = getattr(self, 'permissions', None)
+                    user_id = self.current_user.get('id') if self.current_user else None
+                    
                     total_registros = export_mbrp_excel(
                         filename=filename,
                         datos_mbrp=datos_exportar,
                         db_manager=self.db_manager,
                         progress_cb=progress_cb,
+                        permissions_manager=permissions_mgr,
+                        current_user_id=user_id
                     )
                     
                     # Notificar éxito en el hilo principal

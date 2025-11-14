@@ -7,6 +7,45 @@ y este proyecto adhiere al [Versionado Semántico](https://semver.org/lang/es/).
 
 ---
 
+## [Sin publicar] - En desarrollo
+
+### 🆕 Añadido
+
+#### Permiso Granular para Ver Costo y Utilidad en Reportes
+- **Archivos modificados**: 
+  - `pal/infrastructure/database.py` (sistema de permisos)
+  - `pal/services/exports.py` (exportaciones)
+  - `app.py` (llamadas a exportación)
+- **Razón**: Necesidad de controlar qué usuarios pueden visualizar información sensible de costos y márgenes de utilidad en los reportes exportados
+- **Solución**: Se implementó un nuevo permiso `ver_costo_utilidad` que afecta a todos los módulos de reporte (TRA, MBRP, Stock)
+- **Beneficio**: 
+  - Control granular de acceso a información financiera sensible
+  - Columnas condicionales en Excel según permisos del usuario
+  - Mayor seguridad y cumplimiento de políticas empresariales
+- **Detalles técnicos**:
+  - **Nuevos permisos**: `tra.ver_costo_utilidad`, `mbrp.ver_costo_utilidad`, `stock.ver_costo_utilidad`
+  - **Campos agregados**: `Precio`, `Costo`, `Utilidad %`
+  - **Cálculo de utilidad**: `((precio - costo) / costo) * 100`
+  - **Origen de datos**: `n_precio1` y `n_costoact` de tabla `MA_PRODUCTOS`
+  - **Asignación por defecto**: Solo roles Administrador y Supervisor
+  - **Queries modificados**: `obtener_ventas_por_producto_chunk()` ahora incluye precio y costo en SELECT
+
+### 🔧 Cambiado
+
+#### Queries SQL Optimizados con Campos de Precio y Costo
+- **Archivos modificados**: `pal/infrastructure/database.py`
+- **Razón**: Necesidad de traer precio y costo desde origen de datos para cálculos de utilidad
+- **Cambio**: Agregados campos `COALESCE(p.n_precio1, 0) AS precio` y `COALESCE(p.n_costoact, 0) AS costo` en CTEs de ventas
+- **Impacto**: Los datos ahora incluyen 2 campos adicionales (posiciones 6 y 7 en tuplas de resultados)
+
+#### Firmas de Funciones de Exportación Extendidas
+- **Archivos modificados**: `pal/services/exports.py`
+- **Funciones afectadas**: `export_tra_excel()`, `export_mbrp_excel()` (Stock pendiente)
+- **Nuevos parámetros**: `permissions_manager`, `current_user_id`
+- **Compatibilidad**: Parámetros opcionales, mantiene compatibilidad hacia atrás
+
+---
+
 ## [1.0.1] - 2025-01-12
 
 ### 🆕 Añadido

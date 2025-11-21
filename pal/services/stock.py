@@ -346,7 +346,7 @@ def fetch_stock_alerts_optimized(db_manager, limit=None, offset=0, use_indices=T
         base_query = """
         SELECT 
             p.C_CODIGO as codigo,
-            p.C_DESCRI as descripcion,
+            COALESCE(p.cu_descripcion_corta, 'SIN DESCRIPCIÓN') as descripcion,
             ISNULL(d.n_cantidad, 0) as stock,
             CASE 
                 WHEN ISNULL(d.n_cantidad, 0) <= 7 THEN 'CRÍTICA'
@@ -358,7 +358,7 @@ def fetch_stock_alerts_optimized(db_manager, limit=None, offset=0, use_indices=T
         WHERE p.C_ESTADO = 'A'
             AND (d.n_cantidad IS NULL OR d.n_cantidad <= 50)
             AND p.C_CODIGO IS NOT NULL
-            AND p.C_DESCRI IS NOT NULL
+            AND (p.cu_descripcion_corta IS NOT NULL AND LTRIM(RTRIM(p.cu_descripcion_corta)) <> '')
         """
         
         # Aplicar hints de índices si están habilitados

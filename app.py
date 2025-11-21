@@ -388,7 +388,7 @@ class DatabaseApp:
         """Obtiene la descripción de un producto desde la base de datos."""
         try:
             result = self.db_manager.fetch_data(
-                "SELECT C_DESCRI FROM MA_PRODUCTOS WHERE C_CODIGO = ?", 
+                "SELECT COALESCE(cu_descripcion_corta, 'SIN DESCRIPCIÓN') FROM MA_PRODUCTOS WHERE C_CODIGO = ?", 
                 (codigo,)
             )
             # Devolver cadena directamente, sin formateo adicional
@@ -3609,6 +3609,186 @@ class DatabaseApp:
         except Exception:
             pass
 
+    def _get_codigos_por_proveedor_cached(self, cod_proveedor: str):
+        """Obtiene códigos de producto por proveedor usando un pequeño caché en memoria."""
+        try:
+            if not cod_proveedor:
+                return set()
+            if not hasattr(self, '_codigos_por_proveedor_cache'):
+                self._codigos_por_proveedor_cache = {}
+            cod_proveedor = str(cod_proveedor).strip()
+            if cod_proveedor in self._codigos_por_proveedor_cache:
+                return self._codigos_por_proveedor_cache[cod_proveedor]
+            rows = self.db_manager.obtener_codigos_por_proveedor(cod_proveedor)
+            codigos = set(str(c) for c in rows) if rows else set()
+            self._codigos_por_proveedor_cache[cod_proveedor] = codigos
+            return codigos
+        except Exception as e:
+            self.log(f"Error obteniendo códigos por proveedor (cache): {e}", "ERROR")
+            return set()
+
+    def abrir_selector_proveedor_tra(self):
+        """Abre un selector de proveedor para filtrar TRA."""
+        self._abrir_selector_proveedor(contexto="TRA")
+
+    def abrir_selector_proveedor_mbrp(self):
+        """Abre un selector de proveedor para filtrar MBRP."""
+        self._abrir_selector_proveedor(contexto="MBRP")
+
+    def _abrir_selector_proveedor(self, contexto: str = "TRA"):
+        """Ventana emergente para seleccionar proveedor desde MA_PROVEEDORES.
+
+        contexto: "TRA" o "MBRP" para saber qué filtro actualizar.
+        """
+        try:
+            import tkinter as tk
+            from tkinter import ttk
+
+            ventana = tk.Toplevel(self.root)
+            ventana.title(f"Seleccionar Proveedor ({contexto})")
+            ventana.geometry("800x550")
+            ventana.resizable(False, False)
+            ventana.grab_set()
+
+            ttk.Label(
+                ventana,
+                text="Seleccione un proveedor para filtrar los productos:" ,
+                font=('Arial', 10, 'bold')
+            ).pack(pady=10, padx=10, anchor=tk.W)
+
+            # Marco de búsqueda y modo
+            search_frame = ttk.Frame(ventana)
+            search_frame.pack(fill=tk.X, padx=10, pady=5)
+
+            ttk.Label(search_frame, text="Modo:").pack(side=tk.LEFT, padx=(0, 5))
+            mode_var = tk.StringVar(value="Proveedor")
+            mode_combo = ttk.Combobox(
+                search_frame,
+                textvariable=mode_var,
+                state='readonly',
+                width=12,
+                values=("Proveedor", "Producto"),
+            )
+            mode_combo.pack(side=tk.LEFT, padx=(0, 10))
+
+            ttk.Label(search_frame, text="Buscar:").pack(side=tk.LEFT)
+            search_var = tk.StringVar()
+            search_entry = ttk.Entry(search_frame, textvariable=search_var)
+            search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+
+            # Tabla de proveedores
+            tree_frame = ttk.Frame(ventana)
+            tree_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+            columns = ("Código", "Descripción")
+            tree = ttk.Treeview(tree_frame, columns=columns, show='headings', height=12)
+            vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
+            tree.configure(yscrollcommand=vsb.set)
+            tree.grid(row=0, column=0, sticky="nsew")
+            vsb.grid(row=0, column=1, sticky="ns")
+            tree_frame.grid_rowconfigure(0, weight=1)
+            tree_frame.grid_columnconfigure(0, weight=1)
+
+            for col in columns:
+                tree.heading(col, text=col)
+                tree.column(col, width=120 if col == "Código" else 400, anchor='w')
+
+            # Cargar proveedores base (modo Proveedor)
+            proveedores_cache = self.db_manager.obtener_proveedores()
+
+            def refrescar_lista(*args):
+                texto = search_var.get().strip()
+                modo = (mode_var.get() or "Proveedor").strip()
+                tree.delete(*tree.get_children())
+
+                if modo == "Proveedor":
+                    if not proveedores_cache:
+                        return
+                    for cod, desc in proveedores_cache:
+                        if texto:
+                            t = texto.lower()
+                            if t not in str(cod).lower() and t not in str(desc).lower():
+                                continue
+                        tree.insert("", tk.END, values=(cod, desc))
+                else:
+                    # Modo Producto: buscar proveedores asociados a códigos de producto
+                    if not texto:
+                        return
+                    try:
+                        rows = self.db_manager.obtener_proveedores_por_producto(texto)
+                    except Exception as e:
+                        self.log(f"Error obteniendo proveedores por producto: {e}", "ERROR")
+                        rows = []
+                    for cod, desc in rows:
+                        tree.insert("", tk.END, values=(cod, desc))
+
+            search_var.trace_add('write', lambda *args: refrescar_lista())
+            mode_var.trace_add('write', lambda *args: refrescar_lista())
+            refrescar_lista()
+
+            seleccionado = {"codigo": None, "descripcion": None}
+
+            def on_double_click(event=None):
+                item = tree.focus()
+                if not item:
+                    return
+                values = tree.item(item, 'values')
+                if not values:
+                    return
+                seleccionado["codigo"] = str(values[0]).strip()
+                seleccionado["descripcion"] = str(values[1]).strip()
+                ventana.destroy()
+
+            tree.bind("<Double-1>", on_double_click)
+
+            # Botones inferiores
+            btn_frame = ttk.Frame(ventana)
+            btn_frame.pack(fill=tk.X, padx=10, pady=10)
+
+            def aplicar_seleccion():
+                item = tree.focus()
+                if not item:
+                    ventana.destroy()
+                    return
+                values = tree.item(item, 'values')
+                if not values:
+                    ventana.destroy()
+                    return
+                seleccionado["codigo"] = str(values[0]).strip()
+                seleccionado["descripcion"] = str(values[1]).strip()
+                ventana.destroy()
+
+            def limpiar_filtro():
+                seleccionado["codigo"] = None
+                seleccionado["descripcion"] = None
+                ventana.destroy()
+
+            ttk.Button(btn_frame, text="✅ Seleccionar", command=aplicar_seleccion).pack(side=tk.LEFT, padx=5)
+            ttk.Button(btn_frame, text="🧹 Quitar filtro", command=limpiar_filtro).pack(side=tk.LEFT, padx=5)
+            ttk.Button(btn_frame, text="❌ Cancelar", command=ventana.destroy).pack(side=tk.RIGHT, padx=5)
+
+            # Centrar
+            ventana.update_idletasks()
+            x = (ventana.winfo_screenwidth() // 2) - (ventana.winfo_width() // 2)
+            y = (ventana.winfo_screenheight() // 2) - (ventana.winfo_height() // 2)
+            ventana.geometry(f"+{x}+{y}")
+
+            ventana.wait_window()
+
+            # Aplicar resultado
+            cod_sel = seleccionado["codigo"]
+            if contexto.upper() == "TRA":
+                self.tra_proveedor_codigo = cod_sel
+                # No es obligatorio mostrar descripción en UI, pero se guarda por si se necesita
+                self.tra_proveedor_descripcion = seleccionado["descripcion"]
+                self.aplicar_filtro_tra()
+            elif contexto.upper() == "MBRP":
+                self.mbrp_proveedor_codigo = cod_sel
+                self.mbrp_proveedor_descripcion = seleccionado["descripcion"]
+                self.aplicar_filtro_mbrp()
+
+        except Exception as e:
+            self.log(f"Error en selector de proveedor ({contexto}): {e}", "ERROR")
+
     def mbrp_debug_log(self, message: str, level: str = "DEBUG", throttle_key: str = None, throttle_seconds: float = 2.0):
         """Log DEBUG inteligente para módulo MBRP con throttling para evitar spam.
         
@@ -3640,13 +3820,23 @@ class DatabaseApp:
             pass
 
     def aplicar_filtro_tra(self):
-        """Aplica filtros jerárquicos y de texto a los datos TRA usando las nuevas funciones de filtrado"""
+        """Aplica filtros jerárquicos, proveedor y texto a los datos TRA."""
         if not hasattr(self, 'cached_ventas_tra') or not self.cached_ventas_tra:
             # Solo aviso en warning, no debug
             self.log("No hay datos TRA cacheados para filtrar", "WARNING")
             return
-    
-        # Obtener códigos seleccionados  
+
+        # Filtro por proveedor (si está seleccionado)
+        datos_base = list(self.cached_ventas_tra)
+        proveedor_cod = getattr(self, 'tra_proveedor_codigo', None)
+        if proveedor_cod:
+            codigos_prov = self._get_codigos_por_proveedor_cached(proveedor_cod)
+            if codigos_prov:
+                datos_base = [r for r in datos_base if str(r[0]) in codigos_prov]
+            else:
+                datos_base = []
+
+        # Obtener códigos seleccionados
         dept_cod = self.tra_dept_dict.get(self.tra_dept_var.get()) if hasattr(self, 'tra_dept_var') else None
         group_cod = None
         sub_cod = None
@@ -3683,7 +3873,7 @@ class DatabaseApp:
         
         # Filtrar y ordenar
         datos_filtrados = filter_ventas_tra(
-            ventas=self.cached_ventas_tra,
+            ventas=datos_base,
             dept_code=dept_cod,
             group_code=group_cod,
             sub_code=sub_cod,
@@ -8020,7 +8210,7 @@ class DatabaseApp:
                 return
             
             # Consultar descripción
-            query_descripcion = "SELECT C_DESCRI FROM dbo.MA_PRODUCTOS WHERE C_CODIGO = ?"
+            query_descripcion = "SELECT COALESCE(cu_descripcion_corta, 'SIN DESCRIPCIÓN') FROM dbo.MA_PRODUCTOS WHERE C_CODIGO = ?"
             result_descripcion = self.db_manager.fetch_data(query_descripcion, (clean_codigo,))
             if not result_descripcion:
                 messagebox.showinfo("Error", "Descripción no encontrada")
@@ -8083,7 +8273,7 @@ class DatabaseApp:
                 
                 # Obtener descripción del producto
                 descripcion = self.db_manager.fetch_data(
-                    "SELECT C_DESCRI FROM MA_PRODUCTOS WHERE C_CODIGO = ?",
+                    "SELECT COALESCE(cu_descripcion_corta, 'SIN DESCRIPCIÓN') FROM MA_PRODUCTOS WHERE C_CODIGO = ?",
                     (codigo_producto,)
                 )
             
@@ -8349,7 +8539,7 @@ class DatabaseApp:
     def obtener_descripcion_producto(self, codigo: str) -> str | None:
         try:
             rows = self.db_manager.fetch_data(
-                "SELECT C_DESCRI FROM dbo.MA_PRODUCTOS WHERE C_CODIGO = ?",
+                "SELECT COALESCE(cu_descripcion_corta, 'SIN DESCRIPCIÓN') FROM dbo.MA_PRODUCTOS WHERE C_CODIGO = ?",
                 (str(codigo),)
             )
             if rows and rows[0] and rows[0][0]:
@@ -8424,7 +8614,7 @@ class DatabaseApp:
             if hasattr(self, 'mbrp_tree'):
                 self.mbrp_tree.delete(*self.mbrp_tree.get_children())
                 self.mbrp_tree.insert("", tk.END, values=(
-                    "...", "Cargando productos de baja rotación...", "...", "...", "...", "...", "..."
+                    "...", "Cargando productos de baja rotación...", "...", "...", "...", "...", "...", "..."
                 ), tags=("loading",))
 
             # Lanzar hilo
@@ -8609,6 +8799,15 @@ class DatabaseApp:
             else:
                 datos_filtrados = list(self.cached_ventas_mbrp)
 
+            # Filtro por proveedor (si está seleccionado en MBRP)
+            proveedor_cod = getattr(self, 'mbrp_proveedor_codigo', None)
+            if proveedor_cod and datos_filtrados:
+                codigos_prov = self._get_codigos_por_proveedor_cached(proveedor_cod)
+                if codigos_prov:
+                    datos_filtrados = [r for r in datos_filtrados if str(r[0]) in codigos_prov]
+                else:
+                    datos_filtrados = []
+
             # Filtro jerárquico (similar a TRA)
             dept_cod = self.mbrp_dept_dict.get(self.mbrp_dept_var.get()) if hasattr(self, 'mbrp_dept_var') else None
             group_cod = None
@@ -8631,7 +8830,7 @@ class DatabaseApp:
 
             from pal.services.tra import filter_ventas_tra, paginate_tra
             datos_filtrados = filter_ventas_tra(
-                ventas=self.cached_ventas_mbrp,
+                ventas=datos_filtrados,
                 dept_code=dept_cod,
                 group_code=group_cod,
                 sub_code=sub_cod,
@@ -8752,6 +8951,18 @@ class DatabaseApp:
                 else:
                     ultima_venta_texto = f"{dias_sin_venta} días"
                 
+                # Calcular Días de Stock (DS) usando el mismo concepto que TRA
+                # DS = Stock Actual / Promedio Diario de Ventas en el período MBRP
+                try:
+                    dias_stock = self.calcular_dias_restantes(
+                        stock_actual=int(stock_actual),
+                        neto_ventas=float(neto or 0),
+                        fecha_inicio=self.mbrp_fecha_inicio,
+                        fecha_fin=self.mbrp_fecha_fin,
+                    )
+                except Exception:
+                    dias_stock = 0
+                
                 # Determinar tags de color por rotación e Índice de Movilidad con filas alternadas
                 tag_base_rotacion = str(rotacion).lower()
                 
@@ -8771,9 +8982,10 @@ class DatabaseApp:
                 else:
                     tag_final = f"{tag_base}_alt"  # Filas impares: colores oscuros
                 
+                neto_int = int(float(neto or 0))
                 self.mbrp_tree.insert(
                     "", tk.END,
-                    values=(codigo, desc, rotacion, int(float(neto or 0)), stock_actual, f"{im_porcentaje}%", ultima_venta_texto),
+                    values=(codigo, desc, rotacion, neto_int, stock_actual, dias_stock, f"{im_porcentaje}%", ultima_venta_texto),
                     tags=(tag_final,)
                 )
             except Exception as e:

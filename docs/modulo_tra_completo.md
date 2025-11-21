@@ -192,15 +192,15 @@ Donde:
 - Factor de Seguridad: 1.0 a 1.5 (según criticidad)
 ```
 
-#### Días Restantes de Stock (DR)
+#### Días de Stock (DS)
 ```
-DR = Stock Actual / PDV
+DS = Stock Actual / PDV
 
 Interpretación:
-- DR > 30 días: Sobrestockeado
-- 15 ≤ DR ≤ 30: Nivel óptimo
-- DR < 15 días: Alerta de reposición
-- DR < 7 días: Crítico - reposición urgente
+- DS > 30 días: Sobrestockeado
+- 15 ≤ DS ≤ 30: Nivel óptimo
+- DS < 15 días: Alerta de reposición
+- DS < 7 días: Crítico - reposición urgente
 ```
 
 **Ejemplo de Cálculo:**

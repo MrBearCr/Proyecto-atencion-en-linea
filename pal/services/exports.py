@@ -5,6 +5,7 @@ import csv
 import os
 from typing import List, Dict, Any, Callable, Optional
 from pal.core.log import get_logger
+from pal.services.tra import _get_tra_neto
 
 logger = get_logger("EXPORTS")
 
@@ -740,6 +741,13 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
     try:
         total_registros = len(datos_tra)
         logger.info(f"Iniciando exportación TRA Excel de {total_registros} registros a {filename}")
+
+        # Calcular total de ventas una sola vez usando helper robusto
+        try:
+            total_ventas = sum(_get_tra_neto(f) for f in datos_tra if f)
+        except Exception as e:
+            logger.warning(f"[EXPORT TRA] Error calculando total_ventas, se usará 0: {e}")
+            total_ventas = 0.0
         
         # Crear workbook
         wb = Workbook()
@@ -781,9 +789,6 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
         header_fill = PatternFill(start_color="2F5597", end_color="2F5597", fill_type="solid")
         ws_main['A1'].font = header_font
         ws_main['A1'].fill = header_fill
-        # Ajustar merge según si incluye columnas de costo/utilidad
-        merge_range = 'A1:K1' if mostrar_costo_utilidad else 'A1:H1'
-        ws_main.merge_cells(merge_range)
         
         # Verificar permiso para ver costo y utilidad
         mostrar_costo_utilidad = False
@@ -793,6 +798,10 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
                 logger.info(f"Permiso ver_costo_utilidad para TRA: {mostrar_costo_utilidad}")
             except Exception as e:
                 logger.warning(f"Error verificando permiso ver_costo_utilidad: {e}")
+        
+        # Ajustar merge según si incluye columnas de costo/utilidad
+        merge_range = 'A1:K1' if mostrar_costo_utilidad else 'A1:H1'
+        ws_main.merge_cells(merge_range)
         
         # Headers de la tabla (fila 7)
         headers = ['Código', 'Descripción', 'Departamento', 'Grupo', 'Subgrupo', 'Ventas Netas', 'Rotación', 'Representación %']
@@ -814,17 +823,24 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
             try:
                 row = data_start_row + i
                 
-                # Manejar diferentes longitudes de fila
-                # Con costo/precio: codigo, desc, dept, grupo, sub, neto, precio, costo, [rotacion]
+                # Manejar diferentes longitudes de fila según estructura real:
+                #   - Sin precio/costo (6 campos base + rotación):
+                #       [codigo, desc, dept, grupo, sub, neto, rotacion]
+                #   - Con precio/costo (8 campos base + rotación):
+                #       [codigo, desc, dept, grupo, sub, neto, rotacion, precio, costo]
                 if len(fila) >= 9:
-                    codigo, desc, dept, grupo, sub, neto, precio, costo, rotacion = fila[:9]
-                elif len(fila) >= 8:
+                    # Tomamos explícitamente los primeros 9 campos en el orden esperado
+                    codigo, desc, dept, grupo, sub, neto, rotacion, precio, costo = fila[:9]
+                elif len(fila) == 8:
+                    # Caso mixto/legacy: asumir que los últimos dos son precio/costo pero sin rotación clara
                     codigo, desc, dept, grupo, sub, neto, precio, costo = fila[:8]
                     rotacion = "SIN CLASIFICAR"
-                elif len(fila) >= 7:
+                elif len(fila) == 7:
+                    # Sin precio/costo, pero con rotación agregada
                     codigo, desc, dept, grupo, sub, neto, rotacion = fila[:7]
                     precio = costo = 0
                 elif len(fila) >= 6:
+                    # Solo datos base, sin rotación ni precio/costo
                     codigo, desc, dept, grupo, sub, neto = fila[:6]
                     rotacion = "SIN CLASIFICAR"
                     precio = costo = 0
@@ -845,7 +861,8 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
                 if i < 3:
                     logger.info(f"[EXPORT DEBUG] Fila {i}: codigo={codigo}, neto_raw={neto} (tipo={type(neto)})")
                 
-                neto_valor = float(neto or 0)
+                # Usar helper robusto para obtener el neto sin lanzar errores por strings como 'ALTA'
+                neto_valor = _get_tra_neto(fila)
                 # DEBUG: Log del valor convertido
                 if i < 3:
                     logger.info(f"[EXPORT DEBUG] Fila {i}: neto_convertido={neto_valor}")
@@ -856,22 +873,30 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
                 ws_main.cell(row=row, column=6, value=neto_formateado)
                 ws_main.cell(row=row, column=7, value=clean_for_excel(str(rotacion).upper()))
                 
-                # Calcular porcentaje si hay datos suficientes
-                total_ventas = sum(float(f[5] or 0) for f in datos_tra if len(f) >= 6)
-                porcentaje = (float(neto or 0) / total_ventas * 100) if total_ventas > 0 else 0
+                # Calcular porcentaje si hay datos suficientes (usar total_ventas ya calculado)
+                porcentaje = (neto_valor / total_ventas * 100) if total_ventas > 0 else 0
                 ws_main.cell(row=row, column=8, value=round(porcentaje, 2))
                 
                 # Agregar costo, precio y utilidad si el usuario tiene permiso
                 if mostrar_costo_utilidad:
-                    precio_val = float(precio or 0)
-                    costo_val = float(costo or 0)
+                    try:
+                        precio_val = float(precio or 0)
+                    except (ValueError, TypeError):
+                        precio_val = 0.0
+                    try:
+                        costo_val = float(costo or 0)
+                    except (ValueError, TypeError):
+                        costo_val = 0.0
                     
                     ws_main.cell(row=row, column=9, value=round(precio_val, 2))
                     ws_main.cell(row=row, column=10, value=round(costo_val, 2))
                     
-                    # Calcular utilidad porcentual: ((precio - costo) / costo) * 100
-                    if costo_val > 0:
-                        utilidad_pct = ((precio_val - costo_val) / costo_val) * 100
+                    # Calcular utilidad porcentual según fórmula solicitada:
+                    #   utilidad_raw = (costo / precio) * 100 - 100  ->  número negativo
+                    #   en Excel se mostrará como valor positivo (abs).
+                    if precio_val > 0:
+                        utilidad_raw = (costo_val / precio_val) * 100 - 100
+                        utilidad_pct = abs(utilidad_raw)
                         ws_main.cell(row=row, column=11, value=round(utilidad_pct, 2))
                     else:
                         ws_main.cell(row=row, column=11, value=0)
@@ -1465,9 +1490,12 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
                     ws_main.cell(row=row, column=8, value=round(precio_val, 2))
                     ws_main.cell(row=row, column=9, value=round(costo_val, 2))
                     
-                    # Calcular utilidad porcentual: ((precio - costo) / costo) * 100
-                    if costo_val > 0:
-                        utilidad_pct = ((precio_val - costo_val) / costo_val) * 100
+                    # Calcular utilidad porcentual según fórmula solicitada:
+                    #   utilidad_raw = (costo / precio) * 100 - 100  ->  número negativo
+                    #   en Excel se mostrará como valor positivo (abs).
+                    if precio_val > 0:
+                        utilidad_raw = (costo_val / precio_val) * 100 - 100
+                        utilidad_pct = abs(utilidad_raw)
                         ws_main.cell(row=row, column=10, value=round(utilidad_pct, 2))
                     else:
                         ws_main.cell(row=row, column=10, value=0)

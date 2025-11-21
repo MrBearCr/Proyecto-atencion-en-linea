@@ -112,6 +112,15 @@ def setup_mbrp_tab(app):
     app.mbrp_sub_combo['values'] = ['Todos']
     app.mbrp_sub_combo.pack(side=tk.LEFT, padx=5)
 
+    # Filtro por Proveedores
+    ttk.Label(filter_frame, text="Proveedores:").pack(side=tk.LEFT, padx=(15, 5))
+    ttk.Button(
+        filter_frame,
+        text="🔍",
+        width=3,
+        command=lambda: getattr(app, 'abrir_selector_proveedor_mbrp', lambda: None)(),
+    ).pack(side=tk.LEFT, padx=5)
+
     # Buscador
     search_frame = ttk.Frame(app.mbrp_tab_frame)
     search_frame.pack(fill=tk.X, pady=5)
@@ -138,24 +147,25 @@ def setup_mbrp_tab(app):
     tree_frame = ttk.Frame(app.mbrp_tab_frame)
     tree_frame.pack(fill=tk.BOTH, expand=True)
 
-    columns = ("Código", "Descripción", "Rotación", "Neto", "Stock Actual", "IM %", "Última Venta")
+    columns = ("Código", "Descripción", "Rotación", "Neto", "Stock Actual", "Días de Stock", "IM %", "Última Venta")
     app.mbrp_tree = ttk.Treeview(tree_frame, columns=columns, show='headings', height=10)
     
     # Configurar tamaño de fuente y altura de filas más grandes
     style = ttk.Style()
     style.configure('LargeMBRP.Treeview', font=('', 11), rowheight=25)
     app.mbrp_tree.configure(style='LargeMBRP.Treeview')
-
+    
     vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=app.mbrp_tree.yview)
     hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=app.mbrp_tree.xview)
     app.mbrp_tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
-
+    
     column_config = {
         "Código": {"width": 80, "anchor": "center"},
         "Descripción": {"width": 250, "anchor": "w"},
         "Rotación": {"width": 80, "anchor": "center"},
         "Neto": {"width": 100, "anchor": "e"},
         "Stock Actual": {"width": 90, "anchor": "center"},
+        "Días de Stock": {"width": 90, "anchor": "center"},
         "IM %": {"width": 80, "anchor": "center"},
         "Última Venta": {"width": 110, "anchor": "center"},
     }

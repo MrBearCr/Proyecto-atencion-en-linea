@@ -5,7 +5,7 @@
 --              utilidad en reportes TRA, MBRP y Stock
 -- ============================================================================
 
-USE [tu_base_de_datos]; -- CAMBIAR POR EL NOMBRE DE TU BD
+USE VAD10; -- CAMBIAR POR EL NOMBRE DE TU BD
 GO
 
 PRINT 'Iniciando migración 001: Agregar permisos ver_costo_utilidad...';

@@ -158,6 +158,12 @@ def _stats_update_breadcrumb(app):
     if state.get('group'):
         gname = inv['group'].get((str(state['dept']), str(state['group'])), str(state['group']))
         parts.append(gname)
+    if state.get('sub'):
+        sname = inv['sub'].get(
+            (str(state.get('dept')), str(state.get('group')), str(state.get('sub'))),
+            str(state.get('sub')),
+        )
+        parts.append(sname)
     app.stats_breadcrumb_var.set(" / ".join(parts))
     # Habilitar/Deshabilitar botón volver
     lvl = state.get('level', 'dept')
@@ -172,7 +178,10 @@ def _stats_update_breadcrumb(app):
 def _stats_go_back(app):
     state = getattr(app, 'stats_pie_state', {"level": "dept", "dept": None, "group": None})
     lvl = state.get('level', 'dept')
-    if lvl == 'sub':
+    if lvl == 'product':
+        state['level'] = 'sub'
+        state['sub'] = None
+    elif lvl == 'sub':
         state['level'] = 'group'
         state['group'] = None
     elif lvl == 'group':
@@ -183,6 +192,11 @@ def _stats_go_back(app):
     app.mostrar_estadisticas()
 
 def _stats_render_pie(app, labels, sizes, title, *, on_pick_codes, legend_rows, colors=None):
+    """Renderiza gráfico de pastel + tabla detalle.
+
+    Las etiquetas de cada segmento se muestran siempre; la tabla lateral
+    complementa la lectura cuando hay muchos segmentos pequeños.
+    """
     _stats_clear_container(app)
 
     # Contenedor con dos columnas: gráfico (izquierda) y detalle (derecha)
@@ -194,6 +208,7 @@ def _stats_render_pie(app, labels, sizes, title, *, on_pick_codes, legend_rows, 
     right.pack(side=tk.RIGHT, fill=tk.Y)
 
     fig, ax = plt.subplots(figsize=(7, 5), dpi=100)
+
     wedges, texts = ax.pie(
         sizes,
         labels=labels,
@@ -252,13 +267,19 @@ def _stats_render_pie(app, labels, sizes, title, *, on_pick_codes, legend_rows, 
             if not code:
                 return
             state = getattr(app, 'stats_pie_state', {"level": "dept", "dept": None, "group": None})
-            if state.get('level') == 'dept':
+            lvl = state.get('level', 'dept')
+            if lvl == 'dept':
                 state['level'] = 'group'
                 state['dept'] = str(code)
                 state['group'] = None
-            elif state.get('level') == 'group':
+                state.setdefault('sub', None)
+            elif lvl == 'group':
                 state['level'] = 'sub'
                 state['group'] = str(code)
+                state.setdefault('sub', None)
+            elif lvl == 'sub':
+                state['level'] = 'product'
+                state['sub'] = str(code)
             app.stats_pie_state = state
             app.mostrar_estadisticas()
         except Exception:
@@ -274,6 +295,144 @@ def _stats_render_pie(app, labels, sizes, title, *, on_pick_codes, legend_rows, 
                 return
             # Actualizar estado y volver a renderizar
             state = getattr(app, 'stats_pie_state', {"level": "dept", "dept": None, "group": None})
+            lvl = state.get('level', 'dept')
+            if lvl == 'dept':
+                state['level'] = 'group'
+                state['dept'] = str(code)
+                state['group'] = None
+                state.setdefault('sub', None)
+            elif lvl == 'group':
+                state['level'] = 'sub'
+                state['group'] = str(code)
+                state.setdefault('sub', None)
+            elif lvl == 'sub':
+                state['level'] = 'product'
+                state['sub'] = str(code)
+            app.stats_pie_state = state
+            app.mostrar_estadisticas()
+        except Exception:
+            pass
+
+    canvas.mpl_connect('pick_event', _on_pick)
+    return canvas
+
+
+def _stats_render_bar(app, labels, sizes, title, *, on_pick_codes, legend_rows):
+    """Renderiza gráfico de barras horizontales descendente + tabla detalle.
+
+    Las barras se ordenan de mayor a menor valor, mostrando el nombre
+    a la izquierda y el valor / porcentaje al final de cada barra.
+    """
+    _stats_clear_container(app)
+
+    container = ttk.Frame(app.graph_container)
+    container.pack(fill=tk.BOTH, expand=True)
+    left = ttk.Frame(container)
+    right = ttk.Frame(container, padding=(8, 0))
+    left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    right.pack(side=tk.RIGHT, fill=tk.Y)
+
+    # Usar legend_rows ya viene ordenado de forma descendente
+    names = [row[0] for row in legend_rows]
+    pcts = [row[1] for row in legend_rows]
+    vals = [row[2] for row in legend_rows]
+
+    fig, ax = plt.subplots(figsize=(7, 5), dpi=100)
+    y_pos = list(range(len(vals)))
+
+    bars = ax.barh(y_pos, vals, align='center', color='#4C72B0')
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(names)
+    ax.invert_yaxis()  # mayor valor arriba
+    ax.set_xlabel('Ventas netas')
+    ax.set_title(title)
+
+    # Hacer cada barra seleccionable para drill-down
+    for bar, code in zip(bars, on_pick_codes):
+        try:
+            bar.set_picker(True)
+            bar._stats_code = code
+        except Exception:
+            pass
+
+    # Reducir tamaño de fuente de etiquetas del eje Y para mejorar legibilidad
+    ax.tick_params(axis='y', labelsize=8)
+
+    # Etiquetas de valor y % al final de cada barra
+    total = sum(vals) or 1.0
+    for i, (v, pct) in enumerate(zip(vals, pcts)):
+        try:
+            x = v
+            pct_txt = f"{pct:.1f}%"
+            val_disp = int(round(v))
+            ax.text(x, i, f" {val_disp} ({pct_txt})", va='center', ha='left', fontsize=8)
+        except Exception:
+            continue
+
+    canvas = FigureCanvasTkAgg(fig, master=left)
+    canvas.draw()
+    canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+    # Manejar clic en barras para drill-down (igual lógica que detalle)
+    def _on_pick(event):
+        try:
+            artist = event.artist
+            code = getattr(artist, '_stats_code', None)
+            if not code:
+                return
+            state = getattr(app, 'stats_pie_state', {"level": "dept", "dept": None, "group": None})
+            lvl = state.get('level', 'dept')
+            if lvl == 'dept':
+                state['level'] = 'group'
+                state['dept'] = str(code)
+                state['group'] = None
+                state.setdefault('sub', None)
+            elif lvl == 'group':
+                state['level'] = 'sub'
+                state['group'] = str(code)
+                state.setdefault('sub', None)
+            elif lvl == 'sub':
+                state['level'] = 'product'
+                state['sub'] = str(code)
+            app.stats_pie_state = state
+            app.mostrar_estadisticas()
+        except Exception:
+            pass
+
+    canvas.mpl_connect('pick_event', _on_pick)
+
+    # Tabla de detalle a la derecha (nombre, %, neto)
+    ttk.Label(right, text="Detalle de representación").pack(anchor='w', pady=(0, 4))
+    cols = ("Elemento", "%", "Neto")
+    tree = ttk.Treeview(right, columns=cols, show='headings', height=12)
+    for c in cols:
+        tree.heading(c, text=c)
+    tree.column("Elemento", width=200, anchor='w')
+    tree.column("%", width=60, anchor='e')
+    tree.column("Neto", width=90, anchor='e')
+
+    for idx, (name, pct, val) in enumerate(legend_rows):
+        pct_txt = f"{pct:.1f}%"
+        try:
+            val_disp = int(round(val))
+        except Exception:
+            val_disp = val
+        tree.insert("", tk.END, iid=str(idx), values=(name, pct_txt, val_disp))
+    tree.pack(fill=tk.Y, expand=False)
+
+    # Drill-down desde tabla (doble clic)
+    code_by_index = {str(i): on_pick_codes[i] for i in range(len(on_pick_codes))}
+
+    def _on_detail_dblclick(event):
+        try:
+            sel = tree.selection()
+            if not sel:
+                return
+            idx = sel[0]
+            code = code_by_index.get(idx)
+            if not code:
+                return
+            state = getattr(app, 'stats_pie_state', {"level": "dept", "dept": None, "group": None})
             if state.get('level') == 'dept':
                 state['level'] = 'group'
                 state['dept'] = str(code)
@@ -286,7 +445,7 @@ def _stats_render_pie(app, labels, sizes, title, *, on_pick_codes, legend_rows, 
         except Exception:
             pass
 
-    canvas.mpl_connect('pick_event', _on_pick)
+    tree.bind('<Double-1>', _on_detail_dblclick)
     return canvas
 
 def _stats_compute_and_draw(app):
@@ -306,13 +465,13 @@ def _stats_compute_and_draw(app):
     if not hasattr(app, 'stats_pie_state') or not app.stats_pie_state:
         dept, group, sub = _stats_get_current_selection(app)
         if sub:
-            app.stats_pie_state = {"level": "sub", "dept": dept, "group": group}
+            app.stats_pie_state = {"level": "sub", "dept": dept, "group": group, "sub": sub}
         elif group:
-            app.stats_pie_state = {"level": "group", "dept": dept, "group": group}
+            app.stats_pie_state = {"level": "group", "dept": dept, "group": group, "sub": None}
         elif dept:
-            app.stats_pie_state = {"level": "group", "dept": dept, "group": None}
+            app.stats_pie_state = {"level": "group", "dept": dept, "group": None, "sub": None}
         else:
-            app.stats_pie_state = {"level": "dept", "dept": None, "group": None}
+            app.stats_pie_state = {"level": "dept", "dept": None, "group": None, "sub": None}
 
     state = app.stats_pie_state
     inv = getattr(app, '_stats_inv_maps', _stats_build_inverse_maps(app))
@@ -334,7 +493,19 @@ def _stats_compute_and_draw(app):
         ventas = [r for r in ventas if len(r) > 2 and str(r[2]) not in excluded]
 
     # Determinar nivel y agregar datos
-    if state['level'] == 'dept':
+    # Tipo de gráfico seleccionado por el usuario (pie o barras)
+    chart_mode = getattr(app, 'stats_chart_type_var', None)
+    chart_type = 'pie'
+    try:
+        if chart_mode is not None:
+            sel = chart_mode.get() or ''
+            chart_type = 'bar' if 'Barra' in sel else 'pie'
+    except Exception:
+        chart_type = 'pie'
+
+    lvl = state.get('level', 'dept')
+
+    if lvl == 'dept':
         # Agregar por departamento en todos los datos (sin filtrar por dept)
         data_map = _stats_aggregate(ventas, 'dept')
         if not data_map:
@@ -344,9 +515,12 @@ def _stats_compute_and_draw(app):
         labels, sizes, meta, legend = _stats_format_labels(data_map, inv_maps=inv, level='dept')
         title = "Representación por Departamento (RI)"
         _stats_update_breadcrumb(app)
-        _stats_render_pie(app, labels, sizes, title, on_pick_codes=meta, legend_rows=legend)
+        if chart_type == 'bar':
+            _stats_render_bar(app, labels, sizes, title, on_pick_codes=meta, legend_rows=legend)
+        else:
+            _stats_render_pie(app, labels, sizes, title, on_pick_codes=meta, legend_rows=legend)
         return
-    elif state['level'] == 'group':
+    elif lvl == 'group':
         dept = state.get('dept')
         # Filtrar por dept y agregar grupos
         data_map = _stats_aggregate(ventas, 'group', dept=dept)
@@ -359,9 +533,12 @@ def _stats_compute_and_draw(app):
         name = inv['dept'].get(str(dept), str(dept)) if dept else ''
         title = f"{name} — Representación por Grupo"
         _stats_update_breadcrumb(app)
-        _stats_render_pie(app, labels, sizes, title, on_pick_codes=meta, legend_rows=legend)
+        if chart_type == 'bar':
+            _stats_render_bar(app, labels, sizes, title, on_pick_codes=meta, legend_rows=legend)
+        else:
+            _stats_render_pie(app, labels, sizes, title, on_pick_codes=meta, legend_rows=legend)
         return
-    else:  # sub
+    elif lvl == 'sub':
         dept = state.get('dept')
         group = state.get('group')
         data_map = _stats_aggregate(ventas, 'sub', dept=dept, group=group)
@@ -376,7 +553,88 @@ def _stats_compute_and_draw(app):
         gname = inv['group'].get((str(dept), str(group)), str(group)) if group else ''
         title = f"{dname} → {gname} — Representación por Subgrupo"
         _stats_update_breadcrumb(app)
-        _stats_render_pie(app, labels, sizes, title, on_pick_codes=meta, legend_rows=legend)
+        if chart_type == 'bar':
+            _stats_render_bar(app, labels, sizes, title, on_pick_codes=meta, legend_rows=legend)
+        else:
+            _stats_render_pie(app, labels, sizes, title, on_pick_codes=meta, legend_rows=legend)
+        return
+    elif lvl == 'product':
+        dept = state.get('dept')
+        group = state.get('group')
+        sub = state.get('sub')
+        # Validar que haya contexto completo para productos
+        if not (dept and group and sub):
+            # Si falta algo, regresar a nivel de subgrupos
+            state['level'] = 'sub'
+            app.stats_pie_state = state
+            app.mostrar_estadisticas()
+            return
+
+        # Filtrar registros del subgrupo seleccionado y agrupar por producto
+        product_totals = {}
+        product_names = {}
+        for r in ventas:
+            if len(r) < 6:
+                continue
+            try:
+                if not (
+                    str(r[2]) == str(dept)
+                    and str(r[3]) == str(group)
+                    and str(r[4]) == str(sub)
+                ):
+                    continue
+            except Exception:
+                continue
+            code = str(r[0])
+            name = str(r[1]) if len(r) > 1 and r[1] is not None else code
+            try:
+                neto = float(r[5] or 0)
+            except Exception:
+                neto = 0.0
+            if neto <= 0:
+                continue
+            product_totals[code] = product_totals.get(code, 0.0) + neto
+            if code not in product_names:
+                product_names[code] = name
+
+        if not product_totals:
+            _stats_clear_container(app)
+            dname = inv['dept'].get(str(dept), str(dept)) if dept else 'N/A'
+            gname = inv['group'].get((str(dept), str(group)), str(group)) if group else 'N/A'
+            sname = inv['sub'].get((str(dept), str(group), str(sub)), str(sub)) if sub else 'N/A'
+            ttk.Label(app.graph_container, text=f"Sin datos de productos para {dname} / {gname} / {sname}").pack(pady=10)
+            return
+
+        # Ordenar productos por neto y limitar a top 25 para estética
+        max_products = 25
+        items = sorted(product_totals.items(), key=lambda kv: kv[1], reverse=True)[:max_products]
+        total = sum(v for _, v in items) or 1.0
+
+        labels = []
+        sizes = []
+        meta = []
+        legend = []
+        for code, val in items:
+            full_name = product_names.get(code, code)
+            # Limitar nombre visible a 25 caracteres para mantener estética
+            name = str(full_name)
+            if len(name) > 25:
+                name = name[:22] + "..."
+            pct = (val / total) * 100.0
+            labels.append(f"{name}\n{pct:.1f}%")
+            sizes.append(val)
+            meta.append(code)
+            legend.append((name, pct, float(val)))
+
+        dname = inv['dept'].get(str(dept), str(dept)) if dept else ''
+        gname = inv['group'].get((str(dept), str(group)), str(group)) if group else ''
+        sname = inv['sub'].get((str(dept), str(group), str(sub)), str(sub)) if sub else ''
+        title = f"{dname} → {gname} → {sname} — Top {len(items)} productos"
+        _stats_update_breadcrumb(app)
+        if chart_type == 'bar':
+            _stats_render_bar(app, labels, sizes, title, on_pick_codes=meta, legend_rows=legend)
+        else:
+            _stats_render_pie(app, labels, sizes, title, on_pick_codes=meta, legend_rows=legend)
         return
 
 def setup_stats_tab(app):
@@ -398,11 +656,25 @@ def setup_stats_tab(app):
     app.stats_breadcrumb_var = tk.StringVar(value="Departamentos")
     ttk.Label(top_bar, textvariable=app.stats_breadcrumb_var).pack(side=tk.LEFT, padx=10)
 
+    # Selector de tipo de gráfico
+    app.stats_chart_type_var = tk.StringVar(value="Pie (porcentaje)")
+    chart_type_combo = ttk.Combobox(
+        top_bar,
+        textvariable=app.stats_chart_type_var,
+        state='readonly',
+        width=22,
+        values=[
+            "Pie (porcentaje)",
+            "Barras horizontales"
+        ],
+    )
+    chart_type_combo.pack(side=tk.RIGHT, padx=(5, 0))
+
     ttk.Button(
         top_bar,
         text="Actualizar Gráficos",
         command=lambda: getattr(app, 'mostrar_estadisticas', lambda: None)()
-    ).pack(side=tk.RIGHT)
+    ).pack(side=tk.RIGHT, padx=(0, 5))
 
     # Contenedor para gráficos
     app.graph_container = ttk.Frame(app.stats_frame)

@@ -252,9 +252,25 @@ def clasificar_rotacion_tra(ventas_data, total_ventas=None):
                 item_list = list(item[:]) if hasattr(item, '__getitem__') else [item]
             
             if len(item_list) == 6:
+                # Patrón clásico: [codigo, desc, dept, grupo, sub, neto]
+                # Añadimos rotación al final -> índice 6
                 item_list.append(rotacion)
             elif len(item_list) > 6:
-                item_list[6] = rotacion
+                # Patrón extendido (por ejemplo con precio/costo):
+                #   [codigo, desc, dept, grupo, sub, neto, precio, costo, ...]
+                # Queremos estructura final:
+                #   [codigo, desc, dept, grupo, sub, neto, rotacion, precio, costo, ...]
+                # pero manteniendo idempotencia si ya hay rotación en la posición 6.
+                try:
+                    posible_rot = str(item_list[6]).upper() if item_list[6] is not None else ""
+                except Exception:
+                    posible_rot = ""
+                if posible_rot in {"ALTA", "MEDIA", "BAJA", "SIN MOVIMIENTO", "SIN CLASIFICAR"}:
+                    # Ya hay una rotación en índice 6: solo la actualizamos
+                    item_list[6] = rotacion
+                else:
+                    # Caso crudo desde BD: insertar rotación en índice 6 y desplazar el resto (precio/costo)
+                    item_list.insert(6, rotacion)
             else:
                 # Completar con valores por defecto si es necesario
                 while len(item_list) < 6:

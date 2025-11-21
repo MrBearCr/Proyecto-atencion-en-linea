@@ -238,15 +238,37 @@ Días sin Venta = -1    → Nunca se ha vendido (producto nuevo o problema)
 
 **Integración con IM:**
 
-| IM | Días sin Venta | Severidad | Acción |
-|----|----------------|-----------|--------|
-| 0% | >90 | 🚨 MÁXIMA | Liquidar inmediatamente |
-| ≤5% | >90 | 🔴 CRÍTICA | Evaluar descontinuación |
-| ≤10% | 60-90 | 🟠 ALTA | Promoción agresiva |
-| ≤20% | 30-60 | 🟡 MEDIA | Monitoreo cercano |
-| ≤30% | <30 | 🟢 BAJA | Seguimiento normal |
+|| IM | Días sin Venta | Severidad | Acción |
+||----|----------------|-----------|--------|
+|| 0% | >90 | 🚨 MÁXIMA | Liquidar inmediatamente |
+|| ≤5% | >90 | 🔴 CRÍTICA | Evaluar descontinuación |
+|| ≤10% | 60-90 | 🟠 ALTA | Promoción agresiva |
+|| ≤20% | 30-60 | 🟡 MEDIA | Monitoreo cercano |
+|| ≤30% | <30 | 🟢 BAJA | Seguimiento normal |
 
-### 2. Stock Actual vs Rotación
+### 2. Días de Stock (DS)
+
+Aunque MBRP se centra en baja rotación, es clave saber **cuántos días de cobertura de inventario** tenemos para cada producto en función de sus ventas recientes.
+
+**Fórmula (misma lógica que TRA, aplicada al período MBRP):**
+```
+DS = Stock Actual / PDV
+
+PDV (Promedio Diario de Ventas) = Neto Ventas del Producto en el período MBRP / Días del período
+```
+
+**Interpretación típica en contexto de baja rotación:**
+```
+DS  0-15 días   → Cobertura ajustada o incluso baja (poco riesgo de sobrestock)
+DS 16-60 días   → Zona de atención (revisar pedidos futuros)
+DS 61-120 días  → Sobrestock moderado (considerar promociones o transferencias)
+DS >120 días    → Sobrestock crítico (capital inmovilizado, candidato a MBRP extremo)
+DS = 0          → Sin stock o sin ventas suficientes para estimar (se muestra como 0)
+```
+
+En la grilla de MBRP se muestra una columna **"Días de Stock"** calculada automáticamente con esta fórmula usando el mismo rango de fechas configurado en la pestaña MBRP.
+
+### 3. Stock Actual vs Rotación
 
 **Concepto:** Productos con IM bajo y stock alto son los más críticos (capital inmovilizado).
 

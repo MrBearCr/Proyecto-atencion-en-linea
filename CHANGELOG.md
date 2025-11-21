@@ -32,6 +32,41 @@ y este proyecto adhiere al [Versionado Semántico](https://semver.org/lang/es/).
 
 ### 🔧 Cambiado
 
+#### Etiqueta "Días de Stock" en módulo TRA (RI)
+- **Archivos modificados**:
+  - `pal/ui/tabs/tra.py`
+  - `docs/modulo_tra_completo.md`
+- **Razón**: La etiqueta "Días Restantes" generaba dudas sobre el significado exacto; "Días de Stock" comunica mejor que el indicador se refiere a días de cobertura de inventario.
+- **Cambio**: En la grilla de TRA y en la documentación técnica se renombró "Días Restantes" a "Días de Stock", manteniendo la fórmula `Stock Actual / PDV`.
+- **Impacto**: Mejora de claridad para usuarios finales sin afectar la lógica de cálculo.
+
+#### "Días de Stock" en módulo MBRP
+- **Archivos modificados**:
+  - `pal/ui/tabs/mbrp.py`
+  - `app.py`
+  - `docs/modulo_mbrp_completo.md`
+- **Razón**: Se necesitaba la misma métrica de cobertura de inventario que en TRA para analizar productos de baja rotación, utilizando el rango de fechas específico del módulo MBRP.
+- **Cambio**: Se agregó una nueva columna "Días de Stock" en la grilla MBRP y se reutilizó la lógica existente (`Stock Actual / PDV`) tomando como base las ventas netas del período MBRP.
+- **Impacto**: Permite identificar rápidamente sobrestocks (muchos días de stock con IM bajo) dentro del portafolio de baja rotación.
+
+#### Descripciones cortas de producto en toda la app
+- **Archivos modificados**:
+  - `pal/infrastructure/database.py`
+  - `pal/services/stock.py`
+  - `app.py`
+- **Razón**: Las descripciones largas (`C_DESCRI`) generaban textos muy extensos en listados, alertas, mensajes de WhatsApp y gráficos.
+- **Cambio**: Todas las consultas que mostraban descripciones de producto pasan a usar `cu_descripcion_corta` (o `SIN DESCRIPCIÓN` si viene nulo/vacío), eliminando el uso de `C_DESCRI` como texto principal.
+- **Impacto**: Interfaces más legibles, etiquetas más cortas en estadísticas y mensajes de WhatsApp con textos más compactos.
+
+#### Mejora de gráficos en pestaña Estadísticas (TRA/RI)
+- **Archivos modificados**:
+  - `pal/ui/tabs/stats.py`
+- **Razón**: Con muchos segmentos pequeños (p.ej. varios grupos con 0,2%), se necesitaba una forma alternativa de visualizar la distribución sin perder legibilidad ni interacción.
+- **Cambios**:
+-  - Se mantiene el gráfico de pastel con etiquetas visibles en todos los segmentos, complementado por una tabla de detalle lateral.
+-  - Se agregó un selector de tipo de gráfico para alternar entre "Pie (porcentaje)" y "Barras horizontales"; las barras se muestran en orden descendente y son clicables para drill-down (Departamento → Grupo → Subgrupo → Producto, limitado a top 25).
+- **Impacto**: Mejora de legibilidad y navegación en las estadísticas, ofreciendo una vista alternativa más cómoda cuando hay muchos segmentos.
+
 #### Queries SQL Optimizados con Campos de Precio y Costo
 - **Archivos modificados**: `pal/infrastructure/database.py`
 - **Razón**: Necesidad de traer precio y costo desde origen de datos para cálculos de utilidad

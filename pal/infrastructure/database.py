@@ -983,11 +983,11 @@ class DatabaseManager:
                         SELECT 
                             d.c_codarticulo,
                             SUM(d.n_cantidad) as stock_total,
-                            p.C_DESCRI
+                            COALESCE(p.cu_descripcion_corta, 'SIN DESCRIPCIÓN') as C_DESCRI
                         FROM MA_DEPOPROD d
                         INNER JOIN MA_PRODUCTOS p ON d.c_codarticulo = p.C_CODIGO
                         WHERE d.c_coddeposito = ?
-                        GROUP BY d.c_codarticulo, p.C_DESCRI
+                        GROUP BY d.c_codarticulo, p.cu_descripcion_corta
                         HAVING SUM(d.n_cantidad) < 21
                     ),
                     stock_ranked AS (
@@ -1089,7 +1089,7 @@ class DatabaseManager:
             query = """
                 SELECT 
                     i.c_Codarticulo AS codigo,
-                    COALESCE(p.cu_descripcion_corta, p.C_DESCRI, 'SIN DESCRIPCIÓN') AS descripcion,
+                    COALESCE(p.cu_descripcion_corta, 'SIN DESCRIPCIÓN') AS descripcion,
                     COALESCE(p.C_DEPARTAMENTO, '') AS departamento,
                     COALESCE(p.C_GRUPO, '') AS grupo,
                     COALESCE(p.C_SUBGRUPO, '') AS subgrupo,
@@ -1169,7 +1169,7 @@ class DatabaseManager:
                     )
                     SELECT 
                         v.codigo,
-                        COALESCE(p.cu_descripcion_corta, p.C_DESCRI, 'SIN DESCRIPCIÓN') AS descripcion,
+                        COALESCE(p.cu_descripcion_corta, 'SIN DESCRIPCIÓN') AS descripcion,
                         COALESCE(p.C_DEPARTAMENTO, '') AS departamento,
                         COALESCE(p.C_GRUPO, '') AS grupo,
                         COALESCE(p.C_SUBGRUPO, '') AS subgrupo,
@@ -1203,8 +1203,8 @@ class DatabaseManager:
                         END) > 0
                     )
                     SELECT 
-                        v.codigo,
-                        COALESCE(p.cu_descripcion_corta, p.C_DESCRI, 'SIN DESCRIPCIÓN') AS descripcion,
+                    v.codigo,
+                        COALESCE(p.cu_descripcion_corta, 'SIN DESCRIPCIÓN') AS descripcion,
                         COALESCE(p.C_DEPARTAMENTO, '') AS departamento,
                         COALESCE(p.C_GRUPO, '') AS grupo,
                         COALESCE(p.C_SUBGRUPO, '') AS subgrupo,
@@ -1255,6 +1255,83 @@ class DatabaseManager:
             print(f"Error obteniendo depósitos: {str(e)}")
             return []
     
+    def obtener_proveedores(self, search_text=None, limit=None):
+        """Obtiene lista de proveedores desde MA_PROVEEDORES.
+        
+        Opcionalmente filtra por texto en código o descripción y limita la cantidad de filas.
+        """
+        try:
+            base_query = (
+                "SELECT c_codproveed, c_descripcio "
+                "FROM MA_PROVEEDORES WITH (NOLOCK) "
+            )
+            params: list[str] = []
+            filters = []
+            if search_text:
+                texto = f"%{search_text.strip()}%"
+                filters.append("(c_codproveed LIKE ? OR c_descripcio LIKE ?)")
+                params.extend([texto, texto])
+            if filters:
+                base_query += " WHERE " + " AND ".join(filters)
+            base_query += " ORDER BY c_descripcio"
+            if limit and limit > 0:
+                base_query += f" OFFSET 0 ROWS FETCH NEXT {int(limit)} ROWS ONLY"
+            result = self.fetch_data(base_query, params) or []
+            return result
+        except Exception as e:
+            print(f"Error obteniendo proveedores: {str(e)}")
+            return []
+    
+    def obtener_codigos_por_proveedor(self, cod_proveedor: str):
+        """Obtiene códigos de producto asociados a un proveedor en MA_PRODXPROV.
+        
+        Args:
+            cod_proveedor: Código del proveedor (c_codproveed/c_codprovee)
+        
+        Returns:
+            list[str]: Lista de códigos de producto (c_codigo) asociados al proveedor
+        """
+        try:
+            if not cod_proveedor:
+                return []
+            query = """
+                SELECT DISTINCT c_codigo
+                FROM MA_PRODXPROV WITH (NOLOCK)
+                WHERE c_codprovee = ?
+            """
+            rows = self.fetch_data(query, (str(cod_proveedor).strip(),)) or []
+            return [str(r[0]).strip() for r in rows if r and r[0] is not None]
+        except Exception as e:
+            print(f"Error obteniendo códigos por proveedor: {str(e)}")
+            return []
+
+    def obtener_proveedores_por_producto(self, search_text):
+        """Obtiene proveedores asociados a uno o varios productos según código.
+        
+        Args:
+            search_text: Texto a buscar en el código de producto (c_codigo, LIKE %texto%).
+        
+        Returns:
+            list: Lista de tuplas (c_codproveed, c_descripcio) de proveedores únicos.
+        """
+        try:
+            if not search_text:
+                return []
+            texto = f"%{str(search_text).strip()}%"
+            query = """
+                SELECT DISTINCT pr.c_codproveed, pr.c_descripcio
+                FROM MA_PRODXPROV px WITH (NOLOCK)
+                INNER JOIN MA_PROVEEDORES pr WITH (NOLOCK)
+                    ON px.c_codprovee = pr.c_codproveed
+                WHERE px.c_codigo LIKE ?
+                ORDER BY pr.c_descripcio
+            """
+            rows = self.fetch_data(query, (texto,)) or []
+            return [(str(r[0]).strip(), r[1]) for r in rows if r and r[0] is not None]
+        except Exception as e:
+            print(f"Error obteniendo proveedores por producto: {str(e)}")
+            return []
+    
     def obtener_alertas_stock_chunk(self, start_row=1, fetch_size=500, deposito='0301'):
         """Obtiene alertas de stock en chunks para depósito específico
         
@@ -1270,7 +1347,7 @@ class DatabaseManager:
             query = """
                 SELECT 
                     c_codarticulo AS codigo,
-                    MAX(p.C_DESCRI) AS descripcion,
+                    MAX(COALESCE(p.cu_descripcion_corta, 'SIN DESCRIPCIÓN')) AS descripcion,
                     CAST(SUM(n_cantidad) AS INT) AS stock,  
                     CASE
                         WHEN SUM(n_cantidad) BETWEEN 15 AND 20 THEN 'Leve'  
@@ -1310,7 +1387,7 @@ class DatabaseManager:
             query = f"""
                 SELECT 
                     c_codarticulo AS codigo,
-                    MAX(p.C_DESCRI) AS descripcion,
+                    MAX(COALESCE(p.cu_descripcion_corta, 'SIN DESCRIPCIÓN')) AS descripcion,
                     CAST(SUM(n_cantidad) AS INT) AS stock,  
                     CASE
                         WHEN SUM(n_cantidad) BETWEEN 15 AND 20 THEN 'Leve'  

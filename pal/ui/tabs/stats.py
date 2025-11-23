@@ -191,7 +191,7 @@ def _stats_go_back(app):
     app.stats_pie_state = state
     app.mostrar_estadisticas()
 
-def _stats_render_pie(app, labels, sizes, title, *, on_pick_codes, legend_rows, colors=None):
+def _stats_render_pie(app, labels, sizes, title, *, on_pick_codes, legend_rows, colors=None, hover_meta=None):
     """Renderiza gráfico de pastel + tabla detalle.
 
     Las etiquetas de cada segmento se muestran siempre; la tabla lateral
@@ -203,11 +203,27 @@ def _stats_render_pie(app, labels, sizes, title, *, on_pick_codes, legend_rows, 
     container = ttk.Frame(app.graph_container)
     container.pack(fill=tk.BOTH, expand=True)
     left = ttk.Frame(container)
-    right = ttk.Frame(container, padding=(8, 0))
+    # Panel derecho con ancho fijo para que el layout no cambie aunque el texto aparezca/desaparezca
+    right = ttk.Frame(container, padding=(8, 0), width=260)
     left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
     right.pack(side=tk.RIGHT, fill=tk.Y)
+    # Evitar que el frame se redimensione según su contenido
+    right.pack_propagate(False)
 
     fig, ax = plt.subplots(figsize=(7, 5), dpi=100)
+
+    # Tooltip para mostrar datos completos al pasar el mouse (solo se usa si hover_meta no es None)
+    tooltip = ax.annotate(
+        "",
+        # Mostrar el tooltip debajo del área del gráfico, centrado
+        xy=(0.5, -0.12),
+        xycoords="axes fraction",
+        ha="center",
+        va="top",
+        fontsize=9,
+        bbox=dict(boxstyle="round", fc="w", ec="#333333", alpha=0.9),
+    )
+    tooltip.set_visible(False)
 
     wedges, texts = ax.pie(
         sizes,
@@ -234,58 +250,31 @@ def _stats_render_pie(app, labels, sizes, title, *, on_pick_codes, legend_rows, 
     canvas.draw()
     canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
-    # Tabla de detalle a la derecha (nombre, %, neto)
-    ttk.Label(right, text="Detalle de representación").pack(anchor='w', pady=(0, 4))
-    cols = ("Elemento", "%", "Neto")
-    tree = ttk.Treeview(right, columns=cols, show='headings', height=12)
-    for c in cols:
-        tree.heading(c, text=c)
-    tree.column("Elemento", width=200, anchor='w')
-    tree.column("%", width=60, anchor='e')
-    tree.column("Neto", width=90, anchor='e')
-
-    # Rellenar filas en el mismo orden que el gráfico (descendente)
-    for idx, (name, pct, val) in enumerate(legend_rows):
-        pct_txt = f"{pct:.1f}%"
-        try:
-            val_disp = int(round(val))
-        except Exception:
-            val_disp = val
-        tree.insert("", tk.END, iid=str(idx), values=(name, pct_txt, val_disp))
-    tree.pack(fill=tk.Y, expand=False)
-
-    # Permitir drill-down desde el detalle (doble clic)
-    code_by_index = {str(i): on_pick_codes[i] for i in range(len(on_pick_codes))}
-
-    def _on_detail_dblclick(event):
-        try:
-            sel = tree.selection()
-            if not sel:
-                return
-            idx = sel[0]
-            code = code_by_index.get(idx)
-            if not code:
-                return
-            state = getattr(app, 'stats_pie_state', {"level": "dept", "dept": None, "group": None})
-            lvl = state.get('level', 'dept')
-            if lvl == 'dept':
-                state['level'] = 'group'
-                state['dept'] = str(code)
-                state['group'] = None
-                state.setdefault('sub', None)
-            elif lvl == 'group':
-                state['level'] = 'sub'
-                state['group'] = str(code)
-                state.setdefault('sub', None)
-            elif lvl == 'sub':
-                state['level'] = 'product'
-                state['sub'] = str(code)
-            app.stats_pie_state = state
-            app.mostrar_estadisticas()
-        except Exception:
-            pass
-
-    tree.bind('<Double-1>', _on_detail_dblclick)
+    # Panel derecho: solo label con información extendida del ítem (sin Treeview de detalle)
+    hover_label_var = None
+    try:
+        if hover_meta:
+            # Destruir label anterior si existe
+            old_label = getattr(app, 'stats_hover_detail_label', None)
+            if old_label is not None:
+                try:
+                    old_label.destroy()
+                except Exception:
+                    pass
+            if not hasattr(app, 'stats_hover_detail_var'):
+                app.stats_hover_detail_var = tk.StringVar(value="")
+            else:
+                app.stats_hover_detail_var.set("")
+            hover_label_var = app.stats_hover_detail_var
+            app.stats_hover_detail_label = ttk.Label(
+                right,
+                textvariable=hover_label_var,
+                wraplength=260,
+                justify='left',
+            )
+            app.stats_hover_detail_label.pack(anchor='w', pady=(6, 0))
+    except Exception:
+        hover_label_var = None
 
     def _on_pick(event):
         try:
@@ -314,10 +303,42 @@ def _stats_render_pie(app, labels, sizes, title, *, on_pick_codes, legend_rows, 
             pass
 
     canvas.mpl_connect('pick_event', _on_pick)
+
+    # Mostrar tooltip al pasar el mouse por encima de un segmento (solo si tenemos meta de productos)
+    def _on_motion(event):
+        try:
+            if not hover_meta or hover_label_var is None:
+                return
+            if event.inaxes is not ax:
+                hover_label_var.set("")
+                return
+            found = False
+            for w, code in zip(wedges, on_pick_codes):
+                if w.contains_point((event.x, event.y)):
+                    info = hover_meta.get(str(code)) or hover_meta.get(code)
+                    if not info:
+                        continue
+                    nombre = str(info.get('full_name', code))
+                    cod = str(info.get('code', code))
+                    ventas = info.get('ventas', 0)
+                    pct = info.get('pct', 0.0)
+                    try:
+                        ventas_txt = f"{int(round(ventas))}"
+                    except Exception:
+                        ventas_txt = str(ventas)
+                    hover_label_var.set(f"{nombre}\nCod: {cod}  •  Ventas: {ventas_txt}  •  {pct:.1f}%")
+                    found = True
+                    break
+            if not found:
+                hover_label_var.set("")
+        except Exception:
+            pass
+
+    canvas.mpl_connect('motion_notify_event', _on_motion)
     return canvas
 
 
-def _stats_render_bar(app, labels, sizes, title, *, on_pick_codes, legend_rows):
+def _stats_render_bar(app, labels, sizes, title, *, on_pick_codes, legend_rows, hover_meta=None):
     """Renderiza gráfico de barras horizontales descendente + tabla detalle.
 
     Las barras se ordenan de mayor a menor valor, mostrando el nombre
@@ -328,9 +349,11 @@ def _stats_render_bar(app, labels, sizes, title, *, on_pick_codes, legend_rows):
     container = ttk.Frame(app.graph_container)
     container.pack(fill=tk.BOTH, expand=True)
     left = ttk.Frame(container)
-    right = ttk.Frame(container, padding=(8, 0))
+    # Panel derecho con ancho fijo para que el layout no cambie aunque el texto aparezca/desaparezca
+    right = ttk.Frame(container, padding=(8, 0), width=260)
     left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
     right.pack(side=tk.RIGHT, fill=tk.Y)
+    right.pack_propagate(False)
 
     # Usar legend_rows ya viene ordenado de forma descendente
     names = [row[0] for row in legend_rows]
@@ -338,6 +361,19 @@ def _stats_render_bar(app, labels, sizes, title, *, on_pick_codes, legend_rows):
     vals = [row[2] for row in legend_rows]
 
     fig, ax = plt.subplots(figsize=(7, 5), dpi=100)
+
+    # Tooltip para productos al pasar el mouse por encima de una barra
+    tooltip = ax.annotate(
+        "",
+        # Mostrar el tooltip debajo del área del gráfico de barras, centrado
+        xy=(0.5, -0.16),
+        xycoords="axes fraction",
+        ha="center",
+        va="top",
+        fontsize=9,
+        bbox=dict(boxstyle="round", fc="w", ec="#333333", alpha=0.9),
+    )
+    tooltip.set_visible(False)
     y_pos = list(range(len(vals)))
 
     bars = ax.barh(y_pos, vals, align='center', color='#4C72B0')
@@ -401,52 +437,85 @@ def _stats_render_bar(app, labels, sizes, title, *, on_pick_codes, legend_rows):
 
     canvas.mpl_connect('pick_event', _on_pick)
 
-    # Tabla de detalle a la derecha (nombre, %, neto)
-    ttk.Label(right, text="Detalle de representación").pack(anchor='w', pady=(0, 4))
-    cols = ("Elemento", "%", "Neto")
-    tree = ttk.Treeview(right, columns=cols, show='headings', height=12)
-    for c in cols:
-        tree.heading(c, text=c)
-    tree.column("Elemento", width=200, anchor='w')
-    tree.column("%", width=60, anchor='e')
-    tree.column("Neto", width=90, anchor='e')
-
-    for idx, (name, pct, val) in enumerate(legend_rows):
-        pct_txt = f"{pct:.1f}%"
+    # Tooltip en movimiento sobre barras
+    def _on_motion(event):
         try:
-            val_disp = int(round(val))
-        except Exception:
-            val_disp = val
-        tree.insert("", tk.END, iid=str(idx), values=(name, pct_txt, val_disp))
-    tree.pack(fill=tk.Y, expand=False)
-
-    # Drill-down desde tabla (doble clic)
-    code_by_index = {str(i): on_pick_codes[i] for i in range(len(on_pick_codes))}
-
-    def _on_detail_dblclick(event):
-        try:
-            sel = tree.selection()
-            if not sel:
+            if not hover_meta or hover_label_var is None:
                 return
-            idx = sel[0]
-            code = code_by_index.get(idx)
-            if not code:
+            if event.inaxes is not ax:
+                hover_label_var.set("")
                 return
-            state = getattr(app, 'stats_pie_state', {"level": "dept", "dept": None, "group": None})
-            if state.get('level') == 'dept':
-                state['level'] = 'group'
-                state['dept'] = str(code)
-                state['group'] = None
-            elif state.get('level') == 'group':
-                state['level'] = 'sub'
-                state['group'] = str(code)
-            app.stats_pie_state = state
-            app.mostrar_estadisticas()
+            found = False
+            for bar, code in zip(bars, on_pick_codes):
+                if bar.contains_point((event.x, event.y)):
+                    info = hover_meta.get(str(code)) or hover_meta.get(code)
+                    if not info:
+                        continue
+                    nombre = str(info.get('full_name', code))
+                    cod = str(info.get('code', code))
+                    ventas = info.get('ventas', 0)
+                    pct = info.get('pct', 0.0)
+                    try:
+                        ventas_txt = f"{int(round(ventas))}"
+                    except Exception:
+                        ventas_txt = str(ventas)
+                    hover_label_var.set(f"{nombre}\nCod: {cod}  •  Ventas: {ventas_txt}  •  {pct:.1f}%")
+                    found = True
+                    break
+            if not found:
+                hover_label_var.set("")
         except Exception:
             pass
 
-    tree.bind('<Double-1>', _on_detail_dblclick)
+    canvas.mpl_connect('motion_notify_event', _on_motion)
+
+    # Panel derecho: solo label con información extendida del ítem (sin Treeview de detalle)
+    hover_label_var = None
+    try:
+        if hover_meta:
+            old_label = getattr(app, 'stats_hover_detail_label', None)
+            if old_label is not None:
+                try:
+                    old_label.destroy()
+                except Exception:
+                    pass
+            if not hasattr(app, 'stats_hover_detail_var'):
+                app.stats_hover_detail_var = tk.StringVar(value="")
+            else:
+                app.stats_hover_detail_var.set("")
+            hover_label_var = app.stats_hover_detail_var
+            app.stats_hover_detail_label = ttk.Label(
+                right,
+                textvariable=hover_label_var,
+                wraplength=260,
+                justify='left',
+            )
+            app.stats_hover_detail_label.pack(anchor='w', pady=(6, 0))
+    except Exception:
+        hover_label_var = None
+
     return canvas
+
+
+def _stats_get_days_suffix(app):
+    """Devuelve sufijo " - X días" según el rango de fechas actual de TRA, o cadena vacía."""
+    try:
+        fecha_ini = getattr(app, 'fecha_inicio_entry', None)
+        fecha_fin = getattr(app, 'fecha_fin_entry', None)
+        if not fecha_ini or not fecha_fin:
+            return ""
+        start = fecha_ini.get_date()
+        end = fecha_fin.get_date()
+        try:
+            dias = (end - start).days + 1
+        except Exception:
+            return ""
+        if dias <= 0:
+            return ""
+        return f" - {dias} días"
+    except Exception:
+        return ""
+
 
 def _stats_compute_and_draw(app):
     # Validar datos TRA cargados
@@ -492,6 +561,80 @@ def _stats_compute_and_draw(app):
     if excluded:
         ventas = [r for r in ventas if len(r) > 2 and str(r[2]) not in excluded]
 
+    # Clonar lista para tener referencia del universo total (antes de filtrar por proveedor)
+    ventas_total_universo = list(ventas)
+
+    # Aplicar filtro de texto de RI (por código o descripción) al universo completo
+    try:
+        search_var = getattr(app, 'tra_search_var', None)
+        texto = search_var.get().strip().lower() if search_var is not None else ''
+        if texto:
+            ventas_filtradas = []
+            for r in ventas_total_universo:
+                try:
+                    cod = str(r[0]).lower() if len(r) > 0 and r[0] is not None else ''
+                    desc = str(r[1]).lower() if len(r) > 1 and r[1] is not None else ''
+                    if texto in cod or texto in desc:
+                        ventas_filtradas.append(r)
+                except Exception:
+                    continue
+            ventas_total_universo = ventas_filtradas
+    except Exception:
+        pass
+
+    # A partir de aquí, ventas_total_universo representa el universo con filtros globales (excepto proveedor)
+    ventas = list(ventas_total_universo)
+
+    # Aplicar filtro por proveedor activo en RI (TRA) y calcular participación
+    try:
+        proveedor_cod = getattr(app, 'tra_proveedor_codigo', None)
+        proveedor_desc = getattr(app, 'tra_proveedor_descripcion', None)
+        provider_share_txt = ""
+        if proveedor_cod and ventas_total_universo:
+            codigos_prov = getattr(app, '_get_codigos_por_proveedor_cached', lambda _c: None)(proveedor_cod)
+            if codigos_prov:
+                codigos_prov = set(str(c) for c in codigos_prov)
+                ventas_prov = [r for r in ventas_total_universo if len(r) > 0 and str(r[0]) in codigos_prov]
+            else:
+                ventas_prov = []
+
+            # Calcular totales de ventas para universo y proveedor
+            def _safe_neto(rec):
+                try:
+                    return float(rec[5] or 0) if len(rec) > 5 else 0.0
+                except Exception:
+                    return 0.0
+
+            total_universo = sum(_safe_neto(r) for r in ventas_total_universo)
+            total_prov = sum(_safe_neto(r) for r in ventas_prov)
+
+            if total_universo > 0 and ventas_prov:
+                pct = (total_prov / total_universo) * 100.0
+                prov_label = proveedor_desc or proveedor_cod
+                provider_share_txt = f"Proveedor {prov_label}: {pct:.1f}% de la rotación (filtros actuales)"
+                ventas = ventas_prov  # para el gráfico sólo mostramos el proveedor
+            else:
+                ventas = []
+        # Actualizar etiqueta en la barra superior
+        try:
+            if hasattr(app, 'stats_provider_share_var'):
+                app.stats_provider_share_var.set(provider_share_txt)
+        except Exception:
+            pass
+    except Exception:
+        # En caso de error, limpiar etiqueta y seguir sin filtro de proveedor
+        try:
+            if hasattr(app, 'stats_provider_share_var'):
+                app.stats_provider_share_var.set("")
+        except Exception:
+            pass
+
+    # Si después de aplicar filtros no quedan datos, mostrar mensaje y salir
+    if not ventas:
+        _stats_clear_container(app)
+        ttk.Label(app.graph_container, text="Sin datos para graficar con los filtros actuales de RI.").pack(pady=20)
+        return
+
     # Determinar nivel y agregar datos
     # Tipo de gráfico seleccionado por el usuario (pie o barras)
     chart_mode = getattr(app, 'stats_chart_type_var', None)
@@ -505,15 +648,29 @@ def _stats_compute_and_draw(app):
 
     lvl = state.get('level', 'dept')
 
+    # Sufijo con criterio de tiempo (número de días del rango actual en TRA)
+    days_suffix = _stats_get_days_suffix(app)
+
+    # Sufijo con proveedor activo (si hay filtro por proveedor en RI/TRA)
+    provider_suffix = ""
+    try:
+        prov_cod = getattr(app, 'tra_proveedor_codigo', None)
+        prov_desc = getattr(app, 'tra_proveedor_descripcion', None)
+        if prov_cod:
+            prov_text = prov_desc or prov_cod
+            provider_suffix = f" — Proveedor: {prov_text}"
+    except Exception:
+        provider_suffix = ""
+
     if lvl == 'dept':
         # Agregar por departamento en todos los datos (sin filtrar por dept)
         data_map = _stats_aggregate(ventas, 'dept')
         if not data_map:
             _stats_clear_container(app)
-            ttk.Label(app.graph_container, text="No hay ventas por departamento para mostrar").pack(pady=10)
+            ttk.Label(app.graph_container, text=f"No hay ventas por departamento para mostrar{provider_suffix}").pack(pady=10)
             return
         labels, sizes, meta, legend = _stats_format_labels(data_map, inv_maps=inv, level='dept')
-        title = "Representación por Departamento (RI)"
+        title = f"Representación por Departamento (RI){days_suffix}{provider_suffix}"
         _stats_update_breadcrumb(app)
         if chart_type == 'bar':
             _stats_render_bar(app, labels, sizes, title, on_pick_codes=meta, legend_rows=legend)
@@ -527,11 +684,11 @@ def _stats_compute_and_draw(app):
         if not data_map:
             _stats_clear_container(app)
             name = inv['dept'].get(str(dept), str(dept)) if dept else 'N/A'
-            ttk.Label(app.graph_container, text=f"Sin datos de grupos para {name}").pack(pady=10)
+            ttk.Label(app.graph_container, text=f"Sin datos de grupos para {name}{provider_suffix}").pack(pady=10)
             return
         labels, sizes, meta, legend = _stats_format_labels(data_map, inv_maps=inv, level='group', dept=dept)
         name = inv['dept'].get(str(dept), str(dept)) if dept else ''
-        title = f"{name} — Representación por Grupo"
+        title = f"{name} — Representación por Grupo{days_suffix}{provider_suffix}"
         _stats_update_breadcrumb(app)
         if chart_type == 'bar':
             _stats_render_bar(app, labels, sizes, title, on_pick_codes=meta, legend_rows=legend)
@@ -546,12 +703,12 @@ def _stats_compute_and_draw(app):
             _stats_clear_container(app)
             dname = inv['dept'].get(str(dept), str(dept)) if dept else 'N/A'
             gname = inv['group'].get((str(dept), str(group)), str(group)) if group else 'N/A'
-            ttk.Label(app.graph_container, text=f"Sin datos de subgrupos para {dname} / {gname}").pack(pady=10)
+            ttk.Label(app.graph_container, text=f"Sin datos de subgrupos para {dname} / {gname}{provider_suffix}").pack(pady=10)
             return
         labels, sizes, meta, legend = _stats_format_labels(data_map, inv_maps=inv, level='sub', dept=dept, group=group)
         dname = inv['dept'].get(str(dept), str(dept)) if dept else ''
         gname = inv['group'].get((str(dept), str(group)), str(group)) if group else ''
-        title = f"{dname} → {gname} — Representación por Subgrupo"
+        title = f"{dname} → {gname} — Representación por Subgrupo{days_suffix}{provider_suffix}"
         _stats_update_breadcrumb(app)
         if chart_type == 'bar':
             _stats_render_bar(app, labels, sizes, title, on_pick_codes=meta, legend_rows=legend)
@@ -602,7 +759,7 @@ def _stats_compute_and_draw(app):
             dname = inv['dept'].get(str(dept), str(dept)) if dept else 'N/A'
             gname = inv['group'].get((str(dept), str(group)), str(group)) if group else 'N/A'
             sname = inv['sub'].get((str(dept), str(group), str(sub)), str(sub)) if sub else 'N/A'
-            ttk.Label(app.graph_container, text=f"Sin datos de productos para {dname} / {gname} / {sname}").pack(pady=10)
+            ttk.Label(app.graph_container, text=f"Sin datos de productos para {dname} / {gname} / {sname}{provider_suffix}").pack(pady=10)
             return
 
         # Ordenar productos por neto y limitar a top 25 para estética
@@ -614,27 +771,35 @@ def _stats_compute_and_draw(app):
         sizes = []
         meta = []
         legend = []
+        hover_meta = {}
         for code, val in items:
             full_name = product_names.get(code, code)
-            # Limitar nombre visible a 25 caracteres para mantener estética
+            # Limitar nombre visible a 15 caracteres para mantener estética en la etiqueta
             name = str(full_name)
-            if len(name) > 25:
-                name = name[:22] + "..."
+            max_len = 15
+            if len(name) > max_len:
+                name = name[:max_len]
             pct = (val / total) * 100.0
             labels.append(f"{name}\n{pct:.1f}%")
             sizes.append(val)
             meta.append(code)
             legend.append((name, pct, float(val)))
+            hover_meta[str(code)] = {
+                'full_name': str(full_name),
+                'code': str(code),
+                'ventas': float(val),
+                'pct': float(pct),
+            }
 
         dname = inv['dept'].get(str(dept), str(dept)) if dept else ''
         gname = inv['group'].get((str(dept), str(group)), str(group)) if group else ''
         sname = inv['sub'].get((str(dept), str(group), str(sub)), str(sub)) if sub else ''
-        title = f"{dname} → {gname} → {sname} — Top {len(items)} productos"
+        title = f"{dname} → {gname} → {sname} — Top {len(items)} productos{days_suffix}{provider_suffix}"
         _stats_update_breadcrumb(app)
         if chart_type == 'bar':
-            _stats_render_bar(app, labels, sizes, title, on_pick_codes=meta, legend_rows=legend)
+            _stats_render_bar(app, labels, sizes, title, on_pick_codes=meta, legend_rows=legend, hover_meta=hover_meta)
         else:
-            _stats_render_pie(app, labels, sizes, title, on_pick_codes=meta, legend_rows=legend)
+            _stats_render_pie(app, labels, sizes, title, on_pick_codes=meta, legend_rows=legend, hover_meta=hover_meta)
         return
 
 def setup_stats_tab(app):
@@ -655,6 +820,15 @@ def setup_stats_tab(app):
 
     app.stats_breadcrumb_var = tk.StringVar(value="Departamentos")
     ttk.Label(top_bar, textvariable=app.stats_breadcrumb_var).pack(side=tk.LEFT, padx=10)
+
+    # Indicador de participación del proveedor en RI (se muestra solo si hay filtro activo)
+    app.stats_provider_share_var = tk.StringVar(value="")
+    app.stats_provider_share_label = ttk.Label(
+        top_bar,
+        textvariable=app.stats_provider_share_var,
+        foreground="#555555",
+    )
+    app.stats_provider_share_label.pack(side=tk.LEFT, padx=10)
 
     # Selector de tipo de gráfico
     app.stats_chart_type_var = tk.StringVar(value="Pie (porcentaje)")

@@ -139,8 +139,7 @@ def export_stock_csv(filename: str, datos_exportar: List, seleccionadas: List[st
 
 
 def export_tra_csv(filename: str, datos_tra: List, progress_cb: Optional[Callable[[int, int], None]] = None) -> int:
-    """
-    Exporta datos TRA a un archivo CSV
+    """Exporta datos de RI (Rotación de Inventario) a un archivo CSV.
     
     Args:
         filename: Nombre del archivo CSV a crear
@@ -153,13 +152,13 @@ def export_tra_csv(filename: str, datos_tra: List, progress_cb: Optional[Callabl
     from datetime import datetime
     try:
         total_registros = len(datos_tra)
-        logger.info(f"Iniciando exportación TRA de {total_registros} registros a {filename}")
+        logger.info(f"Iniciando exportación RI CSV de {total_registros} registros a {filename}")
         
         with open(filename, 'w', newline='', encoding='utf-8-sig') as csvfile:
             writer = csv.writer(csvfile)
             
-            # ENCABEZADO DESCRIPTIVO DEL REPORTE TRA
-            writer.writerow([f'REPORTE DE TIEMPO DE ROTACIÓN Y ABASTECIMIENTO (TRA) - {datetime.now().strftime("%d/%m/%Y %H:%M:%S")}'])
+            # ENCABEZADO DESCRIPTIVO DEL REPORTE RI (Rotación de Inventario)
+            writer.writerow([f'REPORTE DE ROTACIÓN DE INVENTARIO (RI) - {datetime.now().strftime("%d/%m/%Y %H:%M:%S")}'])
             writer.writerow([''])
             writer.writerow([f'Total de productos analizados: {total_registros}'])
             writer.writerow([''])
@@ -214,17 +213,17 @@ def export_tra_csv(filename: str, datos_tra: List, progress_cb: Optional[Callabl
                     logger.error(f"Error procesando fila TRA {i}: {fila} - {e}")
                     continue
             
-            # PIE DEL REPORTE TRA
+            # PIE DEL REPORTE RI
             writer.writerow([''])
-            writer.writerow(['===== FIN DEL REPORTE TRA ====='])
+            writer.writerow(['===== FIN DEL REPORTE RI (Rotación de Inventario) ====='])
             writer.writerow([f'Archivo generado por: Sistema PAL (Proyecto Atención en Línea)'])
             writer.writerow([f'Fecha de generación: {datetime.now().strftime("%d/%m/%Y %H:%M:%S")}'])
         
-        logger.info(f"Exportación TRA completada: {total_registros} registros en {filename}")
+        logger.info(f"Exportación RI CSV completada: {total_registros} registros en {filename}")
         return total_registros
         
     except Exception as e:
-        logger.error(f"Error en exportación TRA CSV: {e}")
+        logger.error(f"Error en exportación RI CSV: {e}")
         raise
 
 
@@ -718,9 +717,9 @@ def export_stock_excel(filename: str, datos_exportar: List, seleccionadas: List[
 
 
 def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_cb: Optional[Callable[[int, int], None]] = None, 
-                     permissions_manager=None, current_user_id: int = None) -> int:
-    """
-    Exporta datos TRA a un archivo Excel con formato profesional y múltiples hojas de análisis.
+                     permissions_manager=None, current_user_id: int = None,
+                     provider_label: Optional[str] = None) -> int:
+    """Exporta datos de RI (Rotación de Inventario) a un archivo Excel con formato profesional y múltiples hojas de análisis.
     
     Args:
         filename: Nombre del archivo Excel a crear
@@ -740,7 +739,7 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
     from datetime import datetime
     try:
         total_registros = len(datos_tra)
-        logger.info(f"Iniciando exportación TRA Excel de {total_registros} registros a {filename}")
+        logger.info(f"Iniciando exportación RI Excel de {total_registros} registros a {filename}")
 
         # Calcular total de ventas una sola vez usando helper robusto
         try:
@@ -776,12 +775,14 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
             except Exception as e:
                 logger.warning(f"No se pudieron cargar las descripciones de jerarquía: {e}")
         
-        # === HOJA 1: DATOS PRINCIPALES TRA ===
-        ws_main = wb.create_sheet("Datos TRA")
+        # === HOJA 1: DATOS PRINCIPALES RI ===
+        ws_main = wb.create_sheet("Datos RI")
         
         # Encabezado del reporte
-        ws_main['A1'] = f'REPORTE TIEMPO DE ROTACIÓN Y ABASTECIMIENTO (TRA)'
+        ws_main['A1'] = f'REPORTE DE ROTACIÓN DE INVENTARIO (RI)'
         ws_main['A2'] = f'Generado el {datetime.now().strftime("%d/%m/%Y a las %H:%M:%S")}'
+        if provider_label:
+            ws_main['A3'] = f'Proveedor: {provider_label}'
         ws_main['A4'] = f'Total de productos analizados: {total_registros}'
         
         # Formato del encabezado
@@ -1372,7 +1373,7 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
         
         # Guardar archivo
         wb.save(filename)
-        logger.info(f"Exportación TRA Excel completada: {total_registros} registros en {filename}")
+        logger.info(f"Exportación RI Excel completada: {total_registros} registros en {filename}")
         return total_registros
         
     except Exception as e:
@@ -1381,7 +1382,8 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
 
 
 def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress_cb: Optional[Callable[[int, int], None]] = None,
-                      permissions_manager=None, current_user_id: int = None) -> int:
+                      permissions_manager=None, current_user_id: int = None,
+                      provider_label: Optional[str] = None) -> int:
     """
     Exporta datos MBRP a un archivo Excel con formato profesional y análisis de rentabilidad.
     
@@ -1415,6 +1417,8 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
         # Encabezado del reporte
         ws_main['A1'] = f'REPORTE MERCANCÍA DE BAJA ROTACIÓN (MBRP)'
         ws_main['A2'] = f'Generado el {datetime.now().strftime("%d/%m/%Y a las %H:%M:%S")}'
+        if provider_label:
+            ws_main['A3'] = f'Proveedor: {provider_label}'
         ws_main['A4'] = f'Total de productos analizados: {total_registros}'
         
         # Verificar permiso para ver costo y utilidad

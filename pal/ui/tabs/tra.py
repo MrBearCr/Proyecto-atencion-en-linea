@@ -123,6 +123,15 @@ def setup_tra_tab(app):
         command=lambda: getattr(app, 'abrir_selector_proveedor_tra', lambda: None)(),
     ).pack(side=tk.LEFT, padx=5)
 
+    # Etiqueta para mostrar proveedor seleccionado (feedback visual)
+    app.tra_proveedor_label_var = tk.StringVar(value="")
+    app.tra_proveedor_label = ttk.Label(
+        filter_frame,
+        textvariable=app.tra_proveedor_label_var,
+        foreground="#555555",
+    )
+    # No la mostramos hasta que haya proveedor seleccionado (para no ver un recuadro vacío)
+
     # Buscador de texto
     search_frame = ttk.Frame(app.tra_tab_frame)
     search_frame.pack(fill=tk.X, pady=5)
@@ -213,7 +222,7 @@ def setup_tra_tab(app):
     tree_frame = ttk.Frame(app.tra_tab_frame)
     tree_frame.pack(fill=tk.BOTH, expand=True)
 
-    columns = ("Código", "Descripción", "Rotación", "Neto", "Representación %", "Stock Actual", "Stock Ideal", "Días de Stock")
+    columns = ("Código", "Descripción", "Rotación", "Ventas", "Representación %", "Stock Actual", "Stock Ideal", "Días de Stock")
     app.tra_tree = ttk.Treeview(tree_frame, columns=columns, show='headings', height=10)
     
     # Configurar tamaño de fuente y altura de filas más grandes
@@ -231,7 +240,7 @@ def setup_tra_tab(app):
         "Código": {"width": 80, "anchor": "center"},
         "Descripción": {"width": 250, "anchor": "w"},
         "Rotación": {"width": 80, "anchor": "center"},
-        "Neto": {"width": 100, "anchor": "e"},
+        "Ventas": {"width": 100, "anchor": "e"},
         "Representación %": {"width": 100, "anchor": "center"},
         "Stock Actual": {"width": 80, "anchor": "center"},
         "Stock Ideal": {"width": 80, "anchor": "center"},

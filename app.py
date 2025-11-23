@@ -1423,11 +1423,21 @@ class DatabaseApp:
             texto = self.tra_search_var.get() if hasattr(self, 'tra_search_var') else ''
             favoritos = self._get_favoritos_local()
             
+            # Partir de los mismos datos base que la vista (incluyendo filtro por proveedor)
+            datos_base = list(self.cached_ventas_tra)
+            proveedor_cod = getattr(self, 'tra_proveedor_codigo', None)
+            if proveedor_cod:
+                codigos_prov = self._get_codigos_por_proveedor_cached(proveedor_cod)
+                if codigos_prov:
+                    datos_base = [r for r in datos_base if str(r[0]) in codigos_prov]
+                else:
+                    datos_base = []
+            
             # Usar las mismas funciones de filtrado que la interfaz
             from pal.services.tra import filter_ventas_tra
             
             datos_exportar = filter_ventas_tra(
-                ventas=self.cached_ventas_tra,
+                ventas=datos_base,
                 dept_code=dept_cod,
                 group_code=group_cod,
                 sub_code=sub_cod,
@@ -1479,6 +1489,13 @@ class DatabaseApp:
                     # Pasar permisos y usuario para verificar ver_costo_utilidad
                     permissions_mgr = getattr(self, 'permissions', None)
                     user_id = self.current_user.get('id') if self.current_user else None
+
+                    # Etiqueta de proveedor (si hay filtro activo)
+                    prov_cod = getattr(self, 'tra_proveedor_codigo', None)
+                    prov_desc = getattr(self, 'tra_proveedor_descripcion', None)
+                    prov_label = None
+                    if prov_cod:
+                        prov_label = prov_desc or prov_cod
                     
                     total_registros = export_tra_excel(
                         filename=filename,
@@ -1486,7 +1503,8 @@ class DatabaseApp:
                         db_manager=self.db_manager,
                         progress_cb=progress_cb,
                         permissions_manager=permissions_mgr,
-                        current_user_id=user_id
+                        current_user_id=user_id,
+                        provider_label=prov_label,
                     )
                     
                     # Notificar éxito en el hilo principal
@@ -1564,8 +1582,51 @@ class DatabaseApp:
                 )
                 return
             
-            # Preparar datos filtrados para exportar
-            datos_exportar = getattr(self, 'mbrp_ventas_datos_filtrados', self.cached_ventas_mbrp) or self.cached_ventas_mbrp
+            # Preparar datos filtrados para exportar (replicando filtros activos de la vista MBRP)
+            if not hasattr(self, 'cached_ventas_mbrp') or not self.cached_ventas_mbrp:
+                messagebox.showwarning("Sin datos", "No hay datos MBRP cargados para exportar")
+                return
+            
+            # 1) Partir de todos los datos en caché
+            datos_base = list(self.cached_ventas_mbrp)
+            
+            # 2) Exclusión global por departamento (igual que en aplicar_filtro_mbrp)
+            excluded_set = getattr(self, '_excluded_depts_set', set())
+            if excluded_set:
+                datos_base = [r for r in datos_base if len(r) > 2 and str(r[2]) not in excluded_set]
+            
+            # 3) Filtro por proveedor (si está seleccionado en MBRP)
+            proveedor_cod = getattr(self, 'mbrp_proveedor_codigo', None)
+            if proveedor_cod and datos_base:
+                codigos_prov = self._get_codigos_por_proveedor_cached(proveedor_cod)
+                if codigos_prov:
+                    datos_base = [r for r in datos_base if str(r[0]) in codigos_prov]
+                else:
+                    datos_base = []
+            
+            # 4) Filtros jerárquicos y de búsqueda (usando el mismo helper que TRA)
+            dept_cod = self.mbrp_dept_dict.get(self.mbrp_dept_var.get()) if hasattr(self, 'mbrp_dept_var') else None
+            group_cod = None
+            sub_cod = None
+            if dept_cod and hasattr(self, 'mbrp_group_var'):
+                group_desc = self.mbrp_group_var.get()
+                group_cod = self.mbrp_group_dict.get(dept_cod, {}).get(group_desc)
+                if group_cod and hasattr(self, 'mbrp_sub_var'):
+                    sub_desc = self.mbrp_sub_var.get()
+                    key = f"{dept_cod}|{group_cod}"
+                    sub_cod = self.mbrp_sub_dict.get(key, {}).get(sub_desc)
+            texto = self.mbrp_search_var.get() if hasattr(self, 'mbrp_search_var') else ''
+            
+            from pal.services.tra import filter_ventas_tra
+            datos_exportar = filter_ventas_tra(
+                ventas=datos_base,
+                dept_code=dept_cod,
+                group_code=group_cod,
+                sub_code=sub_cod,
+                search_text=texto,
+                filter_rotacion='TODAS',
+                favoritos=self._get_favoritos_local(),
+            )
             
             if not datos_exportar:
                 messagebox.showwarning("Sin datos", "No hay registros MBRP para exportar")
@@ -1595,6 +1656,13 @@ class DatabaseApp:
                     # Pasar permisos y usuario para verificar ver_costo_utilidad
                     permissions_mgr = getattr(self, 'permissions', None)
                     user_id = self.current_user.get('id') if self.current_user else None
+
+                    # Etiqueta de proveedor (si hay filtro activo en MBRP)
+                    prov_cod = getattr(self, 'mbrp_proveedor_codigo', None)
+                    prov_desc = getattr(self, 'mbrp_proveedor_descripcion', None)
+                    prov_label = None
+                    if prov_cod:
+                        prov_label = prov_desc or prov_cod
                     
                     total_registros = export_mbrp_excel(
                         filename=filename,
@@ -1602,7 +1670,8 @@ class DatabaseApp:
                         db_manager=self.db_manager,
                         progress_cb=progress_cb,
                         permissions_manager=permissions_mgr,
-                        current_user_id=user_id
+                        current_user_id=user_id,
+                        provider_label=prov_label,
                     )
                     
                     # Notificar éxito en el hilo principal
@@ -3681,6 +3750,15 @@ class DatabaseApp:
             tree_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
             columns = ("Código", "Descripción")
             tree = ttk.Treeview(tree_frame, columns=columns, show='headings', height=12)
+
+            # Estilo de selección similar a TRA/MBRP (azul oscuro)
+            style = ttk.Style(tree)
+            style.configure('Proveedor.Treeview', rowheight=22)
+            style.map('Proveedor.Treeview',
+                      background=[('selected', '#0D47A1')],
+                      foreground=[('selected', '#FFFFFF')])
+            tree.configure(style='Proveedor.Treeview')
+
             vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
             tree.configure(yscrollcommand=vsb.set)
             tree.grid(row=0, column=0, sticky="nsew")
@@ -3727,6 +3805,19 @@ class DatabaseApp:
 
             seleccionado = {"codigo": None, "descripcion": None}
 
+            # Comportamiento de selección visual mejorado (similar a TRA/MBRP)
+            def on_tree_click(event=None):
+                try:
+                    region = tree.identify_region(event.x, event.y)
+                    if region in ('cell', 'tree'):
+                        item = tree.identify_row(event.y)
+                        if item:
+                            tree.selection_set(item)
+                            tree.focus(item)
+                            tree.see(item)
+                except Exception:
+                    pass
+
             def on_double_click(event=None):
                 item = tree.focus()
                 if not item:
@@ -3738,6 +3829,7 @@ class DatabaseApp:
                 seleccionado["descripcion"] = str(values[1]).strip()
                 ventana.destroy()
 
+            tree.bind('<Button-1>', on_tree_click)
             tree.bind("<Double-1>", on_double_click)
 
             # Botones inferiores
@@ -3776,14 +3868,47 @@ class DatabaseApp:
 
             # Aplicar resultado
             cod_sel = seleccionado["codigo"]
+            desc_sel = seleccionado["descripcion"]
             if contexto.upper() == "TRA":
                 self.tra_proveedor_codigo = cod_sel
                 # No es obligatorio mostrar descripción en UI, pero se guarda por si se necesita
-                self.tra_proveedor_descripcion = seleccionado["descripcion"]
+                self.tra_proveedor_descripcion = desc_sel
+                # Actualizar etiqueta de proveedor seleccionado en pestaña TRA
+                try:
+                    label = getattr(self, 'tra_proveedor_label', None)
+                    if hasattr(self, 'tra_proveedor_label_var') and label is not None:
+                        if cod_sel:
+                            texto = desc_sel or cod_sel
+                            self.tra_proveedor_label_var.set(texto)
+                            # Mostrar la etiqueta solo cuando hay proveedor
+                            if not label.winfo_manager():
+                                label.pack(side=tk.LEFT, padx=(5, 0))
+                        else:
+                            # Filtro limpiado: ocultar etiqueta
+                            self.tra_proveedor_label_var.set("")
+                            if label.winfo_manager():
+                                label.pack_forget()
+                except Exception:
+                    pass
                 self.aplicar_filtro_tra()
             elif contexto.upper() == "MBRP":
                 self.mbrp_proveedor_codigo = cod_sel
-                self.mbrp_proveedor_descripcion = seleccionado["descripcion"]
+                self.mbrp_proveedor_descripcion = desc_sel
+                # Actualizar etiqueta de proveedor seleccionado en pestaña MBRP
+                try:
+                    label = getattr(self, 'mbrp_proveedor_label', None)
+                    if hasattr(self, 'mbrp_proveedor_label_var') and label is not None:
+                        if cod_sel:
+                            texto = desc_sel or cod_sel
+                            self.mbrp_proveedor_label_var.set(texto)
+                            if not label.winfo_manager():
+                                label.pack(side=tk.LEFT, padx=(5, 0))
+                        else:
+                            self.mbrp_proveedor_label_var.set("")
+                            if label.winfo_manager():
+                                label.pack_forget()
+                except Exception:
+                    pass
                 self.aplicar_filtro_mbrp()
 
         except Exception as e:

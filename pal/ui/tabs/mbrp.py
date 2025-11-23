@@ -121,6 +121,15 @@ def setup_mbrp_tab(app):
         command=lambda: getattr(app, 'abrir_selector_proveedor_mbrp', lambda: None)(),
     ).pack(side=tk.LEFT, padx=5)
 
+    # Etiqueta para mostrar proveedor seleccionado (feedback visual)
+    app.mbrp_proveedor_label_var = tk.StringVar(value="")
+    app.mbrp_proveedor_label = ttk.Label(
+        filter_frame,
+        textvariable=app.mbrp_proveedor_label_var,
+        foreground="#555555",
+    )
+    # No la mostramos hasta que haya proveedor seleccionado (para no ver un recuadro vacío)
+
     # Buscador
     search_frame = ttk.Frame(app.mbrp_tab_frame)
     search_frame.pack(fill=tk.X, pady=5)
@@ -147,7 +156,7 @@ def setup_mbrp_tab(app):
     tree_frame = ttk.Frame(app.mbrp_tab_frame)
     tree_frame.pack(fill=tk.BOTH, expand=True)
 
-    columns = ("Código", "Descripción", "Rotación", "Neto", "Stock Actual", "Días de Stock", "IM %", "Última Venta")
+    columns = ("Código", "Descripción", "Rotación", "Ventas", "Stock Actual", "Días de Stock", "IM %", "Última Venta")
     app.mbrp_tree = ttk.Treeview(tree_frame, columns=columns, show='headings', height=10)
     
     # Configurar tamaño de fuente y altura de filas más grandes
@@ -163,7 +172,7 @@ def setup_mbrp_tab(app):
         "Código": {"width": 80, "anchor": "center"},
         "Descripción": {"width": 250, "anchor": "w"},
         "Rotación": {"width": 80, "anchor": "center"},
-        "Neto": {"width": 100, "anchor": "e"},
+        "Ventas": {"width": 100, "anchor": "e"},
         "Stock Actual": {"width": 90, "anchor": "center"},
         "Días de Stock": {"width": 90, "anchor": "center"},
         "IM %": {"width": 80, "anchor": "center"},

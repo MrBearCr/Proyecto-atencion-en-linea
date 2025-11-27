@@ -2698,6 +2698,10 @@ class DatabaseApp:
                     self.cached_ventas_mbrp_effective = []
             except Exception:
                 self.cached_ventas_mbrp_effective = list(getattr(self, 'cached_ventas_mbrp', []) or [])
+            
+            # Precargar mapeo producto->proveedor para estadísticas coherentes
+            self._preload_productos_proveedores()
+            
         except Exception:
             pass
         
@@ -3695,6 +3699,92 @@ class DatabaseApp:
         except Exception as e:
             self.log(f"Error obteniendo códigos por proveedor (cache): {e}", "ERROR")
             return set()
+    
+    def _preload_productos_proveedores(self):
+        """Precarga mapeo productos->proveedores para TODOS los productos en cached_ventas_tra.
+        
+        Esto garantiza que las estadísticas por proveedor usen exactamente los mismos datos
+        que las estadísticas por departamento (mismo universo de datos precargados en RI).
+        """
+        try:
+            # Solo ejecutar si hay datos TRA cargados
+            if not hasattr(self, 'cached_ventas_tra') or not self.cached_ventas_tra:
+                return
+            
+            # Extraer todos los códigos de productos del universo RI
+            codigos_universo = set()
+            for r in self.cached_ventas_tra:
+                if r and len(r) > 0:
+                    try:
+                        codigo = str(r[0]).strip()
+                        if codigo:
+                            codigos_universo.add(codigo)
+                    except Exception:
+                        continue
+            
+            if not codigos_universo:
+                self.log("No hay códigos de productos para precargar proveedores", "DEBUG")
+                return
+            
+            self.log(f"Precargando proveedores para {len(codigos_universo)} productos del universo RI...", "INFO")
+            
+            # Consultar MA_PRODXPROV en batches para obtener relaciones producto-proveedor
+            cached_proveedor_por_codigo = {}
+            codigos_list = sorted(codigos_universo)
+            
+            try:
+                BATCH_SIZE = 1800  # Margen para límite de parámetros SQL Server (~2100)
+                total_relaciones = 0
+                
+                for i in range(0, len(codigos_list), BATCH_SIZE):
+                    batch = codigos_list[i:i + BATCH_SIZE]
+                    placeholders = ','.join('?' * len(batch))
+                    query = f"""
+                        SELECT px.c_codigo,
+                               px.c_codprovee,
+                               COALESCE(pr.c_descripcio, px.c_codprovee) AS descrip
+                        FROM MA_PRODXPROV px WITH (NOLOCK)
+                        LEFT JOIN MA_PROVEEDORES pr WITH (NOLOCK)
+                            ON px.c_codprovee = pr.c_codproveed
+                        WHERE px.c_codigo IN ({placeholders})
+                    """
+                    rows = self.db_manager.fetch_data(query, batch) or []
+                    
+                    for cod_prod, cod_prov, desc_prov in rows:
+                        try:
+                            cod_prod_str = str(cod_prod).strip()
+                            cod_prov_str = str(cod_prov).strip()
+                            desc_prov_str = str(desc_prov) if desc_prov else cod_prov_str
+                        except Exception:
+                            continue
+                        
+                        if not cod_prod_str or not cod_prov_str:
+                            continue
+                        
+                        # Guardar la PRIMERA relación encontrada (algunos productos tienen múltiples proveedores)
+                        if cod_prod_str not in cached_proveedor_por_codigo:
+                            cached_proveedor_por_codigo[cod_prod_str] = (cod_prov_str, desc_prov_str)
+                            total_relaciones += 1
+                
+                # Guardar en atributo de instancia para uso en estadísticas
+                self.cached_proveedor_por_codigo = cached_proveedor_por_codigo
+                
+                productos_sin_prov = len(codigos_universo) - len(cached_proveedor_por_codigo)
+                self.log(
+                    f"✅ Proveedores precargados: {total_relaciones} relaciones producto-proveedor | "
+                    f"{productos_sin_prov} productos sin proveedor asignado",
+                    "SUCCESS"
+                )
+                
+            except Exception as e:
+                self.log(f"Error consultando MA_PRODXPROV para precarga: {e}", "ERROR")
+                # En caso de error, crear cache vacío para no bloquear estadísticas
+                self.cached_proveedor_por_codigo = {}
+                
+        except Exception as e:
+            self.log(f"Error precargando productos-proveedores: {e}", "ERROR")
+            # Asegurar que exista el atributo aunque sea vacío
+            self.cached_proveedor_por_codigo = {}
 
     def abrir_selector_proveedor_tra(self):
         """Abre un selector de proveedor para filtrar TRA."""

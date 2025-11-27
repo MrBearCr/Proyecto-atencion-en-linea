@@ -756,6 +756,8 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
         dept_desc_map = {}
         group_desc_map = {}
         sub_desc_map = {}
+        # Mapa de impuestos por producto (código -> n_impuesto1)
+        impuestos_map = {}
         
         if db_manager and db_manager.ensure_connection():
             try:
@@ -774,6 +776,34 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
                 logger.info(f"Mapeos cargados - Departamentos: {len(dept_desc_map)}, Grupos: {len(group_desc_map)}, Subgrupos: {len(sub_desc_map)}")
             except Exception as e:
                 logger.warning(f"No se pudieron cargar las descripciones de jerarquía: {e}")
+            
+            # Cargar impuestos (IVA) por producto desde MA_PRODUCTOS.n_impuesto1
+            try:
+                # Construir lista única de códigos presentes en datos_tra
+                codigos_productos = sorted({
+                    str(f[0]).strip() for f in datos_tra
+                    if f and len(f) > 0 and f[0] is not None
+                })
+                if codigos_productos:
+                    # Evitar límite de 2100 parámetros de SQL Server
+                    BATCH_SIZE = 1800
+                    for i in range(0, len(codigos_productos), BATCH_SIZE):
+                        batch = codigos_productos[i:i + BATCH_SIZE]
+                        placeholders = ','.join('?' * len(batch))
+                        query_imp = f"""
+                            SELECT C_CODIGO, COALESCE(n_impuesto1, 0) AS impuesto1
+                            FROM MA_PRODUCTOS WITH (NOLOCK)
+                            WHERE C_CODIGO IN ({placeholders})
+                        """
+                        rows_imp = db_manager.fetch_data(query_imp, batch) or []
+                        for cod, imp in rows_imp:
+                            try:
+                                impuestos_map[str(cod).strip()] = float(imp or 0)
+                            except Exception:
+                                continue
+                    logger.info(f"[EXPORT TRA] Impuestos cargados para {len(impuestos_map)} productos")
+            except Exception as e:
+                logger.warning(f"No se pudieron cargar los impuestos (IVA): {e}")
         
         # === HOJA 1: DATOS PRINCIPALES RI ===
         ws_main = wb.create_sheet("Datos RI")
@@ -801,13 +831,15 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
                 logger.warning(f"Error verificando permiso ver_costo_utilidad: {e}")
         
         # Ajustar merge según si incluye columnas de costo/utilidad
-        merge_range = 'A1:K1' if mostrar_costo_utilidad else 'A1:H1'
+        # Base: 8 columnas; con costo/utilidad/IVA: 12 columnas (A-L)
+        merge_range = 'A1:L1' if mostrar_costo_utilidad else 'A1:H1'
         ws_main.merge_cells(merge_range)
         
         # Headers de la tabla (fila 7)
         headers = ['Código', 'Descripción', 'Departamento', 'Grupo', 'Subgrupo', 'Ventas Netas', 'Rotación', 'Representación %']
         if mostrar_costo_utilidad:
-            headers.extend(['Precio', 'Costo', 'Utilidad %'])
+            # Mostrar precio con IVA incluido e IVA % explícito
+            headers.extend(['Precio + IVA', '% IVA', 'Costo', 'Utilidad %'])
         
         start_row = 7
         for col, header in enumerate(headers, 1):
@@ -878,29 +910,41 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
                 porcentaje = (neto_valor / total_ventas * 100) if total_ventas > 0 else 0
                 ws_main.cell(row=row, column=8, value=round(porcentaje, 2))
                 
-                # Agregar costo, precio y utilidad si el usuario tiene permiso
+                # Agregar costo, precio e IVA si el usuario tiene permiso
                 if mostrar_costo_utilidad:
                     try:
-                        precio_val = float(precio or 0)
+                        precio_base = float(precio or 0)
                     except (ValueError, TypeError):
-                        precio_val = 0.0
+                        precio_base = 0.0
                     try:
                         costo_val = float(costo or 0)
                     except (ValueError, TypeError):
                         costo_val = 0.0
                     
-                    ws_main.cell(row=row, column=9, value=round(precio_val, 2))
-                    ws_main.cell(row=row, column=10, value=round(costo_val, 2))
+                    # IVA % desde MA_PRODUCTOS.n_impuesto1
+                    try:
+                        codigo_str = str(codigo).strip() if codigo is not None else ''
+                    except Exception:
+                        codigo_str = ''
+                    iva_pct = float(impuestos_map.get(codigo_str, 0.0)) if impuestos_map else 0.0
                     
-                    # Calcular utilidad porcentual según fórmula solicitada:
-                    #   utilidad_raw = (costo / precio) * 100 - 100  ->  número negativo
-                    #   en Excel se mostrará como valor positivo (abs).
-                    if precio_val > 0:
-                        utilidad_raw = (costo_val / precio_val) * 100 - 100
+                    # Precio con IVA incluido (si n_impuesto1 es porcentaje, por ejemplo 16 para 16%)
+                    precio_con_iva = precio_base * (1.0 + (iva_pct / 100.0)) if precio_base > 0 else 0.0
+                    
+                    # Columna 9: Precio + IVA
+                    ws_main.cell(row=row, column=9, value=round(precio_con_iva, 2))
+                    # Columna 10: % IVA (valor directo de n_impuesto1)
+                    ws_main.cell(row=row, column=10, value=round(iva_pct, 2))
+                    # Columna 11: Costo
+                    ws_main.cell(row=row, column=11, value=round(costo_val, 2))
+                    
+                    # Calcular utilidad porcentual usando precio base (sin IVA) para no distorsionar el margen
+                    if precio_base > 0:
+                        utilidad_raw = (costo_val / precio_base) * 100 - 100
                         utilidad_pct = abs(utilidad_raw)
-                        ws_main.cell(row=row, column=11, value=round(utilidad_pct, 2))
+                        ws_main.cell(row=row, column=12, value=round(utilidad_pct, 2))
                     else:
-                        ws_main.cell(row=row, column=11, value=0)
+                        ws_main.cell(row=row, column=12, value=0)
                 
                 if progress_cb:
                     progress_cb(i + 1, total_registros)
@@ -948,9 +992,10 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
         ws_main.column_dimensions['H'].width = 15  # Porcentaje
         
         if mostrar_costo_utilidad:
-            ws_main.column_dimensions['I'].width = 15  # Precio
-            ws_main.column_dimensions['J'].width = 15  # Costo
-            ws_main.column_dimensions['K'].width = 15  # Utilidad %
+            ws_main.column_dimensions['I'].width = 15  # Precio + IVA
+            ws_main.column_dimensions['J'].width = 10  # % IVA
+            ws_main.column_dimensions['K'].width = 15  # Costo
+            ws_main.column_dimensions['L'].width = 15  # Utilidad %
         
         # === HOJA 2: RESUMEN POR ROTACIÓN ===
         ws_summary = wb.create_sheet("Resumen por Rotación")
@@ -1436,13 +1481,14 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
         ws_main['A1'].font = header_font
         ws_main['A1'].fill = header_fill
         # Ajustar merge según si incluye columnas de costo/utilidad
-        merge_range = 'A1:J1' if mostrar_costo_utilidad else 'A1:G1'
+        # Base: 7 columnas; con precio/IVA/costo/utilidad: 11 columnas (A-K)
+        merge_range = 'A1:K1' if mostrar_costo_utilidad else 'A1:G1'
         ws_main.merge_cells(merge_range)
         
         # Headers de la tabla (fila 7)
         headers = ['Código', 'Descripción', 'Monto Vendido', 'Monto Comprado', 'Diferencia', 'Margen %', 'Estado']
         if mostrar_costo_utilidad:
-            headers.extend(['Precio', 'Costo', 'Utilidad %'])
+            headers.extend(['Precio + IVA', '% IVA', 'Costo', 'Utilidad %'])
         
         start_row = 7
         for col, header in enumerate(headers, 1):
@@ -1453,6 +1499,35 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
         
         # Datos de productos
         data_start_row = start_row + 1
+
+        # Mapa de impuestos (IVA) por producto para MBRP
+        impuestos_map_mbrp = {}
+        if db_manager and db_manager.ensure_connection():
+            try:
+                codigos_mbrp = sorted({
+                    str(f[0]).strip() for f in datos_mbrp
+                    if f and len(f) > 0 and f[0] is not None
+                })
+                if codigos_mbrp:
+                    BATCH_SIZE = 1800
+                    for i_b in range(0, len(codigos_mbrp), BATCH_SIZE):
+                        batch = codigos_mbrp[i_b:i_b + BATCH_SIZE]
+                        placeholders = ','.join('?' * len(batch))
+                        query_imp = f"""
+                            SELECT C_CODIGO, COALESCE(n_impuesto1, 0) AS impuesto1
+                            FROM MA_PRODUCTOS WITH (NOLOCK)
+                            WHERE C_CODIGO IN ({placeholders})
+                        """
+                        rows_imp = db_manager.fetch_data(query_imp, batch) or []
+                        for cod, imp in rows_imp:
+                            try:
+                                impuestos_map_mbrp[str(cod).strip()] = float(imp or 0)
+                            except Exception:
+                                continue
+                    logger.info(f"[EXPORT MBRP] Impuestos cargados para {len(impuestos_map_mbrp)} productos")
+            except Exception as e:
+                logger.warning(f"No se pudieron cargar los impuestos (IVA) para MBRP: {e}")
+
         for i, fila in enumerate(datos_mbrp):
             try:
                 # Manejar diferentes longitudes de fila
@@ -1486,23 +1561,35 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
                 
                 ws_main.cell(row=row, column=7, value=estado)
                 
-                # Agregar costo, precio y utilidad si el usuario tiene permiso
+                # Agregar costo, precio e IVA si el usuario tiene permiso
                 if mostrar_costo_utilidad:
-                    precio_val = float(precio or 0)
-                    costo_val = float(costo or 0)
+                    try:
+                        precio_base = float(precio or 0)
+                    except (ValueError, TypeError):
+                        precio_base = 0.0
+                    try:
+                        costo_val = float(costo or 0)
+                    except (ValueError, TypeError):
+                        costo_val = 0.0
                     
-                    ws_main.cell(row=row, column=8, value=round(precio_val, 2))
-                    ws_main.cell(row=row, column=9, value=round(costo_val, 2))
+                    try:
+                        codigo_str = str(codigo).strip() if codigo is not None else ''
+                    except Exception:
+                        codigo_str = ''
+                    iva_pct = float(impuestos_map_mbrp.get(codigo_str, 0.0)) if impuestos_map_mbrp else 0.0
+                    precio_con_iva = precio_base * (1.0 + (iva_pct / 100.0)) if precio_base > 0 else 0.0
                     
-                    # Calcular utilidad porcentual según fórmula solicitada:
-                    #   utilidad_raw = (costo / precio) * 100 - 100  ->  número negativo
-                    #   en Excel se mostrará como valor positivo (abs).
-                    if precio_val > 0:
-                        utilidad_raw = (costo_val / precio_val) * 100 - 100
+                    ws_main.cell(row=row, column=8, value=round(precio_con_iva, 2))
+                    ws_main.cell(row=row, column=9, value=round(iva_pct, 2))
+                    ws_main.cell(row=row, column=10, value=round(costo_val, 2))
+                    
+                    # Utilidad porcentual basada en precio base sin IVA
+                    if precio_base > 0:
+                        utilidad_raw = (costo_val / precio_base) * 100 - 100
                         utilidad_pct = abs(utilidad_raw)
-                        ws_main.cell(row=row, column=10, value=round(utilidad_pct, 2))
+                        ws_main.cell(row=row, column=11, value=round(utilidad_pct, 2))
                     else:
-                        ws_main.cell(row=row, column=10, value=0)
+                        ws_main.cell(row=row, column=11, value=0)
                 
                 if progress_cb:
                     progress_cb(i + 1, total_registros)
@@ -1549,9 +1636,10 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
         ws_main.column_dimensions['G'].width = 18  # Estado
         
         if mostrar_costo_utilidad:
-            ws_main.column_dimensions['H'].width = 15  # Precio
-            ws_main.column_dimensions['I'].width = 15  # Costo
-            ws_main.column_dimensions['J'].width = 15  # Utilidad %
+            ws_main.column_dimensions['H'].width = 15  # Precio + IVA
+            ws_main.column_dimensions['I'].width = 10  # % IVA
+            ws_main.column_dimensions['J'].width = 15  # Costo
+            ws_main.column_dimensions['K'].width = 15  # Utilidad %
         
         # === HOJA 2: RESUMEN POR RENTABILIDAD ===
         ws_summary = wb.create_sheet("Resumen por Rentabilidad")

@@ -108,6 +108,47 @@ def save_modules_config(mods: dict):
 
 # === Configuración de Depuración por Módulo ===
 
+def load_license_key():
+        """Lee y desencripta la License Key desde [License] de db_config.ini.
+
+        Si el valor no puede desencriptarse, se asume que está en texto plano
+        y se devuelve tal cual (para compatibilidad hacia atrás).
+        """
+        config = configparser.ConfigParser()
+        if os.path.exists(CONFIG_FILE):
+            config.read(CONFIG_FILE)
+        if 'License' not in config:
+            return None
+        enc_key = config['License'].get('key', '').strip()
+        if not enc_key:
+            return None
+        try:
+            mgr = SecureCredentialsManager()
+            return mgr.decrypt(enc_key)
+        except Exception:
+            # Compatibilidad: si no se puede desencriptar, devolver el valor crudo
+            return enc_key or None
+
+def save_license_key(key: str):
+        """Encripta y guarda la License Key en la sección [License] de db_config.ini."""
+        key = (key or '').strip()
+        if not key:
+            return
+        config = configparser.ConfigParser()
+        if os.path.exists(CONFIG_FILE):
+            config.read(CONFIG_FILE)
+        if 'License' not in config:
+            config.add_section('License')
+        try:
+            mgr = SecureCredentialsManager()
+            enc_key = mgr.encrypt(key)
+        except Exception:
+            # Si falla la encriptación, guardar en texto plano como último recurso
+            enc_key = key
+        config['License']['key'] = enc_key
+        with open(CONFIG_FILE, 'w') as f:
+            config.write(f)
+
 def load_debug_config():
         """Lee la sección [Debug] de db_config.ini y devuelve flags por módulo."""
         config = configparser.ConfigParser()
@@ -149,6 +190,57 @@ def save_debug_config(flags: dict):
 
 
 class DatabaseApp:
+
+    def _ensure_license_with_prompt(self) -> bool:
+        """Valida la licencia usando LicenseKey local o pidiéndola al usuario.
+
+        Flujo:
+        - Intenta leer LicenseKey desde db_config.ini.
+        - Si no existe o la validación falla, pide al usuario que ingrese la licencia.
+        - Permite varios intentos; si todos fallan o se cancela, devuelve False.
+        """
+        from tkinter import simpledialog, messagebox
+
+        # Intentar leer LicenseKey guardada
+        current_key = load_license_key()
+
+        # Máximo de intentos interactivos (además del intento con la key guardada)
+        max_attempts = 3
+        attempt = 0
+
+        while True:
+            license_key = (current_key or '').strip()
+            if not license_key:
+                # Pedir al usuario que ingrese la licencia
+                license_key = simpledialog.askstring(
+                    "Licencia",
+                    "Ingrese la License Key proporcionada:",
+                    parent=self.root,
+                    show='*',
+                )
+                if not license_key:
+                    # Cancelado o vacío
+                    messagebox.showerror("Licencia requerida", "Debe ingresar una License Key válida para continuar.")
+                    return False
+
+            # Validar contra el servidor (con 7 días de gracia por cache)
+            try:
+                checker = LicenseChecker(LICENSE_CSV_URL, LICENSE_CLIENT_NAME)
+                checker.ensure_valid(license_key=license_key, allow_cached_days=7)
+                # OK: guardar y continuar
+                save_license_key(license_key)
+                print("[DEBUG] Licencia PALPY validada correctamente", flush=True)
+                return True
+            except LicenseError as e:
+                attempt += 1
+                current_key = None  # Forzar nueva entrada en el siguiente ciclo
+                messagebox.showerror("Licencia inválida", str(e))
+                if attempt >= max_attempts:
+                    messagebox.showerror(
+                        "Límite de intentos",
+                        "Se alcanzó el número máximo de intentos de validación de licencia."
+                    )
+                    return False
     def __init__(self, root):
         self.root = root
         self.root.withdraw()  # Ocultar ventana principal
@@ -156,6 +248,20 @@ class DatabaseApp:
         # Mostrar splash screen
         self.splash = SplashScreen(self.root)
         self.splash.start_animation()
+
+        # Validar licencia ANTES de inicializar el resto de la app
+        if not self._ensure_license_with_prompt():
+            # Si falla la licencia o el usuario cancela, cerramos todo
+            try:
+                if self.splash:
+                    self.splash.destroy()
+            except Exception:
+                pass
+            try:
+                self.root.destroy()
+            except Exception:
+                pass
+            return
         
         # Iniciar inicialización en segundo plano
         threading.Thread(target=self._initialize_app, daemon=True).start()
@@ -183,34 +289,6 @@ class DatabaseApp:
             self.ultimas_notificaciones = set()
             print("[DEBUG] Iniciando carga de la aplicación...", flush=True)
 
-            # =========================
-            # Validación de licencia
-            # =========================
-            try:
-                checker = LicenseChecker(LICENSE_CSV_URL, LICENSE_CLIENT_NAME)
-                # Dar 7 días de gracia usando el resultado de la última validación exitosa
-                checker.ensure_valid(allow_cached_days=7)
-                print("[DEBUG] Licencia PALPY validada correctamente", flush=True)
-            except LicenseError as e:
-                # Mostrar el error y cerrar la aplicación desde el hilo principal
-                def _abort_for_license_error():
-                    try:
-                        messagebox.showerror("Licencia inválida", str(e))
-                    except Exception:
-                        print(f"[ERROR] Licencia inválida: {e}", flush=True)
-                    try:
-                        if hasattr(self, 'splash') and self.splash:
-                            self.splash.destroy()
-                    except Exception:
-                        pass
-                    try:
-                        self.root.destroy()
-                    except Exception:
-                        pass
-
-                self.root.after(0, _abort_for_license_error)
-                return
-            
             # Inicialización de componentes críticos
             self.cred_manager = SecureCredentialsManager()
             self.enviando = False

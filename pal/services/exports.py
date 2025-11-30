@@ -1755,17 +1755,17 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
         # IM < 5% = Rojo (crítico)
         ws_main.conditional_formatting.add(im_range,
             CellIsRule(operator='lessThan', formula=[5],
-                    fill=PatternFill(start_color="F44336", end_color="F44336")))
+                      fill=PatternFill(start_color="F44336", end_color="F44336")))
         
         # 5% <= IM <= 10% = Naranja (muy bajo)
         ws_main.conditional_formatting.add(im_range,
             CellIsRule(operator='between', formula=[5, 10],
-                    fill=PatternFill(start_color="FF9800", end_color="FF9800")))
+                      fill=PatternFill(start_color="FF9800", end_color="FF9800")))
         
         # 10% < IM <= 20% = Amarillo (bajo)
         ws_main.conditional_formatting.add(im_range,
             CellIsRule(operator='between', formula=[10, 20],
-                    fill=PatternFill(start_color="FFEB3B", end_color="FFEB3B")))
+                      fill=PatternFill(start_color="FFEB3B", end_color="FFEB3B")))
         
         # Ajustar anchos de columna
         ws_main.column_dimensions['A'].width = 12  # Código

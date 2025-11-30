@@ -831,15 +831,15 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
                 logger.warning(f"Error verificando permiso ver_costo_utilidad: {e}")
         
         # Ajustar merge según si incluye columnas de costo/utilidad
-        # Base: 8 columnas; con costo/utilidad/IVA: 12 columnas (A-L)
-        merge_range = 'A1:L1' if mostrar_costo_utilidad else 'A1:H1'
+        # Base: 8 columnas; con precio/costo/utilidad: 11 columnas (A-K)
+        merge_range = 'A1:K1' if mostrar_costo_utilidad else 'A1:H1'
         ws_main.merge_cells(merge_range)
         
         # Headers de la tabla (fila 7)
         headers = ['Código', 'Descripción', 'Departamento', 'Grupo', 'Subgrupo', 'Ventas Netas', 'Rotación', 'Representación %']
         if mostrar_costo_utilidad:
-            # Mostrar precio con IVA incluido e IVA % explícito
-            headers.extend(['Precio + IVA', '% IVA', 'Costo', 'Utilidad %'])
+            # Mostrar precio con IVA incluido (sin exponer la columna % IVA)
+            headers.extend(['Precio + IVA', 'Costo', 'Utilidad %'])
         
         start_row = 7
         for col, header in enumerate(headers, 1):
@@ -910,7 +910,7 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
                 porcentaje = (neto_valor / total_ventas * 100) if total_ventas > 0 else 0
                 ws_main.cell(row=row, column=8, value=round(porcentaje, 2))
                 
-                # Agregar costo, precio e IVA si el usuario tiene permiso
+                # Agregar costo, precio (con IVA) y utilidad si el usuario tiene permiso
                 if mostrar_costo_utilidad:
                     try:
                         precio_base = float(precio or 0)
@@ -921,7 +921,7 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
                     except (ValueError, TypeError):
                         costo_val = 0.0
                     
-                    # IVA % desde MA_PRODUCTOS.n_impuesto1
+                    # IVA % desde MA_PRODUCTOS.n_impuesto1 (solo para cálculo interno)
                     try:
                         codigo_str = str(codigo).strip() if codigo is not None else ''
                     except Exception:
@@ -933,18 +933,16 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
                     
                     # Columna 9: Precio + IVA
                     ws_main.cell(row=row, column=9, value=round(precio_con_iva, 2))
-                    # Columna 10: % IVA (valor directo de n_impuesto1)
-                    ws_main.cell(row=row, column=10, value=round(iva_pct, 2))
-                    # Columna 11: Costo
-                    ws_main.cell(row=row, column=11, value=round(costo_val, 2))
+                    # Columna 10: Costo
+                    ws_main.cell(row=row, column=10, value=round(costo_val, 2))
                     
                     # Calcular utilidad porcentual usando precio base (sin IVA) para no distorsionar el margen
                     if precio_base > 0:
                         utilidad_raw = (costo_val / precio_base) * 100 - 100
                         utilidad_pct = abs(utilidad_raw)
-                        ws_main.cell(row=row, column=12, value=round(utilidad_pct, 2))
+                        ws_main.cell(row=row, column=11, value=round(utilidad_pct, 2))
                     else:
-                        ws_main.cell(row=row, column=12, value=0)
+                        ws_main.cell(row=row, column=11, value=0)
                 
                 if progress_cb:
                     progress_cb(i + 1, total_registros)
@@ -993,9 +991,8 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
         
         if mostrar_costo_utilidad:
             ws_main.column_dimensions['I'].width = 15  # Precio + IVA
-            ws_main.column_dimensions['J'].width = 10  # % IVA
-            ws_main.column_dimensions['K'].width = 15  # Costo
-            ws_main.column_dimensions['L'].width = 15  # Utilidad %
+            ws_main.column_dimensions['J'].width = 15  # Costo
+            ws_main.column_dimensions['K'].width = 15  # Utilidad %
         
         # === HOJA 2: RESUMEN POR ROTACIÓN ===
         ws_summary = wb.create_sheet("Resumen por Rotación")
@@ -1428,7 +1425,10 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
 
 def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress_cb: Optional[Callable[[int, int], None]] = None,
                       permissions_manager=None, current_user_id: int = None,
-                      provider_label: Optional[str] = None) -> int:
+                      provider_label: Optional[str] = None,
+                      sede_codigo: Optional[str] = None,
+                      fecha_inicio=None,
+                      fecha_fin=None) -> int:
     """
     Exporta datos MBRP a un archivo Excel con formato profesional y análisis de rentabilidad.
     
@@ -1481,14 +1481,21 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
         ws_main['A1'].font = header_font
         ws_main['A1'].fill = header_fill
         # Ajustar merge según si incluye columnas de costo/utilidad
-        # Base: 7 columnas; con precio/IVA/costo/utilidad: 11 columnas (A-K)
-        merge_range = 'A1:K1' if mostrar_costo_utilidad else 'A1:G1'
+        # Base: 11 columnas (Código, Descripción, Depto, Grupo, Subgrupo, Rotación,
+        #         Ventas, Stock Actual, Días de Stock, IM %, Última Venta(DIAS));
+        # con precio/costo/utilidad: 14 columnas (A:N)
+        merge_range = 'A1:N1' if mostrar_costo_utilidad else 'A1:K1'
         ws_main.merge_cells(merge_range)
         
-        # Headers de la tabla (fila 7)
-        headers = ['Código', 'Descripción', 'Monto Vendido', 'Monto Comprado', 'Diferencia', 'Margen %', 'Estado']
+        # Headers de la tabla (fila 7) alineados con el módulo MBRP
+        # Incluimos jerarquía para permitir filtros por Departamento/Grupo/Subgrupo
+        headers = [
+            'Código', 'Descripción', 'Departamento', 'Grupo', 'Subgrupo',
+            'Rotación', 'Ventas', 'Stock Actual', 'Días de Stock', 'IM %', 'Última Venta(DIAS)'
+        ]
         if mostrar_costo_utilidad:
-            headers.extend(['Precio + IVA', '% IVA', 'Costo', 'Utilidad %'])
+            # Columnas adicionales de análisis económico
+            headers.extend(['Precio + IVA', 'Costo', 'Utilidad %'])
         
         start_row = 7
         for col, header in enumerate(headers, 1):
@@ -1500,9 +1507,107 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
         # Datos de productos
         data_start_row = start_row + 1
 
-        # Mapa de impuestos (IVA) por producto para MBRP
-        impuestos_map_mbrp = {}
+        # Helper seguro para convertir a float sin lanzar excepciones por valores no numéricos
+        def _safe_float(value, default: float = 0.0) -> float:
+            try:
+                return float(value or 0)
+            except (ValueError, TypeError):
+                return default
+
+        # Helper para calcular días de stock (misma lógica que en la app)
+        def _calcular_dias_restantes(stock_actual: int, neto_ventas: float) -> int:
+            """Calcula días de stock restantes usando el promedio diario de ventas
+            basado en fecha_inicio y fecha_fin del período MBRP."""
+            try:
+                if not fecha_inicio or not fecha_fin:
+                    return 0
+                dias_periodo = (fecha_fin - fecha_inicio).days or 1
+                promedio_diario = neto_ventas / dias_periodo if dias_periodo else 0
+                if promedio_diario <= 0:
+                    return 0
+                return max(0, int(stock_actual // promedio_diario))
+            except Exception:
+                return 0
+
+        # Helper para stock actual por producto (similar a obtener_stock_actual_bulk del app)
+        def _get_stock_actual_bulk_mbrp(codigos: List[str], deposito: Optional[str]) -> Dict[str, int]:
+            """Obtiene el stock actual por código para MBRP.
+
+            Si deposito es global ('%', '00', 'ICH', 'ALL' o None), suma en todas las sedes;
+            de lo contrario filtra por c_coddeposito.
+            """
+            resultados: Dict[str, int] = {}
+            if not db_manager or not db_manager.ensure_connection() or not codigos:
+                return resultados
+            try:
+                MAX_IN = 900
+                global_query = deposito in (None, '%', '00', 'ICH', 'ALL')
+                for i in range(0, len(codigos), MAX_IN):
+                    chunk = codigos[i:i + MAX_IN]
+                    placeholders = ','.join(['?'] * len(chunk))
+                    if global_query:
+                        sql = (
+                            f"SELECT c_codarticulo, SUM(n_cantidad) "
+                            f"FROM MA_DEPOPROD WITH (NOLOCK) "
+                            f"WHERE c_codarticulo IN ({placeholders}) "
+                            f"GROUP BY c_codarticulo"
+                        )
+                        params = chunk
+                    else:
+                        sql = (
+                            f"SELECT c_codarticulo, SUM(n_cantidad) "
+                            f"FROM MA_DEPOPROD WITH (NOLOCK) "
+                            f"WHERE c_coddeposito = ? AND c_codarticulo IN ({placeholders}) "
+                            f"GROUP BY c_codarticulo"
+                        )
+                        params = [deposito] + chunk
+                    rows = db_manager.fetch_data(sql, params)
+                    for cod, sum_qty in (rows or []):
+                        try:
+                            resultados[str(cod)] = int(sum_qty or 0)
+                        except Exception:
+                            resultados[str(cod)] = 0
+                    # Asegurar claves para todos los códigos consultados
+                    for cod in chunk:
+                        resultados.setdefault(str(cod), 0)
+                return resultados
+            except Exception as e:
+                logger.error(f"[EXPORT MBRP] Error obteniendo stock actual: {e}")
+                return resultados
+
+        # Mapas de descripciones jerárquicas (Depto/Grupo/Subgrupo) para MBRP
+        dept_desc_map: Dict[str, str] = {}
+        group_desc_map: Dict[str, str] = {}
+        sub_desc_map: Dict[str, str] = {}
+
+        # Mapa de impuestos (IVA) por producto para MBRP (se usa solo para calcular Precio + IVA)
+        impuestos_map_mbrp: Dict[str, float] = {}
         if db_manager and db_manager.ensure_connection():
+            # Cargar descripciones de jerarquía
+            try:
+                depts = db_manager.fetch_data(
+                    "SELECT C_CODIGO, C_DESCRIPCIO FROM MA_DEPARTAMENTOS WHERE C_CODIGO IS NOT NULL AND C_DESCRIPCIO IS NOT NULL"
+                )
+                dept_desc_map = {str(cod).strip(): desc for cod, desc in (depts or []) if cod and desc}
+
+                groups = db_manager.fetch_data(
+                    "SELECT C_CODIGO, C_DESCRIPCIO FROM MA_GRUPOS WHERE C_CODIGO IS NOT NULL AND C_DESCRIPCIO IS NOT NULL"
+                )
+                group_desc_map = {str(cod).strip(): desc for cod, desc in (groups or []) if cod and desc}
+
+                subs = db_manager.fetch_data(
+                    "SELECT C_CODIGO, C_DESCRIPCIO FROM MA_SUBGRUPOS WHERE C_CODIGO IS NOT NULL AND C_DESCRIPCIO IS NOT NULL"
+                )
+                sub_desc_map = {str(cod).strip(): desc for cod, desc in (subs or []) if cod and desc}
+
+                logger.info(
+                    f"[EXPORT MBRP] Mapeos cargados - Departamentos: {len(dept_desc_map)}, "
+                    f"Grupos: {len(group_desc_map)}, Subgrupos: {len(sub_desc_map)}"
+                )
+            except Exception as e:
+                logger.warning(f"[EXPORT MBRP] No se pudieron cargar descripciones de jerarquía: {e}")
+
+            # Cargar impuestos (IVA) por producto
             try:
                 codigos_mbrp = sorted({
                     str(f[0]).strip() for f in datos_mbrp
@@ -1528,76 +1633,112 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
             except Exception as e:
                 logger.warning(f"No se pudieron cargar los impuestos (IVA) para MBRP: {e}")
 
+        # Precalcular métricas de movilidad, stock y últimas ventas para replicar el Treeview MBRP
+        from pal.services.mbrp import calcular_indice_movilidad, obtener_ultimas_ventas_bulk, calcular_dias_sin_venta
+
+        codigos_lista = [str(f[0]) for f in datos_mbrp if f and len(f) > 0]
+        sede = sede_codigo or '0301'
+
+        stock_map: Dict[str, int] = _get_stock_actual_bulk_mbrp(codigos_lista, sede) if codigos_lista else {}
+        indices_movilidad: Dict[str, float] = calcular_indice_movilidad(datos_mbrp) if datos_mbrp else {}
+        ultimas_ventas: Dict[str, Any] = {}
+        if db_manager and db_manager.ensure_connection() and codigos_lista:
+            ultimas_ventas = obtener_ultimas_ventas_bulk(db_manager, codigos_lista, sede)
+
         for i, fila in enumerate(datos_mbrp):
             try:
-                # Manejar diferentes longitudes de fila
-                # Con costo/precio: codigo, desc, vendido, comprado, diferencia, margen, precio, costo
-                if len(fila) >= 8:
-                    codigo, desc, vendido, comprado, diferencia, margen, precio, costo = fila[:8]
-                elif len(fila) >= 6:
-                    codigo, desc, vendido, comprado, diferencia, margen = fila[:6]
-                    precio = costo = 0
-                else:
+                # Normalizar a lista para poder inspeccionar la estructura
+                fila_list = list(fila) if not isinstance(fila, list) else fila
+
+                if not fila_list or len(fila_list) < 6:
+                    logger.warning(f"[EXPORT MBRP] Fila con pocos campos (esperados ≥ 6): {fila_list}")
                     continue
-                    
+
+                codigo = fila_list[0]
+                desc = fila_list[1]
+
+                # Jerarquía (códigos) para filtros: depto, grupo, subgrupo
+                dept = fila_list[2] if len(fila_list) > 2 else None
+                grupo = fila_list[3] if len(fila_list) > 3 else None
+                sub = fila_list[4] if len(fila_list) > 4 else None
+
+                # Convertir a descripciones legibles si están disponibles
+                dept_desc = dept_desc_map.get(str(dept).strip(), dept) if dept else 'Sin clasificar'
+                grupo_desc = group_desc_map.get(str(grupo).strip(), grupo) if grupo else 'Sin clasificar'
+                sub_desc = sub_desc_map.get(str(sub).strip(), sub) if sub else 'Sin clasificar'
+
+                # Neto de ventas siempre en posición 5 en la estructura TRA/MBRP
+                neto_valor = _safe_float(fila_list[5])
+
+                # Rotación clasificada añadida por clasificar_rotacion_mbrp en posición 6
+                rotacion = fila_list[6] if len(fila_list) > 6 else 'SIN_CLASIFICAR'
+
+                try:
+                    codigo_str = str(codigo).strip() if codigo is not None else ''
+                except Exception:
+                    codigo_str = ''
+
+                stock_actual = int(stock_map.get(codigo_str, 0) or 0)
+                im_valor = float(indices_movilidad.get(codigo_str, 0.0))
+
+                # Días desde última venta (valor numérico para filtrar en Excel)
+                fecha_ultima = ultimas_ventas.get(codigo_str)
+                dias_sin_venta = calcular_dias_sin_venta(fecha_ultima) if fecha_ultima is not None else -1
+                # Para productos sin ventas, usar un valor grande (9999) para que aparezcan al final al ordenar ascendente
+                dias_ultima_venta_excel = dias_sin_venta if dias_sin_venta is not None and dias_sin_venta >= 0 else 9999
+
+                # Días de Stock basados en promedio diario del período
+                dias_stock = _calcular_dias_restantes(stock_actual, neto_valor)
+
                 row = data_start_row + i
-                
+
+                # Escribir columnas principales (mismas que el Treeview + jerarquía)
                 ws_main.cell(row=row, column=1, value=clean_for_excel(codigo))
                 ws_main.cell(row=row, column=2, value=clean_for_excel(desc))
-                ws_main.cell(row=row, column=3, value=round(float(vendido or 0), 2))
-                ws_main.cell(row=row, column=4, value=round(float(comprado or 0), 2))
-                ws_main.cell(row=row, column=5, value=round(float(diferencia or 0), 2))
-                
-                margen_val = round(float(margen or 0), 2)
-                ws_main.cell(row=row, column=6, value=margen_val)
-                
-                # Determinar estado según margen
-                if margen_val > 20:
-                    estado = "EXCELENTE"
-                elif margen_val > 5:
-                    estado = "ACEPTABLE"
-                else:
-                    estado = "REQUIERE ATENCIÓN"
-                
-                ws_main.cell(row=row, column=7, value=estado)
-                
-                # Agregar costo, precio e IVA si el usuario tiene permiso
+                ws_main.cell(row=row, column=3, value=clean_for_excel(dept_desc))
+                ws_main.cell(row=row, column=4, value=clean_for_excel(grupo_desc))
+                ws_main.cell(row=row, column=5, value=clean_for_excel(sub_desc))
+                ws_main.cell(row=row, column=6, value=clean_for_excel(str(rotacion)))
+                ws_main.cell(row=row, column=7, value=neto_valor)
+                ws_main.cell(row=row, column=8, value=stock_actual)
+                ws_main.cell(row=row, column=9, value=dias_stock)
+                ws_main.cell(row=row, column=10, value=round(im_valor, 2))
+                ws_main.cell(row=row, column=11, value=dias_ultima_venta_excel)
+
+                # Agregar columnas de precio + IVA, costo y utilidad si el usuario tiene permiso
                 if mostrar_costo_utilidad:
-                    try:
-                        precio_base = float(precio or 0)
-                    except (ValueError, TypeError):
-                        precio_base = 0.0
-                    try:
-                        costo_val = float(costo or 0)
-                    except (ValueError, TypeError):
+                    precio_base = 0.0
+                    costo_val = 0.0
+                    if len(fila_list) >= 9:
+                        # Estructura estándar: [..., neto, rotacion, precio, costo]
+                        precio_base = _safe_float(fila_list[7])
+                        costo_val = _safe_float(fila_list[8])
+                    elif len(fila_list) == 8:
+                        # Estructura sin costo explícito: [..., neto, rotacion, precio]
+                        precio_base = _safe_float(fila_list[7])
                         costo_val = 0.0
-                    
-                    try:
-                        codigo_str = str(codigo).strip() if codigo is not None else ''
-                    except Exception:
-                        codigo_str = ''
+
                     iva_pct = float(impuestos_map_mbrp.get(codigo_str, 0.0)) if impuestos_map_mbrp else 0.0
                     precio_con_iva = precio_base * (1.0 + (iva_pct / 100.0)) if precio_base > 0 else 0.0
-                    
-                    ws_main.cell(row=row, column=8, value=round(precio_con_iva, 2))
-                    ws_main.cell(row=row, column=9, value=round(iva_pct, 2))
-                    ws_main.cell(row=row, column=10, value=round(costo_val, 2))
-                    
-                    # Utilidad porcentual basada en precio base sin IVA
+
+                    # Columnas adicionales (después de Última Venta(DIAS))
+                    ws_main.cell(row=row, column=12, value=round(precio_con_iva, 2))
+                    ws_main.cell(row=row, column=13, value=round(costo_val, 2))
+
                     if precio_base > 0:
                         utilidad_raw = (costo_val / precio_base) * 100 - 100
                         utilidad_pct = abs(utilidad_raw)
-                        ws_main.cell(row=row, column=11, value=round(utilidad_pct, 2))
                     else:
-                        ws_main.cell(row=row, column=11, value=0)
-                
+                        utilidad_pct = 0.0
+                    ws_main.cell(row=row, column=14, value=round(utilidad_pct, 2))
+
                 if progress_cb:
                     progress_cb(i + 1, total_registros)
-                    
+
             except Exception as e:
                 logger.error(f"Error procesando fila MBRP {i}: {fila} - {e}")
                 continue
-        
+
         # Crear tabla con filtros
         end_col_letter = get_column_letter(len(headers))
         table_range = f"A{start_row}:{end_col_letter}{data_start_row + total_registros - 1}"
@@ -1608,49 +1749,55 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
         )
         ws_main.add_table(table)
         
-        # Formato condicional para margen
-        margen_range = f"F{data_start_row}:F{data_start_row + total_registros - 1}"
+        # Formato condicional para Índice de Movilidad (IM %)
+        im_range = f"J{data_start_row}:J{data_start_row + total_registros - 1}"
         
-        # Margen > 20 = Verde
-        ws_main.conditional_formatting.add(margen_range, 
-            CellIsRule(operator='greaterThan', formula=[20], 
-                      fill=PatternFill(start_color="4CAF50", end_color="4CAF50")))
-        
-        # Margen 5-20 = Amarillo  
-        ws_main.conditional_formatting.add(margen_range,
-            CellIsRule(operator='between', formula=[5, 20],
-                      fill=PatternFill(start_color="FF9800", end_color="FF9800")))
-        
-        # Margen < 5 = Rojo
-        ws_main.conditional_formatting.add(margen_range,
+        # IM < 5% = Rojo (crítico)
+        ws_main.conditional_formatting.add(im_range,
             CellIsRule(operator='lessThan', formula=[5],
-                      fill=PatternFill(start_color="F44336", end_color="F44336")))
+                    fill=PatternFill(start_color="F44336", end_color="F44336")))
+        
+        # 5% <= IM <= 10% = Naranja (muy bajo)
+        ws_main.conditional_formatting.add(im_range,
+            CellIsRule(operator='between', formula=[5, 10],
+                    fill=PatternFill(start_color="FF9800", end_color="FF9800")))
+        
+        # 10% < IM <= 20% = Amarillo (bajo)
+        ws_main.conditional_formatting.add(im_range,
+            CellIsRule(operator='between', formula=[10, 20],
+                    fill=PatternFill(start_color="FFEB3B", end_color="FFEB3B")))
         
         # Ajustar anchos de columna
         ws_main.column_dimensions['A'].width = 12  # Código
         ws_main.column_dimensions['B'].width = 40  # Descripción
-        ws_main.column_dimensions['C'].width = 15  # Vendido
-        ws_main.column_dimensions['D'].width = 15  # Comprado
-        ws_main.column_dimensions['E'].width = 15  # Diferencia
-        ws_main.column_dimensions['F'].width = 12  # Margen
-        ws_main.column_dimensions['G'].width = 18  # Estado
+        ws_main.column_dimensions['C'].width = 14  # Departamento
+        ws_main.column_dimensions['D'].width = 14  # Grupo
+        ws_main.column_dimensions['E'].width = 14  # Subgrupo
+        ws_main.column_dimensions['F'].width = 12  # Rotación
+        ws_main.column_dimensions['G'].width = 15  # Ventas
+        ws_main.column_dimensions['H'].width = 15  # Stock Actual
+        ws_main.column_dimensions['I'].width = 15  # Días de Stock
+        ws_main.column_dimensions['J'].width = 12  # IM %
+        ws_main.column_dimensions['K'].width = 18  # Última Venta (DIAS)
         
         if mostrar_costo_utilidad:
-            ws_main.column_dimensions['H'].width = 15  # Precio + IVA
-            ws_main.column_dimensions['I'].width = 10  # % IVA
-            ws_main.column_dimensions['J'].width = 15  # Costo
-            ws_main.column_dimensions['K'].width = 15  # Utilidad %
+            ws_main.column_dimensions['L'].width = 15  # Precio + IVA
+            ws_main.column_dimensions['M'].width = 15  # Costo
+            ws_main.column_dimensions['N'].width = 15  # Utilidad %
         
-        # === HOJA 2: RESUMEN POR RENTABILIDAD ===
-        ws_summary = wb.create_sheet("Resumen por Rentabilidad")
+        # === HOJA 2: RESUMEN POR MOVILIDAD ===
+        ws_summary = wb.create_sheet("Resumen por Movilidad")
         
-        # Clasificar productos
-        excelente = sum(1 for fila in datos_mbrp if len(fila) >= 6 and float(fila[5] or 0) > 20)
-        aceptable = sum(1 for fila in datos_mbrp if len(fila) >= 6 and 5 <= float(fila[5] or 0) <= 20)
-        critico = sum(1 for fila in datos_mbrp if len(fila) >= 6 and float(fila[5] or 0) < 5)
+        # Clasificar productos por rangos de Índice de Movilidad
+        im_values = list(indices_movilidad.values()) if indices_movilidad else []
+        critico = sum(1 for v in im_values if v < 5.0)
+        muy_bajo = sum(1 for v in im_values if 5.0 <= v <= 10.0)
+        bajo = sum(1 for v in im_values if 10.0 < v <= 20.0)
+        medio_alto = sum(1 for v in im_values if 20.0 < v <= 50.0)
+        alto = sum(1 for v in im_values if v > 50.0)
         
         # Crear tabla resumen
-        ws_summary['A1'] = 'RESUMEN POR RENTABILIDAD MBRP'
+        ws_summary['A1'] = 'RESUMEN POR ÍNDICE DE MOVILIDAD (IM%) MBRP'
         ws_summary['A1'].font = Font(size=14, bold=True)
         ws_summary.merge_cells('A1:C1')
         
@@ -1663,9 +1810,11 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
             ws_summary[cell].fill = PatternFill(start_color="4472C4", end_color="4472C4")
         
         categorias = [
-            ('EXCELENTE (>20%)', excelente),
-            ('ACEPTABLE (5-20%)', aceptable),
-            ('CRÍTICO (<5%)', critico)
+            ('IM < 5% (CRÍTICO)', critico),
+            ('5% ≤ IM ≤ 10% (MUY BAJO)', muy_bajo),
+            ('10% < IM ≤ 20% (BAJO)', bajo),
+            ('20% < IM ≤ 50% (MEDIO)', medio_alto),
+            ('IM > 50% (ACEPTABLE)', alto),
         ]
         
         for i, (categoria, count) in enumerate(categorias, 4):
@@ -1677,35 +1826,46 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
         # === HOJA 3: PRODUCTOS CRÍTICOS ===
         ws_critical = wb.create_sheet("Productos Críticos")
         
-        productos_criticos = [fila for fila in datos_mbrp if len(fila) >= 6 and float(fila[5] or 0) < 5]
+        # Productos críticos: IM muy bajo y muchos días sin venta
+        productos_criticos = []
+        for fila in datos_mbrp:
+            fila_list = list(fila) if not isinstance(fila, list) else fila
+            if not fila_list or len(fila_list) < 2:
+                continue
+            codigo = str(fila_list[0])
+            desc = fila_list[1]
+            im_val = float(indices_movilidad.get(codigo, 0.0))
+            fecha_ult = ultimas_ventas.get(codigo)
+            dias_sin_venta = calcular_dias_sin_venta(fecha_ult) if fecha_ult is not None else -1
+            if im_val <= 5.0 and dias_sin_venta > 90:
+                productos_criticos.append((codigo, desc, im_val, dias_sin_venta))
         
-        ws_critical['A1'] = f'PRODUCTOS CRÍTICOS - MARGEN < 5% ({len(productos_criticos)} productos)'
+        ws_critical['A1'] = f'PRODUCTOS CRÍTICOS - IM ≤ 5% y > 90 días sin venta ({len(productos_criticos)} productos)'
         ws_critical['A1'].font = Font(size=12, bold=True, color="FFFFFF")
         ws_critical['A1'].fill = PatternFill(start_color="F44336", end_color="F44336")
         ws_critical.merge_cells('A1:E1')
         
         # Headers
-        headers_criticos = ['Código', 'Descripción', 'Margen %', 'Pérdida/Ganancia', 'Acción Requerida']
+        headers_criticos = ['Código', 'Descripción', 'IM %', 'Días sin venta', 'Acción Requerida']
         for col, header in enumerate(headers_criticos, 1):
             cell = ws_critical.cell(row=3, column=col, value=header)
             cell.font = Font(bold=True, color="FFFFFF")
             cell.fill = PatternFill(start_color="FF9800", end_color="FF9800")
         
         # Datos críticos
-        for i, fila in enumerate(productos_criticos, 4):
-            ws_critical.cell(row=i, column=1, value=clean_for_excel(fila[0]))
-            ws_critical.cell(row=i, column=2, value=clean_for_excel(fila[1]))
-            ws_critical.cell(row=i, column=3, value=round(float(fila[5] or 0), 2))
-            ws_critical.cell(row=i, column=4, value=round(float(fila[4] or 0), 2))
+        for i, (codigo, desc, im_val, dias_sin_venta) in enumerate(productos_criticos, 4):
+            ws_critical.cell(row=i, column=1, value=clean_for_excel(codigo))
+            ws_critical.cell(row=i, column=2, value=clean_for_excel(desc))
+            ws_critical.cell(row=i, column=3, value=round(im_val, 2))
+            ws_critical.cell(row=i, column=4, value=dias_sin_venta)
             
-            # Acción según margen
-            margen = float(fila[5] or 0)
-            if margen < 0:
-                accion = "DESCONTINUAR URGENTE"
-            elif margen < 2:
-                accion = "REVISAR PRECIOS"
+            # Acción sugerida según IM y días sin venta
+            if dias_sin_venta > 180:
+                accion = "DESCONTINUAR / LIQUIDAR"
+            elif dias_sin_venta > 90:
+                accion = "REVISAR ESTRATEGIA"
             else:
-                accion = "OPTIMIZAR COSTOS"
+                accion = "MONITOREAR"
             
             ws_critical.cell(row=i, column=5, value=accion)
         

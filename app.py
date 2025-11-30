@@ -37,6 +37,7 @@ from pal.core.auth import AuthManager
 from pal.services.cache import CacheDescripciones
 from pal.services.envios import EnvioProgramado, ProgramadorEnvios
 from pal.core.log import set_component_level
+from pal.core.license import LicenseChecker, LicenseError
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from win10toast import ToastNotifier
@@ -45,6 +46,8 @@ from threading import Event, Timer
 
 
 CONFIG_FILE = 'db_config.ini'
+LICENSE_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTdAdOg6pI7tOF-9UdFDzw0P5aSpNRc-jGIYHwOHmXb7qqOtag9QTYAi4JU0U2VoIZLd_TjvK_7cxX9/pub?output=csv"
+LICENSE_CLIENT_NAME = "PALPY"
 JERARQUIA_CACHE_FILE = "productos_jerarquia_cache.json"
 FAVORITOS_CACHE_FILE = 'favoritos_cache.json'
 JERARQUIA_CACHE_TTL = timedelta(hours=15)
@@ -179,6 +182,34 @@ class DatabaseApp:
             # Tu lógica de inicialización original
             self.ultimas_notificaciones = set()
             print("[DEBUG] Iniciando carga de la aplicación...", flush=True)
+
+            # =========================
+            # Validación de licencia
+            # =========================
+            try:
+                checker = LicenseChecker(LICENSE_CSV_URL, LICENSE_CLIENT_NAME)
+                # Dar 7 días de gracia usando el resultado de la última validación exitosa
+                checker.ensure_valid(allow_cached_days=7)
+                print("[DEBUG] Licencia PALPY validada correctamente", flush=True)
+            except LicenseError as e:
+                # Mostrar el error y cerrar la aplicación desde el hilo principal
+                def _abort_for_license_error():
+                    try:
+                        messagebox.showerror("Licencia inválida", str(e))
+                    except Exception:
+                        print(f"[ERROR] Licencia inválida: {e}", flush=True)
+                    try:
+                        if hasattr(self, 'splash') and self.splash:
+                            self.splash.destroy()
+                    except Exception:
+                        pass
+                    try:
+                        self.root.destroy()
+                    except Exception:
+                        pass
+
+                self.root.after(0, _abort_for_license_error)
+                return
             
             # Inicialización de componentes críticos
             self.cred_manager = SecureCredentialsManager()
@@ -1672,6 +1703,9 @@ class DatabaseApp:
                         permissions_manager=permissions_mgr,
                         current_user_id=user_id,
                         provider_label=prov_label,
+                        sede_codigo=self.mbrp_sede_codigo,
+                        fecha_inicio=self.mbrp_fecha_inicio,
+                        fecha_fin=self.mbrp_fecha_fin,
                     )
                     
                     # Notificar éxito en el hilo principal

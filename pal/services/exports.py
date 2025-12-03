@@ -1580,6 +1580,36 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
         group_desc_map: Dict[str, str] = {}
         sub_desc_map: Dict[str, str] = {}
 
+
+        costo_map_mbrp: Dict[str, float] = {}
+
+        # Cargar costos por producto
+        try:
+            codigos_mbrp = sorted({
+                str(f[0]).strip() for f in datos_mbrp
+                if f and len(f) > 0 and f[0] is not None
+            })
+            if codigos_mbrp:
+                BATCH_SIZE = 1800
+                for i_b in range(0, len(codigos_mbrp), BATCH_SIZE):
+                    batch = codigos_mbrp[i_b:i_b + BATCH_SIZE]
+                    placeholders = ','.join('?' * len(batch))
+                    query_costo = f"""
+                    SELECT C_CODIGO, COALESCE(n_costoact, 0) AS costo_actual
+                    FROM MA_PRODUCTOS WITH (NOLOCK)
+                    WHERE C_CODIGO IN ({placeholders})
+                """
+                rows_costo = db_manager.fetch_data(query_costo, batch) or []
+                for cod, costo in rows_costo:
+                    try:
+                        costo_map_mbrp[str(cod).strip()] = float(costo or 0)
+                    except Exception:
+                        continue
+            logger.info(f"[EXPORT MBRP] Costos cargados para {len(costo_map_mbrp)} productos")
+        except Exception as e:
+            logger.warning(f"No se pudieron cargar los costos para MBRP: {e}")
+            costo_map_mbrp = {}
+
         # Mapa de impuestos (IVA) por producto para MBRP (se usa solo para calcular Precio + IVA)
         impuestos_map_mbrp: Dict[str, float] = {}
         if db_manager and db_manager.ensure_connection():
@@ -1645,6 +1675,60 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
         if db_manager and db_manager.ensure_connection() and codigos_lista:
             ultimas_ventas = obtener_ultimas_ventas_bulk(db_manager, codigos_lista, sede)
 
+        costo_map_mbrp: Dict[str, float] = {}
+        if mostrar_costo_utilidad:
+            try:
+                codigos_mbrp = sorted({
+                    str(f[0]).strip() for f in datos_mbrp
+                    if f and len(f) > 0 and f[0] is not None
+                })
+                if codigos_mbrp:
+                    BATCH_SIZE = 1800
+                    for i_b in range(0, len(codigos_mbrp), BATCH_SIZE):
+                        batch = codigos_mbrp[i_b:i_b + BATCH_SIZE]
+                        placeholders = ','.join('?' * len(batch))
+                        query_costo = f"""
+                            SELECT C_CODIGO, COALESCE(n_costoact, 0) AS costo_actual
+                            FROM MA_PRODUCTOS WITH (NOLOCK)
+                            WHERE C_CODIGO IN ({placeholders})
+                        """
+                        rows_costo = db_manager.fetch_data(query_costo, batch) or []
+                        for cod, costo in rows_costo:
+                            try:
+                                costo_map_mbrp[str(cod).strip()] = float(costo or 0)
+                            except Exception:
+                                continue
+                logger.info(f"[EXPORT MBRP] Costos cargados para {len(costo_map_mbrp)} productos")
+            except Exception as e:
+                logger.warning(f"No se pudieron cargar los costos para MBRP: {e}")
+                costo_map_mbrp = {}
+
+        # Cargar precios base por producto
+        precio_map_mbrp = {}
+        try:
+            codigos_mbrp = sorted({
+                str(f[0]).strip() for f in datos_mbrp
+                if f and len(f) > 0 and f[0] is not None
+            })
+            if codigos_mbrp:
+                BATCH_SIZE = 1800
+                for i_b in range(0, len(codigos_mbrp), BATCH_SIZE):
+                    batch = codigos_mbrp[i_b:i_b + BATCH_SIZE]
+                    placeholders = ','.join('?' * len(batch))
+                    query_precio = f"""
+                        SELECT C_CODIGO, COALESCE(n_precio1, 0) AS precio_base
+                        FROM MA_PRODUCTOS WITH (NOLOCK)
+                        WHERE C_CODIGO IN ({placeholders})
+                    """
+                    rows_precio = db_manager.fetch_data(query_precio, batch) or []
+                    for cod, precio in rows_precio:
+                        try:
+                            precio_map_mbrp[str(cod).strip()] = float(precio or 0)
+                        except Exception:
+                            continue
+        except Exception:
+            precio_map_mbrp = {}
+
         for i, fila in enumerate(datos_mbrp):
             try:
                 # Normalizar a lista para poder inspeccionar la estructura
@@ -1708,15 +1792,10 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
                 # Agregar columnas de precio + IVA, costo y utilidad si el usuario tiene permiso
                 if mostrar_costo_utilidad:
                     precio_base = 0.0
-                    costo_val = 0.0
-                    if len(fila_list) >= 9:
-                        # Estructura estándar: [..., neto, rotacion, precio, costo]
-                        precio_base = _safe_float(fila_list[7])
-                        costo_val = _safe_float(fila_list[8])
-                    elif len(fila_list) == 8:
-                        # Estructura sin costo explícito: [..., neto, rotacion, precio]
-                        precio_base = _safe_float(fila_list[7])
-                        costo_val = 0.0
+                    codigo_str = str(codigo).strip()
+                    precio_base = _safe_float(precio_map_mbrp.get(codigo_str, 0.0))
+
+                    costo_val = _safe_float(costo_map_mbrp.get(codigo_str, 0.0))
 
                     iva_pct = float(impuestos_map_mbrp.get(codigo_str, 0.0)) if impuestos_map_mbrp else 0.0
                     precio_con_iva = precio_base * (1.0 + (iva_pct / 100.0)) if precio_base > 0 else 0.0

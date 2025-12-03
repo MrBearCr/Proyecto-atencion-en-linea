@@ -14,3 +14,7 @@ docs/correcciones_mbrp.md
 docs/PLAN_USUARIOS_PRIVILEGIOS.md
 docs/optimizaciones_tra_resumen.md
 EXPORT_THREADING_FIX.md
+build
+dist
+license_cache.json
+app.spec

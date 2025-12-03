@@ -184,9 +184,9 @@ def _stats_update_breadcrumb(app):
 
     app.stats_breadcrumb_var.set(" / ".join(parts))
 
-    # Habilitar/Deshabilitar botón volver
+# Habilitar/Deshabilitar botón volver
     lvl = state.get('level', 'dept')
-    if lvl in ('dept', 'provider'):
+    if lvl == 'dept':
         # En raíz de jerarquía interna no hay nada a donde volver
         app.stats_btn_back.state(["disabled"]) if hasattr(app, 'stats_btn_back') else None
     else:
@@ -861,13 +861,28 @@ def _stats_compute_and_draw(app):
         _stats_draw_providers_universe(app, ventas_total_universo, total_universo, chart_type)
         return
 
-    # Estado inicial según filtros actuales de TRA y proveedor
+# Estado inicial según filtros actuales de TRA y proveedor
+    # Resetear estado si cambió el proveedor seleccionado
+    current_proveedor_key = f"{proveedor_cod}|{proveedor_desc}" if proveedor_cod else "no_proveedor"
+    last_proveedor_key = getattr(app, '_stats_last_proveedor_key', None)
+    
+    state_changed = False
     if not hasattr(app, 'stats_pie_state') or not app.stats_pie_state:
+        state_changed = True
+    elif last_proveedor_key != current_proveedor_key:
+        # El proveedor cambió, resetear estado
+        state_changed = True
+        app.stats_pie_state = None  # Forzar recreación
+    
+    app._stats_last_proveedor_key = current_proveedor_key
+    
+    if state_changed:
         if proveedor_cod and total_prov > 0 and total_universo > 0:
-            # Empezar desde nivel Proveedor (Proveedor vs Resto)
+            # Empezar directamente desde nivel Departamento para el proveedor seleccionado
+            # Esto permite drill-down inmediato sin importar el porcentaje de mercado
             app.stats_pie_state = {
-                "level": "provider",
-                "subset": "provider",  # al bajar un nivel, usamos ventas del proveedor por defecto
+                "level": "dept",
+                "subset": "provider",  # usar solo datos del proveedor seleccionado
                 "dept": None,
                 "group": None,
                 "sub": None,
@@ -888,14 +903,28 @@ def _stats_compute_and_draw(app):
     inv = getattr(app, '_stats_inv_maps', _stats_build_inverse_maps(app))
     app._stats_inv_maps = inv
 
-    # Elegir conjunto de ventas según el subset actual (proveedor / resto / universo)
-    subset = state.get('subset') or ('provider' if proveedor_cod and total_prov > 0 else 'all')
+# Elegir conjunto de ventas según el subset actual (proveedor / resto / universo)
+    subset = state.get('subset')
+    
+    # Si hay proveedor seleccionado pero no hay subset explícito, usar datos del proveedor por defecto
+    if subset is None:
+        if proveedor_cod and total_prov > 0:
+            subset = 'provider'
+        else:
+            subset = 'all'
+    
+    
+    
     if subset == 'provider' and ventas_prov:
         ventas = list(ventas_prov)
     elif subset == 'rest' and ventas_rest:
         ventas = list(ventas_rest)
     else:
-        ventas = list(ventas_total_universo)
+        # Solo usar universo completo si no hay proveedor seleccionado
+        if proveedor_cod and ventas_prov:
+            ventas = list(ventas_prov)
+        else:
+            ventas = list(ventas_total_universo)
 
     # Si después de aplicar filtros no quedan datos, mostrar mensaje y salir
     if not ventas:

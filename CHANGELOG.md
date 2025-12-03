@@ -11,6 +11,24 @@ y este proyecto adhiere al [Versionado Semántico](https://semver.org/lang/es/).
 
 ### 🆕 Añadido
 
+#### Filtro de Proveedor en Estadísticas TRA/RI
+- **Archivos modificados**: 
+  - `pal/ui/tabs/stats.py` (lógica de filtrado y estado)
+- **Razón**: Al seleccionar un proveedor en TRA, las estadísticas mostraban productos de todos los proveedores en lugar de solo los del proveedor seleccionado.
+- **Problema**: Vista inicial mostraba "Proveedor vs Resto de Proveedores", haciendo imposible drill-down cuando el proveedor tenía baja participación de mercado.
+- **Solución**: 
+  - Iniciar directamente en vista de departamentos para el proveedor seleccionado
+  - Mejorar lógica de selección de datos para respetar filtro de proveedor
+  - Agregar detección de cambios de proveedor para resetear estado de estadísticas
+- **Beneficio**: 
+  - Los usuarios ahora pueden analizar cualquier proveedor sin importar su participación de mercado
+  - Drill-down inmediato: Departamento → Grupo → Subgrupo → Producto
+  - Coherencia total entre filtro TRA y visualización estadística
+- **Detalles técnicos**:
+  - **Nueva lógica de estado**: `_stats_last_proveedor_key` para detectar cambios
+  - **Vista inicial**: `level: "dept"` con `subset: "provider"` para proveedor seleccionado
+  - **Breadcrumb**: Muestra "Proveedor: [Nombre] / [Departamento]" durante navegación
+
 #### Permiso Granular para Ver Costo y Utilidad en Reportes
 - **Archivos modificados**: 
   - `pal/infrastructure/database.py` (sistema de permisos)

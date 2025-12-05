@@ -4,6 +4,8 @@ Pantalla de splash para la aplicación PAL con login integrado.
 import tkinter as tk
 from tkinter import ttk
 from threading import Event, Thread
+import sys
+import os
 
 class SplashScreen(tk.Toplevel):
     def __init__(self, parent):
@@ -36,14 +38,24 @@ class SplashScreen(tk.Toplevel):
         self.container.pack(expand=True, fill="both", padx=24, pady=24)
         
         try:
-            self.logo = tk.PhotoImage(file="casapro-icono.png").subsample(2, 2)
+            # Handle PyInstaller bundled resources
+            if getattr(sys, 'frozen', False):
+                # Running as compiled exe
+                base_path = sys._MEIPASS
+            else:
+                # Running as script
+                base_path = os.path.dirname(os.path.abspath(__file__))
+            
+            image_path = os.path.join(base_path, "casapro-icono.png")
+            self.logo = tk.PhotoImage(file=image_path).subsample(2, 2)
             ttk.Label(self.container, image=self.logo).pack(pady=16)
-        except Exception:
+        except Exception as e:
+            print(f"Error loading splash image: {e}")
             tk.Label(self, text="[Imagen no disponible]", bg='black', fg='white').pack(pady=10)
         
         # Texto de carga
         ttk.Label(self.container, 
-                  text="CPCapp 1.0BETA", 
+                  text="PAL - Plataforma de Administración Local 1.0", 
                   font=("Segoe UI", 13)).pack(pady=4)
         
         # Barra de progreso

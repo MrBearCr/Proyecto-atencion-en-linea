@@ -1151,7 +1151,7 @@ class DatabaseManager:
                 query = """
                     WITH VentasAgregadas AS (
                         SELECT 
-                            i.c_Codarticulo AS codigo,
+                            RTRIM(LTRIM(i.c_Codarticulo)) AS codigo,
                             SUM(CASE 
                                 WHEN i.c_Concepto = 'VEN' THEN i.n_Cantidad
                                 WHEN i.c_Concepto = 'DEV' THEN -i.n_Cantidad 
@@ -1160,7 +1160,7 @@ class DatabaseManager:
                         FROM TR_INVENTARIO i WITH (NOLOCK)
                         WHERE i.f_fecha BETWEEN CONVERT(DATE, ?, 105) AND CONVERT(DATE, ?, 105)
                             AND i.c_Concepto IN ('VEN', 'DEV')
-                        GROUP BY i.c_Codarticulo
+GROUP BY i.c_Codarticulo
                         HAVING SUM(CASE 
                             WHEN i.c_Concepto = 'VEN' THEN i.n_Cantidad
                             WHEN i.c_Concepto = 'DEV' THEN -i.n_Cantidad 
@@ -1168,13 +1168,14 @@ class DatabaseManager:
                         END) > 0
                     )
                     SELECT 
-                        v.codigo,
+                        RTRIM(LTRIM(v.codigo)) AS codigo,
                         COALESCE(p.cu_descripcion_corta, 'SIN DESCRIPCIÓN') AS descripcion,
                         COALESCE(p.C_DEPARTAMENTO, '') AS departamento,
                         COALESCE(p.C_GRUPO, '') AS grupo,
                         COALESCE(p.C_SUBGRUPO, '') AS subgrupo,
                         v.neto,
                         COALESCE(p.n_precio1, 0) AS precio,
+                        COALESCE(p.n_impuesto1, 0) AS impuesto1,
                         COALESCE(p.n_costoact, 0) AS costo
                     FROM VentasAgregadas v
                     LEFT JOIN MA_PRODUCTOS p WITH (NOLOCK) ON v.codigo = p.C_CODIGO
@@ -1185,7 +1186,7 @@ class DatabaseManager:
                 query = """
                     WITH VentasAgregadas AS (
                         SELECT 
-                            i.c_Codarticulo AS codigo,
+                            RTRIM(LTRIM(i.c_Codarticulo)) AS codigo,
                             SUM(CASE 
                                 WHEN i.c_Concepto = 'VEN' THEN i.n_Cantidad
                                 WHEN i.c_Concepto = 'DEV' THEN -i.n_Cantidad 
@@ -1203,13 +1204,14 @@ class DatabaseManager:
                         END) > 0
                     )
                     SELECT 
-                    v.codigo,
+                        RTRIM(LTRIM(v.codigo)) AS codigo,
                         COALESCE(p.cu_descripcion_corta, 'SIN DESCRIPCIÓN') AS descripcion,
                         COALESCE(p.C_DEPARTAMENTO, '') AS departamento,
                         COALESCE(p.C_GRUPO, '') AS grupo,
                         COALESCE(p.C_SUBGRUPO, '') AS subgrupo,
                         v.neto,
                         COALESCE(p.n_precio1, 0) AS precio,
+                        COALESCE(p.n_impuesto1, 0) AS impuesto1,
                         COALESCE(p.n_costoact, 0) AS costo
                     FROM VentasAgregadas v
                     LEFT JOIN MA_PRODUCTOS p WITH (NOLOCK) ON v.codigo = p.C_CODIGO

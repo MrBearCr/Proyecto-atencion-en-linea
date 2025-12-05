@@ -90,6 +90,16 @@ def setup_mbrp_tab(app):
 
     ttk.Button(top_controls, text="📊 Reporte", command=app.generar_reporte_mbrp).pack(side=tk.RIGHT, padx=5)
 
+    # Checkbox para cambiar entre unidades y dólares en ventas
+    app.mbrp_mostrar_dolares_var = tk.BooleanVar(value=False)
+    mbrp_dolares_check = ttk.Checkbutton(
+        top_controls, 
+        text="Ventas en $", 
+        variable=app.mbrp_mostrar_dolares_var,
+        command=lambda: app.actualizar_display_ventas_mbrp()
+    )
+    mbrp_dolares_check.pack(side=tk.RIGHT, padx=5)
+
     # Filtros jerárquicos
     filter_frame = ttk.Frame(app.mbrp_tab_frame)
     filter_frame.pack(fill=tk.X, pady=5)
@@ -180,7 +190,11 @@ def setup_mbrp_tab(app):
     }
 
     for col in columns:
-        app.mbrp_tree.heading(col, text=col)
+        # Usar encabezado dinámico para la columna Ventas
+        header_text = col
+        if col == "Ventas" and hasattr(app, 'mbrp_mostrar_dolares_var') and app.mbrp_mostrar_dolares_var.get():
+            header_text = "Ventas ($)"
+        app.mbrp_tree.heading(col, text=header_text)
         app.mbrp_tree.column(col, **column_config.get(col, {"width": 120, "anchor": "center"}))
 
     # Colores para MBRP - resaltar productos de BAJA movilidad con filas alternadas

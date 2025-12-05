@@ -89,6 +89,16 @@ def setup_tra_tab(app):
 
     ttk.Button(top_controls, text="Cargar", command=app.cargar_tra_base).pack(side=tk.RIGHT, padx=10)
 
+    # Checkbox para cambiar entre unidades y dólares en ventas
+    app.tra_mostrar_dolares_var = tk.BooleanVar(value=False)
+    tra_dolares_check = ttk.Checkbutton(
+        top_controls, 
+        text="Ventas en $", 
+        variable=app.tra_mostrar_dolares_var,
+        command=lambda: app.actualizar_display_ventas_tra()
+    )
+    tra_dolares_check.pack(side=tk.RIGHT, padx=5)
+
     # Frame para filtros jerárquicos
     filter_frame = ttk.Frame(app.tra_tab_frame)
     filter_frame.pack(fill=tk.X, pady=5)
@@ -248,7 +258,11 @@ def setup_tra_tab(app):
     }
     
     for col in columns:
-        app.tra_tree.heading(col, text=col)
+        # Usar encabezado dinámico para la columna Ventas
+        header_text = col
+        if col == "Ventas" and hasattr(app, 'tra_mostrar_dolares_var') and app.tra_mostrar_dolares_var.get():
+            header_text = "Ventas ($)"
+        app.tra_tree.heading(col, text=header_text)
         config = column_config.get(col, {"width": 120, "anchor": "center"})
         app.tra_tree.column(col, **config)
     

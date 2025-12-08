@@ -129,12 +129,14 @@ def paginate_tra(datos, current_page, page_size):
     return datos_pagina, total_paginas, current_page
 
 
-def calcular_porcentajes_representacion(ventas_data):
+def calcular_porcentajes_representacion(ventas_data, mostrar_dolares=False, precios_cache=None):
     """
     Calcula porcentajes de representación para cada producto
     
     Args:
         ventas_data: Lista completa de datos de ventas
+        mostrar_dolares: Si True, calcula porcentajes basados en dólares (con IVA)
+        precios_cache: Diccionario opcional de precios cacheados {codigo: precio_con_iva}
         
     Returns:
         dict: Mapeo código -> porcentaje de representación
@@ -143,8 +145,26 @@ def calcular_porcentajes_representacion(ventas_data):
         return {}
         
     try:
-        # Calcular total de ventas
-        total_ventas = sum(_get_tra_neto(item) for item in ventas_data)
+        # Calcular total de ventas según el modo
+        if mostrar_dolares:
+            # Modo dólares: usar unidades * precio con IVA
+            total_ventas = 0.0
+            for item in ventas_data:
+                codigo = str(item[0])
+                unidades = _get_tra_neto(item)
+                
+                # Obtener precio con IVA
+                precio_con_iva = 0.0
+                if precios_cache and codigo in precios_cache:
+                    precio_con_iva = precios_cache[codigo]
+                else:
+                    # Si no hay cache, usar precio base (sin IVA) como fallback
+                    precio_con_iva = float(item[7]) if len(item) > 7 else 0.0
+                
+                total_ventas += unidades * precio_con_iva
+        else:
+            # Modo unidades: usar solo las unidades
+            total_ventas = sum(_get_tra_neto(item) for item in ventas_data)
         
         if total_ventas <= 0:
             return {}
@@ -153,8 +173,26 @@ def calcular_porcentajes_representacion(ventas_data):
         porcentajes = {}
         for item in ventas_data:
             codigo = str(item[0])
-            neto = _get_tra_neto(item)
-            porcentaje = (neto / total_ventas) * 100 if total_ventas > 0 else 0.0
+            
+            if mostrar_dolares:
+                # Modo dólares: calcular valor en dólares
+                unidades = _get_tra_neto(item)
+                
+                # Obtener precio con IVA
+                precio_con_iva = 0.0
+                if precios_cache and codigo in precios_cache:
+                    precio_con_iva = precios_cache[codigo]
+                else:
+                    # Si no hay cache, usar precio base como fallback
+                    precio_con_iva = float(item[7]) if len(item) > 7 else 0.0
+                
+                valor_dolares = unidades * precio_con_iva
+                porcentaje = (valor_dolares / total_ventas) * 100 if total_ventas > 0 else 0.0
+            else:
+                # Modo unidades: usar solo unidades
+                neto = _get_tra_neto(item)
+                porcentaje = (neto / total_ventas) * 100 if total_ventas > 0 else 0.0
+            
             porcentajes[codigo] = round(porcentaje, 2)
             
         return porcentajes

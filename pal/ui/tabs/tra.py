@@ -232,7 +232,7 @@ def setup_tra_tab(app):
     tree_frame = ttk.Frame(app.tra_tab_frame)
     tree_frame.pack(fill=tk.BOTH, expand=True)
 
-    columns = ("Código", "Descripción", "Rotación", "Ventas", "Representación %", "Stock Actual", "Stock Ideal", "Días de Stock")
+    columns = ("Código", "Descripción", "Rotación", "Ventas", "Representación %", "Stock Actual", "Stock Ideal", "Días Restantes")
     app.tra_tree = ttk.Treeview(tree_frame, columns=columns, show='headings', height=10)
     
     # Configurar tamaño de fuente y altura de filas más grandes

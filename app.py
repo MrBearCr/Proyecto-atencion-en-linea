@@ -3425,17 +3425,36 @@ class DatabaseApp:
             if not all_deps:
                 return {c: {s:0 for s in locs.keys()} for c in codigos}
 
-            # Consulta por artículos y depósitos visibles
-            codigo_placeholders = ','.join('?' * len(codigos))
-            deposito_placeholders = ','.join('?' * len(all_deps))
-            sql = (
-                f"SELECT c_codarticulo, c_coddeposito, ISNULL(SUM(n_cantidad),0) AS total "
-                f"FROM MA_DEPOPROD WITH (NOLOCK) "
-                f"WHERE c_codarticulo IN ({codigo_placeholders}) AND c_coddeposito IN ({deposito_placeholders}) "
-                f"GROUP BY c_codarticulo, c_coddeposito"
-            )
-            params = codigos + all_deps
-            rows = self.db_manager.fetch_data(sql, params) or []
+            # Consulta por artículos y depósitos visibles con chunking para evitar límite de parámetros
+            all_rows = []
+            max_params_per_query = 2000  # Margen seguro bajo el límite de 2100
+            
+            # Calcular tamaño de chunk para códigos basado en número de depósitos
+            if len(all_deps) > 0:
+                max_codigos_por_chunk = max(1, max_params_per_query // len(all_deps))
+            else:
+                max_codigos_por_chunk = 100  # Valor por defecto
+            
+            for i in range(0, len(codigos), max_codigos_por_chunk):
+                chunk_codigos = codigos[i:i + max_codigos_por_chunk]
+                codigo_placeholders = ','.join('?' * len(chunk_codigos))
+                deposito_placeholders = ','.join('?' * len(all_deps))
+                sql = (
+                    f"SELECT c_codarticulo, c_coddeposito, ISNULL(SUM(n_cantidad),0) AS total "
+                    f"FROM MA_DEPOPROD WITH (NOLOCK) "
+                    f"WHERE c_codarticulo IN ({codigo_placeholders}) AND c_coddeposito IN ({deposito_placeholders}) "
+                    f"GROUP BY c_codarticulo, c_coddeposito"
+                )
+                params = chunk_codigos + all_deps
+                
+                try:
+                    chunk_rows = self.db_manager.fetch_data(sql, params) or []
+                    all_rows.extend(chunk_rows)
+                except Exception as e:
+                    self.stock_debug_log(f"Error cargando stock chunk {i//max_codigos_por_chunk + 1}: {e}", "ERROR")
+                    continue
+            
+            rows = all_rows
             # Acumular por sede dinámica
             res = {c: {sede: 0 for sede in locs.keys()} for c in codigos}
             for codigo, deposito, total in rows:
@@ -3665,9 +3684,22 @@ class DatabaseApp:
                 # Agregar tag de alerta además del tag de rotación
                 tags_mostrados = (tag_rotacion, 'stock_alert')
             
+            # Formatear neto según el modo de display (unidades o dólares con IVA)
+            neto_valor = float(neto or 0)
+            mostrar_dolares = getattr(self, 'tra_mostrar_dolares_var', tk.BooleanVar()).get()
+            
+            if mostrar_dolares:
+                # Convertir a dólares usando precio con IVA
+                precio_unitario = self._obtener_precio_producto(codigo)
+                ventas_dolares = neto_valor * precio_unitario
+                neto_formateado = f"${ventas_dolares:,.2f}"
+            else:
+                # Mostrar como unidades (valor original)
+                neto_formateado = int(neto_valor) if neto_valor == int(neto_valor) else round(neto_valor, 2)
+            
             self.tra_tree.insert(
                 "", tk.END,
-                values=(codigo, desc_mostrada, rotacion, int(neto), stock_actual, stock_ideal, dias_restantes),
+                values=(codigo, desc_mostrada, rotacion, neto_formateado, stock_actual, stock_ideal, dias_restantes),
                 tags=tags_mostrados
             )
     
@@ -3705,9 +3737,18 @@ class DatabaseApp:
             stock_ideal = self.calcular_stock_ideal_producto(neto)
             dias_restantes = self.calcular_dias_restantes(stock_actual, neto, fecha_inicio, fecha_fin)
             tag_rotacion = rotacion.lower()
-            # Formatear neto: si es entero, mostrar sin decimales
+            # Formatear neto según el modo de display (unidades o dólares con IVA)
             neto_valor = float(neto or 0)
-            neto_formateado = int(neto_valor) if neto_valor == int(neto_valor) else round(neto_valor, 2)
+            mostrar_dolares = getattr(self, 'tra_mostrar_dolares_var', tk.BooleanVar()).get()
+            
+            if mostrar_dolares:
+                # Convertir a dólares usando precio con IVA
+                precio_unitario = self._obtener_precio_producto(codigo)
+                ventas_dolares = neto_valor * precio_unitario
+                neto_formateado = f"${ventas_dolares:,.2f}"
+            else:
+                # Mostrar como unidades (valor original)
+                neto_formateado = int(neto_valor) if neto_valor == int(neto_valor) else round(neto_valor, 2)
             
             # Verificar si producto tiene alerta de stock y es de rotación ALTA o MEDIA
             alerta_stock = self._check_product_stock_alert(codigo)
@@ -4271,10 +4312,27 @@ class DatabaseApp:
         
         if count_diff > max(10, current_count * 0.1):  # Más de 10 registros o 10% de diferencia
             from pal.services.tra import calcular_porcentajes_representacion
-            self.tra_porcentajes_map = calcular_porcentajes_representacion(cached_data)
+            
+            # Verificar si estamos en modo dólares para precargar precios
+            mostrar_dolares = getattr(self, 'tra_mostrar_dolares_var', tk.BooleanVar()).get()
+            precios_cache = None
+            
+            if mostrar_dolares:
+                # Precargar precios para todos los productos en cache
+                codigos_precios = [str(item[0]) for item in cached_data]
+                if codigos_precios:
+                    self._cargar_precios_bulk(codigos_precios)
+                    # Usar cache de precios existente
+                    precios_cache = getattr(self, '_precios_cache', {})
+            
+            self.tra_porcentajes_map = calcular_porcentajes_representacion(
+                cached_data, 
+                mostrar_dolares=mostrar_dolares,
+                precios_cache=precios_cache
+            )
             self._tra_last_porcentaje_count = current_count
             self.tra_debug_log(
-                f"Porcentajes recalculados para {current_count} productos",
+                f"Porcentajes recalculados para {current_count} productos (modo: {'dólares' if mostrar_dolares else 'unidades'})",
                 throttle_key="percentage_calc",
                 throttle_seconds=5.0
             )
@@ -4311,30 +4369,60 @@ class DatabaseApp:
         # Usar el cache para obtener el stock
         stock_map = {cod: self._stock_cache.get(cod, 0) for cod in codigos}
         
+        # Obtener códigos en alerta de stock
+        alertas_stock = getattr(self, 'cached_alertas', [])
+        codigos_alerta = {str(alerta[0]).strip() for alerta in alertas_stock}
+        
         for idx, fila in enumerate(datos):
             try:
                 # Manejo robusto para diferentes longitudes de tupla
-                if len(fila) >= 8:
-                    # Estructura completa con precio: [codigo, desc, dept, grupo, sub, neto, rotacion, precio]
+                # Después de clasificar_rotacion_tra: [codigo, descripcion, departamento, grupo, subgrupo, neto, rotacion, precio, impuesto1, costo]
+                if len(fila) >= 10:
+                    # Estructura completa con rotación clasificada
+                    codigo = fila[0]
+                    desc = fila[1]
+                    neto = fila[5]
+                    rotacion = fila[6]  # Rotación clasificada
+                    precio = fila[7] if len(fila) > 7 else 0  # n_precio1
+                    impuesto1 = fila[8] if len(fila) > 8 else 0  # n_impuesto1
+                    costo = fila[9] if len(fila) > 9 else 0  # n_costoact
+                elif len(fila) >= 9:
+                    # Estructura con 9 campos (sin costo)
                     codigo = fila[0]
                     desc = fila[1]
                     neto = fila[5]
                     rotacion = fila[6]
-                    precio = fila[7] if len(fila) > 7 else 0
+                    precio = fila[7]
+                    impuesto1 = fila[8]
+                    costo = 0
+                elif len(fila) >= 8:
+                    # Estructura con 8 campos (sin impuesto1)
+                    codigo = fila[0]
+                    desc = fila[1]
+                    neto = fila[5]
+                    rotacion = fila[6]
+                    precio = fila[7]
+                    impuesto1 = 0
+                    costo = 0
                 elif len(fila) >= 7:
-                    # Estructura con rotación pero sin precio explícito
+                    # Estructura con 7 campos (solo rotación y precio)
                     codigo = fila[0]
                     desc = fila[1]
                     neto = fila[5]
                     rotacion = fila[6]
                     precio = 0
+                    impuesto1 = 0
+                    costo = 0
                 elif len(fila) >= 6:
+                    # Estructura básica sin rotación clasificada
                     codigo, desc, _, _, _, neto = fila[:6]
                     rotacion = "SIN CLASIFICAR"
                     precio = 0
+                    impuesto1 = 0
+                    costo = 0
                     # Solo loggear la primera vez para evitar spam
                     self.tra_debug_log(
-                        f"Fila con 6 campos (sin rotación): {codigo}",
+                        f"Fila sin rotación clasificada (6 campos): {codigo}",
                         throttle_key="missing_rotation",
                         throttle_seconds=10.0
                     )
@@ -4364,24 +4452,48 @@ class DatabaseApp:
                 neto_valor = float(neto or 0)
                 mostrar_dolares = getattr(self, 'tra_mostrar_dolares_var', tk.BooleanVar()).get()
                 
-                if mostrar_dolares:
-                    # Convertir a dólares usando el precio ya cargado en los datos
-                    precio_unitario = float(precio or 0)
-                    ventas_dolares = neto_valor * precio_unitario
-                    neto_formateado = f"${ventas_dolares:,.2f}"
-                else:
-                    # Mostrar como unidades
-                    neto_formateado = int(neto_valor) if neto_valor == int(neto_valor) else round(neto_valor, 2)
+                # Calcular precio real con impuesto incluido
+                precio_real = float(precio or 0)
+                if precio_real > 0 and impuesto1 > 0:
+                    # Precio real = precio_base * (1 + impuesto1/100)
+                    precio_real = precio_real * (1 + float(impuesto1) / 100)
                 
-                self.tra_tree.insert(
-                    "", tk.END,
-                    values=(codigo, desc, rotacion, neto_formateado, f"{porcentaje}%", stock_actual, stock_ideal, dias_restantes),
-                    tags=(tag_rotacion,)
+                # Debug log para producto específico 016208
+                if str(codigo).strip() == "016208":
+                    self.log(f"[PRICE DEBUG] Producto {codigo}: Base={precio}, Tax={impuesto1}%, Real={precio_real:.2f}, Neto={neto_valor}, Total=${neto_valor * precio_real:.2f}", "INFO")
+                
+                # Formatear valor de ventas según el modo
+                if mostrar_dolares and precio_real > 0:
+                    ventas_display = f"{neto_valor * precio_real:.2f}"
+                else:
+                    ventas_display = f"{neto_valor:.0f}"
+                
+                # Formatear porcentaje
+                porcentaje_display = f"{porcentaje:.2f}%"
+                
+                # Preparar valores para insertar
+                values = (
+                    codigo,
+                    desc,
+                    rotacion or "SIN CLASIFICAR",
+                    ventas_display,
+                    porcentaje_display,
+                    stock_actual,
+                    stock_ideal,
+                    f"{dias_restantes:.0f}" if dias_restantes is not None else "N/A"
                 )
+                
+                # Insertar en el treeview
+                item_id = self.tra_tree.insert("", tk.END, values=values, tags=(tag_rotacion,))
+                
+                # Aplicar tag adicional si está en alerta de stock
+                if str(codigo).strip() in codigos_alerta:
+                    self.tra_tree.item(item_id, tags=(tag_rotacion, "stock_alert"))
+            
             except Exception as e:
                 self.log(f"Error procesando fila TRA {fila}: {str(e)}", "ERROR")
                 continue
-    
+   
     def actualizar_controles_paginacion_tra(self, total_paginas):
         """Actualiza los controles de paginación TRA"""
         if hasattr(self, 'tra_pagina_label'):
@@ -4394,7 +4506,7 @@ class DatabaseApp:
             self.tra_btn_next['state'] = 'normal' if self.tra_current_page < total_paginas else 'disabled'
     
     def actualizar_display_ventas_tra(self):
-        """Actualiza el display de ventas entre unidades y dólares para TRA"""
+        """Actualiza el display de ventas entre unidades y dólares para TRA con clean reload"""
         try:
             # Actualizar encabezado de la columna
             if hasattr(self, 'tra_tree'):
@@ -4404,56 +4516,59 @@ class DatabaseApp:
                 # Actualizar el encabezado de la columna "Ventas" (índice 3)
                 self.tra_tree.heading("Ventas", text=nuevo_encabezado)
                 
-                if mostrar_dolares:
-                    # Cargar precios en bulk solo cuando se necesita mostrar en dólares
-                    codigos_visibles = []
+                # Clean reload: recargar la página actual para asegurar consistencia
+                if hasattr(self, 'tra_ventas_datos_filtrados') and self.tra_ventas_datos_filtrados:
+                    # Recargar página actual para asegurar datos consistentes
+                    self.mostrar_pagina_tra()
+                else:
+                    # Si no hay datos filtrados, actualizar items existentes
+                    if mostrar_dolares:
+                        # Cargar precios en bulk solo cuando se necesita mostrar en dólares
+                        codigos_visibles = []
+                        for item in self.tra_tree.get_children():
+                            values = list(self.tra_tree.item(item)['values'])
+                            if len(values) >= 1:
+                                codigos_visibles.append(values[0])
+                        
+                        if codigos_visibles:
+                            self._cargar_precios_bulk(codigos_visibles)
+                    
+                    # Actualizar datos existentes en el treeview
                     for item in self.tra_tree.get_children():
                         values = list(self.tra_tree.item(item)['values'])
-                        if len(values) >= 1:
-                            codigos_visibles.append(values[0])
-                    
-                    if codigos_visibles:
-                        self._cargar_precios_bulk(codigos_visibles)
-                
-                # Actualizar datos existentes en el treeview
-                for item in self.tra_tree.get_children():
-                    values = list(self.tra_tree.item(item)['values'])
-                    if len(values) >= 4:  # Asegurarse que hay suficientes columnas
-                        # Preservar formato original del código
-                        codigo = values[0] if isinstance(values[0], str) else str(values[0])
-                        ventas_actuales = values[3]
-                        
-                        # Obtener el valor original de unidades y precio desde los datos cacheados
-                        unidades_originales = 0
-                        precio_unitario = 0
-                        for fila in getattr(self, 'cached_ventas_tra', []):
-                            if str(fila[0]) == str(codigo):
-                                unidades_originales = float(fila[5] if len(fila) > 5 else 0)  # neto está en índice 5
-                                # Para TRA, el precio también está en índice 7 (sin clasificación)
-                                precio_unitario = float(fila[7] if len(fila) > 7 else 0)
-                                break
-                        
-                        if mostrar_dolares:
-                            # Convertir unidades a dólares usando precio cacheado
-                            if unidades_originales > 0:
-                                # Usar precio desde cache de precios
-                                precio_unitario = self._obtener_precio_producto(codigo)
-                                ventas_dolares = unidades_originales * precio_unitario
-                                values[3] = f"${ventas_dolares:,.2f}"
+                        if len(values) >= 4:  # Asegurarse que hay suficientes columnas
+                            # Preservar formato original del código
+                            codigo = values[0] if isinstance(values[0], str) else str(values[0])
+                            ventas_actuales = values[3]
+                            
+                            # Obtener el valor original de unidades desde los datos cacheados
+                            unidades_originales = 0
+                            for fila in getattr(self, 'cached_ventas_tra', []):
+                                if str(fila[0]) == str(codigo):
+                                    unidades_originales = float(fila[5] if len(fila) > 5 else 0)  # neto está en índice 5
+                                    break
+                            
+                            if mostrar_dolares:
+                                # Convertir unidades a dólares usando precio cacheado
+                                if unidades_originales > 0:
+                                    # Usar precio desde cache de precios
+                                    precio_unitario = self._obtener_precio_producto(codigo)
+                                    ventas_dolares = unidades_originales * precio_unitario
+                                    values[3] = f"${ventas_dolares:,.2f}"
+                                else:
+                                    values[3] = "$0.00"
                             else:
-                                values[3] = "$0.00"
-                        else:
-                            # Mostrar como unidades (valor original desde cache)
-                            values[3] = int(unidades_originales) if unidades_originales == int(unidades_originales) else unidades_originales
-                        
-                        # Actualizar el item
-                        self.tra_tree.item(item, values=values)
+                                # Mostrar como unidades (valor original desde cache)
+                                values[3] = int(unidades_originales) if unidades_originales == int(unidades_originales) else unidades_originales
+                            
+                            # Actualizar el item
+                            self.tra_tree.item(item, values=values)
                         
         except Exception as e:
             self.log(f"Error actualizando display ventas TRA: {e}", "ERROR")
     
     def actualizar_display_ventas_mbrp(self):
-        """Actualiza el display de ventas entre unidades y dólares para MBRP"""
+        """Actualiza el display de ventas entre unidades y dólares para MBRP con clean reload"""
         try:
             # Actualizar encabezado de la columna
             if hasattr(self, 'mbrp_tree'):
@@ -4463,50 +4578,56 @@ class DatabaseApp:
                 # Actualizar el encabezado de la columna "Ventas" (índice 3)
                 self.mbrp_tree.heading("Ventas", text=nuevo_encabezado)
                 
-                if mostrar_dolares:
-                    # Cargar precios en bulk solo cuando se necesita mostrar en dólares
-                    codigos_visibles = []
+                # Clean reload: recargar la página actual para asegurar consistencia
+                if hasattr(self, 'mbrp_ventas_datos_filtrados') and self.mbrp_ventas_datos_filtrados:
+                    # Recargar página actual para asegurar datos consistentes
+                    self.cambiar_pagina_mbrp(0)  # 0 significa recargar página actual
+                else:
+                    # Si no hay datos filtrados, actualizar items existentes
+                    if mostrar_dolares:
+                        # Cargar precios en bulk solo cuando se necesita mostrar en dólares
+                        codigos_visibles = []
+                        for item in self.mbrp_tree.get_children():
+                            values = list(self.mbrp_tree.item(item)['values'])
+                            if len(values) >= 1:
+                                codigos_visibles.append(values[0])
+                        
+                        if codigos_visibles:
+                            self._cargar_precios_bulk(codigos_visibles)
+                    
+                    # Actualizar datos existentes en el treeview
                     for item in self.mbrp_tree.get_children():
                         values = list(self.mbrp_tree.item(item)['values'])
-                        if len(values) >= 1:
-                            codigos_visibles.append(values[0])
-                    
-                    if codigos_visibles:
-                        self._cargar_precios_bulk(codigos_visibles)
-                
-                # Actualizar datos existentes en el treeview
-                for item in self.mbrp_tree.get_children():
-                    values = list(self.mbrp_tree.item(item)['values'])
-                    if len(values) >= 4:  # Asegurarse que hay suficientes columnas
-                        # Preservar formato original del código
-                        codigo = values[0] if isinstance(values[0], str) else str(values[0])
-                        ventas_actuales = values[3]
-                        
-                        # Obtener el valor original de unidades y precio desde los datos cacheados
-                        unidades_originales = 0
-                        precio_unitario = 0
-                        for fila in getattr(self, 'cached_ventas_mbrp', []):
-                            if str(fila[0]) == str(codigo):
-                                unidades_originales = float(fila[5] if len(fila) > 5 else 0)  # neto está en índice 5
-                                # Después de clasificación MBRP, precio está en índice 7
-                                precio_unitario = float(fila[7] if len(fila) > 7 else 0)
-                                break
-                        
-                        if mostrar_dolares:
-                            # Convertir unidades a dólares usando precio cacheado
-                            if unidades_originales > 0:
-                                # Usar precio desde cache de precios
-                                precio_unitario = self._obtener_precio_producto(codigo)
-                                ventas_dolares = unidades_originales * precio_unitario
-                                values[3] = f"${ventas_dolares:,.2f}"
+                        if len(values) >= 4:  # Asegurarse que hay suficientes columnas
+                            # Preservar formato original del código
+                            codigo = values[0] if isinstance(values[0], str) else str(values[0])
+                            ventas_actuales = values[3]
+                            
+                            # Obtener el valor original de unidades y precio desde los datos cacheados
+                            unidades_originales = 0
+                            precio_unitario = 0
+                            for fila in getattr(self, 'cached_ventas_mbrp', []):
+                                if str(fila[0]) == str(codigo):
+                                    unidades_originales = float(fila[5] if len(fila) > 5 else 0)  # neto está en índice 5
+                                    # Después de clasificación MBRP, precio está en índice 7
+                                    precio_unitario = float(fila[7] if len(fila) > 7 else 0)
+                                    break
+                            
+                            if mostrar_dolares:
+                                # Convertir unidades a dólares usando precio cacheado
+                                if unidades_originales > 0:
+                                    # Usar precio desde cache de precios
+                                    precio_unitario = self._obtener_precio_producto(codigo)
+                                    ventas_dolares = unidades_originales * precio_unitario
+                                    values[3] = f"${ventas_dolares:,.2f}"
+                                else:
+                                    values[3] = "$0.00"
                             else:
-                                values[3] = "$0.00"
-                        else:
-                            # Mostrar como unidades (valor original desde cache)
-                            values[3] = int(unidades_originales) if unidades_originales == int(unidades_originales) else unidades_originales
-                        
-                        # Actualizar el item
-                        self.mbrp_tree.item(item, values=values)
+                                # Mostrar como unidades (valor original desde cache)
+                                values[3] = int(unidades_originales) if unidades_originales == int(unidades_originales) else unidades_originales
+                            
+                            # Actualizar el item
+                            self.mbrp_tree.item(item, values=values)
                         
         except Exception as e:
             self.log(f"Error actualizando display ventas MBRP: {e}", "ERROR")
@@ -4563,17 +4684,29 @@ class DatabaseApp:
             if not codigos_faltantes:
                 return  # Ya tenemos todos los precios en cache
             
-            self.log(f"Cargando precios para {len(codigos_faltantes)} productos...", "INFO")
+            # Consultar precios en chunk para evitar límite de 2100 parámetros de SQL Server
+            chunk_size = 2000  # Dejamos margen bajo el límite de 2100
             
-            # Consultar precios en bulk con IVA
-            placeholders = ','.join(['?' for _ in codigos_faltantes])
-            query = f"""
-                SELECT C_CODIGO, COALESCE(n_precio1, 0) AS precio, COALESCE(n_impuesto1, 0) AS impuesto1
-                FROM MA_PRODUCTOS WITH (NOLOCK)
-                WHERE C_CODIGO IN ({placeholders})
-            """
+            self.log(f"Cargando precios para {len(codigos_faltantes)} productos en chunks de {chunk_size}...", "INFO")
+            all_results = []
             
-            results = self.db_manager.fetch_data(query, codigos_faltantes)
+            for i in range(0, len(codigos_faltantes), chunk_size):
+                chunk = codigos_faltantes[i:i + chunk_size]
+                placeholders = ','.join(['?' for _ in chunk])
+                query = f"""
+                    SELECT C_CODIGO, COALESCE(n_precio1, 0) AS precio, COALESCE(n_impuesto1, 0) AS impuesto1
+                    FROM MA_PRODUCTOS WITH (NOLOCK)
+                    WHERE C_CODIGO IN ({placeholders})
+                """
+                
+                try:
+                    chunk_results = self.db_manager.fetch_data(query, chunk)
+                    all_results.extend(chunk_results)
+                except Exception as e:
+                    self.log(f"Error cargando chunk {i//chunk_size + 1} de precios: {e}", "ERROR")
+                    continue
+            
+            results = all_results
             
             # Actualizar cache con precio + IVA
             for row in results:
@@ -4584,13 +4717,20 @@ class DatabaseApp:
                     # Calcular precio con IVA incluido
                     precio_con_iva = precio_base * (1.0 + (impuesto_pct / 100.0))
                     self._precios_cache[codigo] = precio_con_iva
+                    # Debug: log para verificar caché
+                    if codigo == '016208':  # Debug específico para el código mencionado
+                        self.tra_debug_log(
+                            f"CACHE PRECIO {codigo}: base={precio_base}, iva={impuesto_pct}%, con_iva={precio_con_iva}",
+                            throttle_key="cache_price_debug",
+                            throttle_seconds=5.0
+                        )
             
             # Para códigos no encontrados, guardar precio 0
             for codigo in codigos_faltantes:
                 if codigo not in self._precios_cache:
                     self._precios_cache[codigo] = 0.0
             
-            self.log(f"Precios cargados: {len(self._precios_cache)} productos en cache", "SUCCESS")
+            self.log(f"Precios cargados: {len(self._precios_cache)} productos en cache ({len(results)} recuperados de BD)", "SUCCESS")
             
         except Exception as e:
             self.log(f"Error cargando precios bulk: {e}", "ERROR")
@@ -4644,6 +4784,12 @@ class DatabaseApp:
                 # Calcular precio con IVA incluido
                 precio_con_iva = precio_base * (1.0 + (impuesto_pct / 100.0))
                 self._precios_cache[codigo_producto] = precio_con_iva
+                # Debug: log para verificar cálculo
+                self.tra_debug_log(
+                    f"Precio para {codigo_producto}: base={precio_base}, iva={impuesto_pct}%, con_iva={precio_con_iva}",
+                    throttle_key="price_calc",
+                    throttle_seconds=5.0
+                )
                 return precio_con_iva
             else:
                 self._precios_cache[codigo_producto] = 0.0
@@ -9601,13 +9747,13 @@ class DatabaseApp:
                 else:
                     tag_final = f"{tag_base}_alt"  # Filas impares: colores oscuros
                 
-                # Formatear neto según el modo de display
+                # Formatear neto según el modo de display (con IVA incluido)
                 neto_valor = float(neto or 0)
                 mostrar_dolares = getattr(self, 'mbrp_mostrar_dolares_var', tk.BooleanVar()).get()
                 
                 if mostrar_dolares:
-                    # Convertir a dólares usando el precio ya cargado en los datos
-                    precio_unitario = float(precio or 0)
+                    # Convertir a dólares usando precio con IVA desde la base de datos
+                    precio_unitario = self._obtener_precio_producto(codigo)  # Ya incluye IVA
                     ventas_dolares = neto_valor * precio_unitario
                     neto_formateado = f"${ventas_dolares:,.2f}"
                 else:

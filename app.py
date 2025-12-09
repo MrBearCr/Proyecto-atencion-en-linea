@@ -4458,10 +4458,6 @@ class DatabaseApp:
                     # Precio real = precio_base * (1 + impuesto1/100)
                     precio_real = precio_real * (1 + float(impuesto1) / 100)
                 
-                # Debug log para producto específico 016208
-                if str(codigo).strip() == "016208":
-                    self.log(f"[PRICE DEBUG] Producto {codigo}: Base={precio}, Tax={impuesto1}%, Real={precio_real:.2f}, Neto={neto_valor}, Total=${neto_valor * precio_real:.2f}", "INFO")
-                
                 # Formatear valor de ventas según el modo
                 if mostrar_dolares and precio_real > 0:
                     ventas_display = f"{neto_valor * precio_real:.2f}"

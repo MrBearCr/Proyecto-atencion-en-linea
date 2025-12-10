@@ -359,13 +359,23 @@ def _stats_render_pie(app, labels, sizes, title, *, on_pick_codes, legend_rows, 
                         continue
                     nombre = str(info.get('full_name', code))
                     cod = str(info.get('code', code))
-                    ventas = info.get('ventas', 0)
                     pct = info.get('pct', 0.0)
-                    try:
-                        ventas_txt = f"{int(round(ventas))}"
-                    except Exception:
-                        ventas_txt = str(ventas)
-                    hover_label_var.set(f"{nombre}\nCod: {cod}  •  Ventas: {ventas_txt}  •  {pct:.1f}%")
+
+                    # Soportar tanto métricas de ventas (TRA) como días sin venta (MBRP)
+                    dias = info.get('dias', None)
+                    if dias is not None:
+                        try:
+                            dias_txt = f"{int(round(dias))}"
+                        except Exception:
+                            dias_txt = str(dias)
+                        hover_label_var.set(f"{nombre}\nCod: {cod}  •  Días sin venta: {dias_txt}  •  {pct:.1f}%")
+                    else:
+                        ventas = info.get('ventas', 0)
+                        try:
+                            ventas_txt = f"{int(round(ventas))}"
+                        except Exception:
+                            ventas_txt = str(ventas)
+                        hover_label_var.set(f"{nombre}\nCod: {cod}  •  Ventas: {ventas_txt}  •  {pct:.1f}%")
                     found = True
                     break
             if not found:
@@ -500,13 +510,23 @@ def _stats_render_bar(app, labels, sizes, title, *, on_pick_codes, legend_rows, 
                         continue
                     nombre = str(info.get('full_name', code))
                     cod = str(info.get('code', code))
-                    ventas = info.get('ventas', 0)
                     pct = info.get('pct', 0.0)
-                    try:
-                        ventas_txt = f"{int(round(ventas))}"
-                    except Exception:
-                        ventas_txt = str(ventas)
-                    hover_label_var.set(f"{nombre}\nCod: {cod}  •  Ventas: {ventas_txt}  •  {pct:.1f}%")
+
+                    # Soportar tanto métricas de ventas (TRA) como días sin venta (MBRP)
+                    dias = info.get('dias', None)
+                    if dias is not None:
+                        try:
+                            dias_txt = f"{int(round(dias))}"
+                        except Exception:
+                            dias_txt = str(dias)
+                        hover_label_var.set(f"{nombre}\nCod: {cod}  •  Días sin venta: {dias_txt}  •  {pct:.1f}%")
+                    else:
+                        ventas = info.get('ventas', 0)
+                        try:
+                            ventas_txt = f"{int(round(ventas))}"
+                        except Exception:
+                            ventas_txt = str(ventas)
+                        hover_label_var.set(f"{nombre}\nCod: {cod}  •  Ventas: {ventas_txt}  •  {pct:.1f}%")
                     found = True
                     break
             if not found:
@@ -1364,7 +1384,11 @@ def _stats_mbrp_aggregate_days(ventas, dias_map, level, *, dept=None, group=None
 
 
 def _stats_compute_and_draw_mbrp(app, chart_type):
-    """Dibuja estadísticas MBRP basadas en días sin venta por Dept/Grupo/Sub/Producto."""
+    """Dibuja estadísticas MBRP basadas en días sin venta por Dept/Grupo/Sub/Producto.
+
+    Nota: todo cálculo pesado (consulta de últimas ventas) se ejecuta en segundo
+    plano para no bloquear el hilo principal de Tkinter.
+    """
     # Validar datos MBRP cargados
     ventas = getattr(app, 'cached_ventas_mbrp_effective', None)
     if ventas is None:
@@ -1388,6 +1412,22 @@ def _stats_compute_and_draw_mbrp(app, chart_type):
     if excluded:
         ventas = [r for r in ventas if len(r) > 2 and str(r[2]) not in excluded]
 
+    # Aplicar filtro por proveedor activo en MBRP (si existe)
+    try:
+        proveedor_cod = getattr(app, 'mbrp_proveedor_codigo', None)
+        if proveedor_cod:
+            get_codigos = getattr(app, '_get_codigos_por_proveedor_cached', None)
+            if callable(get_codigos):
+                codigos_prov = get_codigos(proveedor_cod)
+                if codigos_prov:
+                    codigos_set = set(str(c) for c in codigos_prov)
+                    ventas = [r for r in ventas if r and str(r[0]) in codigos_set]
+                else:
+                    ventas = []
+    except Exception:
+        # En caso de error en el filtro de proveedor, continuar con dataset sin filtrar por proveedor
+        pass
+
     if not ventas:
         _stats_clear_container(app)
         ttk.Label(app.graph_container, text="Sin datos MBRP para graficar con los filtros actuales.").pack(pady=20)
@@ -1402,10 +1442,61 @@ def _stats_compute_and_draw_mbrp(app, chart_type):
     dias_map = getattr(app, '_stats_mbrp_dias_map', None)
     dias_key = getattr(app, '_stats_mbrp_dias_key', None)
 
+    # Si no hay mapa de días calculado para el dataset actual, lanzarlo en background
     if dias_map is None or dias_key != cache_key:
-        dias_map = _stats_mbrp_compute_days_map(app, ventas)
-        app._stats_mbrp_dias_map = dias_map
-        app._stats_mbrp_dias_key = cache_key
+        # Evitar lanzar múltiples hilos simultáneos para el mismo cálculo
+        if not getattr(app, '_stats_mbrp_loading_dias', False):
+            try:
+                app._stats_mbrp_loading_dias = True
+            except Exception:
+                pass
+
+            import threading
+
+            def _worker():
+                try:
+                    new_map = _stats_mbrp_compute_days_map(app, ventas)
+                except Exception:
+                    new_map = {}
+
+                def _on_finish():
+                    try:
+                        app._stats_mbrp_dias_map = new_map
+                        app._stats_mbrp_dias_key = cache_key
+                    except Exception:
+                        pass
+                    finally:
+                        try:
+                            app._stats_mbrp_loading_dias = False
+                        except Exception:
+                            pass
+                    # Reintentar renderizado ahora que el cálculo terminó
+                    try:
+                        app.mostrar_estadisticas()
+                    except Exception:
+                        pass
+
+                root = getattr(app, 'root', None)
+                if root is not None:
+                    try:
+                        root.after(0, _on_finish)
+                    except Exception:
+                        _on_finish()
+                else:
+                    _on_finish()
+
+            try:
+                threading.Thread(target=_worker, daemon=True, name="StatsMBRPDias").start()
+            except Exception:
+                try:
+                    app._stats_mbrp_loading_dias = False
+                except Exception:
+                    pass
+
+        # Mostrar estado de carga sin bloquear la UI
+        _stats_clear_container(app)
+        ttk.Label(app.graph_container, text="Calculando días sin venta para MBRP...").pack(pady=20)
+        return
 
     if not dias_map:
         _stats_clear_container(app)
@@ -1548,6 +1639,7 @@ def _stats_compute_and_draw_mbrp(app, chart_type):
         sizes = []
         meta = []
         legend = []
+        hover_meta = {}
         for code, dias in items:
             full_name = product_names.get(code, code)
             name = str(full_name)
@@ -1559,6 +1651,12 @@ def _stats_compute_and_draw_mbrp(app, chart_type):
             sizes.append(dias)
             meta.append(code)
             legend.append((name, pct, float(dias)))
+            hover_meta[str(code)] = {
+                'full_name': str(full_name),
+                'code': str(code),
+                'dias': float(dias),
+                'pct': float(pct),
+            }
 
         dname = inv['dept'].get(str(dept), str(dept)) if dept else ''
         gname = inv['group'].get((str(dept), str(group)), str(group)) if group else ''
@@ -1566,9 +1664,9 @@ def _stats_compute_and_draw_mbrp(app, chart_type):
         title = f"MBRP — {dname} → {gname} → {sname} — Top {len(items)} productos por días sin venta{rango_suffix}"
         _stats_update_breadcrumb(app)
         if chart_type == 'bar':
-            _stats_render_bar(app, labels, sizes, title, on_pick_codes=meta, legend_rows=legend)
+            _stats_render_bar(app, labels, sizes, title, on_pick_codes=meta, legend_rows=legend, hover_meta=hover_meta)
         else:
-            _stats_render_pie(app, labels, sizes, title, on_pick_codes=meta, legend_rows=legend)
+            _stats_render_pie(app, labels, sizes, title, on_pick_codes=meta, legend_rows=legend, hover_meta=hover_meta)
         return
 
 def setup_stats_tab(app):

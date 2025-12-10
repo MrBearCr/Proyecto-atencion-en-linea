@@ -861,8 +861,23 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
                 #       [codigo, desc, dept, grupo, sub, neto, rotacion]
                 #   - Con precio/costo (8 campos base + rotación):
                 #       [codigo, desc, dept, grupo, sub, neto, rotacion, precio, costo]
-                if len(fila) >= 9:
-                    # Tomamos explícitamente los primeros 9 campos en el orden esperado
+                #   - Con precio/IVA/costo (10 campos):
+                #       [codigo, desc, dept, grupo, sub, neto, rotacion, precio, impuesto1, costo]
+                #
+                # NOTA: Después de agregar n_impuesto1 desde BD, la estructura completa
+                #       tiene 10 columnas. La columna de COSTO real quedó en el índice 9
+                #       (última posición), mientras que impuesto1 está en el índice 8.
+                #       Aquí nos aseguramos de mapear "costo" siempre al costo real,
+                #       nunca al impuesto.
+                if len(fila) >= 10:
+                    # Estructura completa con IVA separado
+                    codigo, desc, dept, grupo, sub, neto = fila[:6]
+                    rotacion = fila[6]
+                    precio = fila[7]
+                    # fila[8] = impuesto1 (IVA), solo para cálculos internos, no va directo a columnas
+                    costo = fila[9]
+                elif len(fila) == 9:
+                    # Patrón clásico sin columna explícita de impuesto1
                     codigo, desc, dept, grupo, sub, neto, rotacion, precio, costo = fila[:9]
                 elif len(fila) == 8:
                     # Caso mixto/legacy: asumir que los últimos dos son precio/costo pero sin rotación clara

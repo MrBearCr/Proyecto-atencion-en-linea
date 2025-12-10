@@ -1135,7 +1135,112 @@ def _stats_compute_and_draw(app):
         else:
             _stats_render_pie(app, labels, sizes, title, on_pick_codes=meta, legend_rows=legend)
         return
+    elif lvl == 'sub':
+        dept = state.get('dept')
+        group = state.get('group')
+        data_map = _stats_aggregate(ventas, 'sub', dept=dept, group=group)
+        if not data_map:
+            _stats_clear_container(app)
+            dname = inv['dept'].get(str(dept), str(dept)) if dept else 'N/A'
+            gname = inv['group'].get((str(dept), str(group)), str(group)) if group else 'N/A'
+            ttk.Label(app.graph_container, text=f"Sin datos de subgrupos para {dname} / {gname}{provider_suffix}").pack(pady=10)
+            return
+        labels, sizes, meta, legend = _stats_format_labels(data_map, inv_maps=inv, level='sub', dept=dept, group=group)
+        dname = inv['dept'].get(str(dept), str(dept)) if dept else ''
+        gname = inv['group'].get((str(dept), str(group)), str(group)) if group else ''
+        title = f"{dname} → {gname} — Representación por Subgrupo{days_suffix}{provider_suffix}"
+        _stats_update_breadcrumb(app)
+        if chart_type == 'bar':
+            _stats_render_bar(app, labels, sizes, title, on_pick_codes=meta, legend_rows=legend)
+        else:
+            _stats_render_pie(app, labels, sizes, title, on_pick_codes=meta, legend_rows=legend)
+        return
+    elif lvl == 'product':
+        dept = state.get('dept')
+        group = state.get('group')
+        sub = state.get('sub')
+        # Validar que haya contexto completo para productos
+        if not (dept and group and sub):
+            # Si falta algo, regresar a nivel de subgrupos
+            state['level'] = 'sub'
+            app.stats_pie_state = state
+            app.mostrar_estadisticas()
+            return
 
+        # Filtrar registros del subgrupo seleccionado y agrupar por producto
+        product_totals = {}
+        product_names = {}
+        for r in ventas:
+            if len(r) < 6:
+                continue
+            try:
+                if not (
+                    str(r[2]) == str(dept)
+                    and str(r[3]) == str(group)
+                    and str(r[4]) == str(sub)
+                ):
+                    continue
+            except Exception:
+                continue
+            code = str(r[0])
+            name = str(r[1]) if len(r) > 1 and r[1] is not None else code
+            try:
+                neto = float(r[5] or 0)
+            except Exception:
+                neto = 0.0
+            if neto <= 0:
+                continue
+            product_totals[code] = product_totals.get(code, 0.0) + neto
+            if code not in product_names:
+                product_names[code] = name
+
+        if not product_totals:
+            _stats_clear_container(app)
+            dname = inv['dept'].get(str(dept), str(dept)) if dept else 'N/A'
+            gname = inv['group'].get((str(dept), str(group)), str(group)) if group else 'N/A'
+            sname = inv['sub'].get((str(dept), str(group), str(sub)), str(sub)) if sub else 'N/A'
+            ttk.Label(app.graph_container, text=f"Sin datos de productos para {dname} / {gname} / {sname}{provider_suffix}").pack(pady=10)
+            return
+
+        # Ordenar productos por neto y limitar a top 25 para estética
+        max_products = 25
+        items = sorted(product_totals.items(), key=lambda kv: kv[1], reverse=True)[:max_products]
+        total = sum(v for _, v in items) or 1.0
+
+        labels = []
+        sizes = []
+        meta = []
+        legend = []
+        hover_meta = {}
+        for code, val in items:
+            full_name = product_names.get(code, code)
+            # Limitar nombre visible a 15 caracteres para mantener estética en la etiqueta
+            name = str(full_name)
+            max_len = 15
+            if len(name) > max_len:
+                name = name[:max_len]
+            pct = (val / total) * 100.0
+            labels.append(f"{name}\n{pct:.1f}%")
+            sizes.append(val)
+            meta.append(code)
+            legend.append((name, pct, float(val)))
+            hover_meta[str(code)] = {
+                'full_name': str(full_name),
+                'code': str(code),
+                'ventas': float(val),
+                'pct': float(pct),
+            }
+
+        dname = inv['dept'].get(str(dept), str(dept)) if dept else ''
+        gname = inv['group'].get((str(dept), str(group)), str(group)) if group else ''
+        sname = inv['sub'].get((str(dept), str(group), str(sub)), str(sub)) if sub else ''
+        title = f"{dname} → {gname} → {sname} — Top {len(items)} productos{days_suffix}{provider_suffix}"
+        _stats_update_breadcrumb(app)
+        if chart_type == 'bar':
+            _stats_render_bar(app, labels, sizes, title, on_pick_codes=meta, legend_rows=legend, hover_meta=hover_meta)
+        else:
+            _stats_render_pie(app, labels, sizes, title, on_pick_codes=meta, legend_rows=legend, hover_meta=hover_meta)
+        return
 
 def _stats_mbrp_compute_days_map(app, ventas):
     """Construye un mapa codigo -> días sin venta usando servicios MBRP.
@@ -1465,9 +1570,6 @@ def _stats_compute_and_draw_mbrp(app, chart_type):
         else:
             _stats_render_pie(app, labels, sizes, title, on_pick_codes=meta, legend_rows=legend)
         return
-
-
-
 
 def setup_stats_tab(app):
     app.stats_frame = ttk.Frame(app.stats_tab)

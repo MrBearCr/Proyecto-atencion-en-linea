@@ -147,26 +147,32 @@ def _stats_clear_container(app):
             pass
 
 def _stats_update_breadcrumb(app):
-    """Actualiza el breadcrumb teniendo en cuenta el proveedor seleccionado y la jerarquía."""
-    state = getattr(app, 'stats_pie_state', {"level": "dept", "dept": None, "group": None, "sub": None})
+    """Actualiza el breadcrumb teniendo en cuenta el modo actual, proveedor y jerarquía."""
+    state = getattr(app, 'stats_pie_state', {"mode": "tra", "level": "dept", "dept": None, "group": None, "sub": None})
     inv = getattr(app, '_stats_inv_maps', _stats_build_inverse_maps(app))
     app._stats_inv_maps = inv
 
     parts = []
 
-    # Si hay proveedor activo en TRA, mostrarlo siempre como raíz del breadcrumb
-    try:
-        prov_cod = getattr(app, 'tra_proveedor_codigo', None)
-        prov_desc = getattr(app, 'tra_proveedor_descripcion', None)
-    except Exception:
-        prov_cod = None
-        prov_desc = None
+    mode = state.get('mode', 'tra')
 
-    if prov_cod:
-        parts.append(f"Proveedor: {prov_desc or prov_cod}")
+    if mode == 'mbrp':
+        # Raíz específica para estadísticas MBRP (días sin venta)
+        parts.append("MBRP — Días sin venta")
     else:
-        # Sin proveedor: raíz genérica
-        parts.append("Todos los proveedores")
+        # Si hay proveedor activo en TRA, mostrarlo siempre como raíz del breadcrumb
+        try:
+            prov_cod = getattr(app, 'tra_proveedor_codigo', None)
+            prov_desc = getattr(app, 'tra_proveedor_descripcion', None)
+        except Exception:
+            prov_cod = None
+            prov_desc = None
+
+        if prov_cod:
+            parts.append(f"Proveedor: {prov_desc or prov_cod}")
+        else:
+            # Sin proveedor: raíz genérica
+            parts.append("Todos los proveedores")
 
     # Nivel jerárquico interno (Depto/Grupo/Sub)
     if state.get('dept'):
@@ -184,19 +190,22 @@ def _stats_update_breadcrumb(app):
 
     app.stats_breadcrumb_var.set(" / ".join(parts))
 
-# Habilitar/Deshabilitar botón volver
+    # Habilitar/Deshabilitar botón volver
     lvl = state.get('level', 'dept')
     if lvl == 'dept':
         # En raíz de jerarquía interna no hay nada a donde volver
-        app.stats_btn_back.state(["disabled"]) if hasattr(app, 'stats_btn_back') else None
+        if hasattr(app, 'stats_btn_back'):
+            app.stats_btn_back.state(["disabled"])
     else:
         try:
-            app.stats_btn_back.state(["!disabled"])  # habilitar
+            if hasattr(app, 'stats_btn_back'):
+                app.stats_btn_back.state(["!disabled"])  # habilitar
         except Exception:
             pass
 
+
 def _stats_go_back(app):
-    state = getattr(app, 'stats_pie_state', {"level": "dept", "dept": None, "group": None})
+    state = getattr(app, 'stats_pie_state', {"mode": "tra", "level": "dept", "dept": None, "group": None})
     lvl = state.get('level', 'dept')
     if lvl == 'product':
         state['level'] = 'sub'
@@ -410,7 +419,7 @@ def _stats_render_bar(app, labels, sizes, title, *, on_pick_codes, legend_rows, 
     ax.set_yticks(y_pos)
     ax.set_yticklabels(names)
     ax.invert_yaxis()  # mayor valor arriba
-    ax.set_xlabel('Ventas netas')
+    ax.set_xlabel('Valor')
     ax.set_title(title)
 
     # Hacer cada barra seleccionable para drill-down
@@ -553,6 +562,85 @@ def _stats_get_days_suffix(app):
         return f" - {dias} días"
     except Exception:
         return ""
+
+
+def _stats_transform_for_metric(app, records):
+    """Devuelve una nueva lista de registros TRA con el campo índice 5 en unidades o dólares.
+
+    Si el checkbox "Ventas en $" de TRA está activo, convierte las unidades a monto en dólares
+    usando la lógica centralizada de la app (cache de precios + IVA). En caso contrario,
+    devuelve una copia superficial de los registros originales.
+    """
+    if not records:
+        return []
+
+    # Determinar si estamos en modo dólares
+    try:
+        mostrar_dolares_var = getattr(app, 'tra_mostrar_dolares_var', None)
+        use_dollars = bool(mostrar_dolares_var and mostrar_dolares_var.get())
+    except Exception:
+        use_dollars = False
+
+    # Si no se solicita dólares, devolver copia simple
+    if not use_dollars:
+        return list(records)
+
+    # Verificar helper de conversión
+    convertir = getattr(app, '_convertir_unidades_a_dolares', None)
+    if not callable(convertir):
+        # Sin helper, degradar a unidades
+        return list(records)
+
+    # Precargar precios en bulk si es posible (más eficiente que consulta por producto)
+    try:
+        codigos = []
+        for r in records:
+            try:
+                if r and len(r) > 0 and r[0] is not None:
+                    codigos.append(str(r[0]))
+            except Exception:
+                continue
+        if codigos and hasattr(app, '_cargar_precios_bulk'):
+            # Usar solo códigos únicos para minimizar la consulta
+            app._cargar_precios_bulk(list(set(codigos)))
+    except Exception:
+        # Si algo falla, continuamos sin precarga (fallback a consultas individuales)
+        pass
+
+    new_records = []
+    for r in records:
+        try:
+            if not r or len(r) < 6:
+                new_records.append(r)
+                continue
+
+            codigo = str(r[0]) if r[0] is not None else None
+            try:
+                unidades = float(r[5] or 0)
+            except Exception:
+                unidades = 0.0
+
+            if not codigo or unidades <= 0:
+                # Nada que convertir; mantener registro con neto original
+                new_records.append(r)
+                continue
+
+            try:
+                valor_dolares = float(convertir(codigo, unidades) or 0.0)
+            except Exception:
+                # En caso de error de conversión, degradar a unidades
+                valor_dolares = unidades
+
+            r_list = list(r)
+            if len(r_list) < 6:
+                r_list.extend([None] * (6 - len(r_list)))
+            r_list[5] = valor_dolares
+            new_records.append(tuple(r_list))
+        except Exception:
+            # Ante cualquier excepción inesperada, preservar el registro tal cual
+            new_records.append(r)
+
+    return new_records
 
 
 def _stats_draw_providers_universe(app, ventas_total_universo, total_universo, chart_type):
@@ -698,6 +786,37 @@ def _stats_draw_providers_universe(app, ventas_total_universo, total_universo, c
 
 
 def _stats_compute_and_draw(app):
+    # Determinar tipo de gráfico (pie o barras)
+    chart_mode = getattr(app, 'stats_chart_type_var', None)
+    chart_type = 'pie'
+    try:
+        if chart_mode is not None:
+            sel = chart_mode.get() or ''
+            chart_type = 'bar' if 'Barra' in sel else 'pie'
+    except Exception:
+        chart_type = 'pie'
+
+    # Determinar modo de vista (Jerarquía TRA, Proveedores, MBRP días sin venta)
+    view_mode_var = getattr(app, 'stats_view_mode_var', None)
+    stats_mode = 'hierarchy'
+    try:
+        if view_mode_var is not None:
+            sel = (view_mode_var.get() or '').strip()
+            if 'Proveed' in sel:
+                stats_mode = 'providers'
+            elif 'MBRP' in sel or 'sin venta' in sel or 'Sin venta' in sel:
+                stats_mode = 'mbrp_days'
+    except Exception:
+        stats_mode = 'hierarchy'
+
+    # Si el usuario seleccionó vista basada en MBRP (días sin venta), delegar a rutina específica
+    if stats_mode == 'mbrp_days':
+        _stats_compute_and_draw_mbrp(app, chart_type)
+        return
+
+    # ==========================
+    # Modo RI / TRA (unidades/$)
+    # ==========================
     # Validar datos TRA cargados
     ventas = getattr(app, 'cached_ventas_tra', None)
     if not ventas:
@@ -729,6 +848,8 @@ def _stats_compute_and_draw(app):
 
     # Clonar lista para tener referencia del universo total (antes de filtrar por proveedor)
     ventas_total_universo = list(ventas)
+    # Adaptar métrica según modo (unidades vs dólares) utilizando helper centralizado
+    ventas_total_universo = _stats_transform_for_metric(app, ventas_total_universo)
 
     # Aplicar filtro de texto de RI (por código o descripción) al universo completo
     try:
@@ -835,27 +956,6 @@ def _stats_compute_and_draw(app):
     except Exception:
         pass
 
-    # Determinar tipo de gráfico (pie o barras)
-    chart_mode = getattr(app, 'stats_chart_type_var', None)
-    chart_type = 'pie'
-    try:
-        if chart_mode is not None:
-            sel = chart_mode.get() or ''
-            chart_type = 'bar' if 'Barra' in sel else 'pie'
-    except Exception:
-        chart_type = 'pie'
-
-    # Determinar modo de vista: jerarquía (Depto/Grupo/Sub) vs universo de proveedores
-    view_mode_var = getattr(app, 'stats_view_mode_var', None)
-    stats_mode = 'hierarchy'
-    try:
-        if view_mode_var is not None:
-            sel = view_mode_var.get() or ''
-            if 'Proveed' in sel:
-                stats_mode = 'providers'
-    except Exception:
-        stats_mode = 'hierarchy'
-
     # Si el usuario seleccionó vista por proveedor, dibujar y salir
     if stats_mode == 'providers':
         _stats_draw_providers_universe(app, ventas_total_universo, total_universo, chart_type)
@@ -881,6 +981,7 @@ def _stats_compute_and_draw(app):
             # Empezar directamente desde nivel Departamento para el proveedor seleccionado
             # Esto permite drill-down inmediato sin importar el porcentaje de mercado
             app.stats_pie_state = {
+                "mode": "tra",
                 "level": "dept",
                 "subset": "provider",  # usar solo datos del proveedor seleccionado
                 "dept": None,
@@ -891,13 +992,13 @@ def _stats_compute_and_draw(app):
             # Sin proveedor: usar selección jerárquica actual de TRA como antes
             dept, group, sub = _stats_get_current_selection(app)
             if sub:
-                app.stats_pie_state = {"level": "sub", "dept": dept, "group": group, "sub": sub}
+                app.stats_pie_state = {"mode": "tra", "level": "sub", "dept": dept, "group": group, "sub": sub}
             elif group:
-                app.stats_pie_state = {"level": "group", "dept": dept, "group": group, "sub": None}
+                app.stats_pie_state = {"mode": "tra", "level": "group", "dept": dept, "group": group, "sub": None}
             elif dept:
-                app.stats_pie_state = {"level": "group", "dept": dept, "group": None, "sub": None}
+                app.stats_pie_state = {"mode": "tra", "level": "group", "dept": dept, "group": None, "sub": None}
             else:
-                app.stats_pie_state = {"level": "dept", "dept": None, "group": None, "sub": None}
+                app.stats_pie_state = {"mode": "tra", "level": "dept", "dept": None, "group": None, "sub": None}
 
     state = app.stats_pie_state
     inv = getattr(app, '_stats_inv_maps', _stats_build_inverse_maps(app))
@@ -1034,40 +1135,276 @@ def _stats_compute_and_draw(app):
         else:
             _stats_render_pie(app, labels, sizes, title, on_pick_codes=meta, legend_rows=legend)
         return
-    elif lvl == 'sub':
-        dept = state.get('dept')
-        group = state.get('group')
-        data_map = _stats_aggregate(ventas, 'sub', dept=dept, group=group)
+
+
+def _stats_mbrp_compute_days_map(app, ventas):
+    """Construye un mapa codigo -> días sin venta usando servicios MBRP.
+
+    Usa y actualiza el caché `_mbrp_ultimas_ventas_cache` ya utilizado por el módulo MBRP
+    para evitar consultas repetitivas a la base de datos.
+    """
+    if not ventas:
+        return {}
+
+    try:
+        from pal.services.mbrp import obtener_ultimas_ventas_bulk, calcular_dias_sin_venta
+    except Exception:
+        # Si no se pueden importar servicios MBRP, no hay estadísticas disponibles
+        return {}
+
+    db_manager = getattr(app, 'db_manager', None)
+    if db_manager is None:
+        return {}
+
+    # Construir conjunto de códigos únicos
+    codigos = []
+    for r in ventas:
+        try:
+            if r and len(r) > 0 and r[0] is not None:
+                codigos.append(str(r[0]))
+        except Exception:
+            continue
+    if not codigos:
+        return {}
+    codigos_unicos = list(set(codigos))
+
+    sede = getattr(app, 'mbrp_sede_codigo', None) or '0301'
+
+    # Inicializar/usar caché de últimas ventas compartido con MBRP
+    if not hasattr(app, '_mbrp_ultimas_ventas_cache') or not isinstance(getattr(app, '_mbrp_ultimas_ventas_cache'), dict):
+        app._mbrp_ultimas_ventas_cache = {}
+    ultimas_cache = app._mbrp_ultimas_ventas_cache
+
+    # Solo consultar códigos faltantes en caché
+    codigos_faltantes = [c for c in codigos_unicos if c not in ultimas_cache]
+
+    if codigos_faltantes:
+        try:
+            nuevos = obtener_ultimas_ventas_bulk(db_manager, codigos_faltantes, sede)
+        except Exception:
+            nuevos = {}
+        if nuevos:
+            # Merge con el caché existente
+            for c, fecha in nuevos.items():
+                ultimas_cache[str(c)] = fecha
+
+    ultimas = ultimas_cache
+
+    dias_map = {}
+    for codigo in codigos_unicos:
+        try:
+            fecha = ultimas.get(codigo)
+            dias = calcular_dias_sin_venta(fecha)
+        except Exception:
+            dias = -1
+        dias_map[codigo] = dias
+
+    # Ajustar productos sin ventas (días = -1) a un valor alto consistente
+    max_pos = max((d for d in dias_map.values() if d >= 0), default=0)
+    special = max_pos + 1 if max_pos > 0 else 30
+    for codigo, dias in list(dias_map.items()):
+        if dias < 0:
+            dias_map[codigo] = special
+
+    return dias_map
+
+
+def _stats_mbrp_aggregate_days(ventas, dias_map, level, *, dept=None, group=None):
+    """Agrega días sin venta por nivel jerárquico (promedio de días)."""
+    if not ventas or not dias_map:
+        return {}
+
+    acc_sum = {}
+    acc_cnt = {}
+
+    for r in ventas:
+        if len(r) < 6:
+            continue
+        # Determinar clave jerárquica igual que en _stats_aggregate
+        if level == 'dept':
+            key = str(r[2]) if len(r) > 2 and r[2] is not None else None
+        elif level == 'group':
+            if dept is None:
+                continue
+            if len(r) > 2 and str(r[2]) != str(dept):
+                continue
+            key = str(r[3]) if len(r) > 3 and r[3] is not None else None
+        elif level == 'sub':
+            if dept is None or group is None:
+                continue
+            if not (len(r) > 2 and str(r[2]) == str(dept) and len(r) > 3 and str(r[3]) == str(group)):
+                continue
+            key = str(r[4]) if len(r) > 4 and r[4] is not None else None
+        else:
+            key = None
+
+        if not key:
+            continue
+
+        codigo = str(r[0])
+        dias = dias_map.get(codigo)
+        if dias is None:
+            continue
+
+        acc_sum[key] = acc_sum.get(key, 0.0) + float(dias)
+        acc_cnt[key] = acc_cnt.get(key, 0) + 1
+
+    # Promedio de días sin venta por clave
+    values = {}
+    for k, total_dias in acc_sum.items():
+        cnt = acc_cnt.get(k) or 0
+        if cnt > 0:
+            values[k] = total_dias / cnt
+    return values
+
+
+def _stats_compute_and_draw_mbrp(app, chart_type):
+    """Dibuja estadísticas MBRP basadas en días sin venta por Dept/Grupo/Sub/Producto."""
+    # Validar datos MBRP cargados
+    ventas = getattr(app, 'cached_ventas_mbrp_effective', None)
+    if ventas is None:
+        ventas = getattr(app, 'cached_ventas_mbrp', None)
+
+    if not ventas:
+        try:
+            messagebox.showinfo("Estadísticas", "Primero cargue datos en la pestaña MBRP")
+        except Exception:
+            pass
+        _stats_clear_container(app)
+        ttk.Label(app.graph_container, text="Sin datos MBRP para graficar. Cargue MBRP y presione 'Actualizar Gráficos'.").pack(pady=20)
+        return
+
+    # Aplicar exclusiones globales de departamentos
+    try:
+        excluded = set(str(x) for x in (getattr(app, 'excluded_depts', []) or []))
+    except Exception:
+        excluded = set()
+
+    if excluded:
+        ventas = [r for r in ventas if len(r) > 2 and str(r[2]) not in excluded]
+
+    if not ventas:
+        _stats_clear_container(app)
+        ttk.Label(app.graph_container, text="Sin datos MBRP para graficar con los filtros actuales.").pack(pady=20)
+        return
+
+    # Construir mapa de días sin venta por producto (cacheado por dataset)
+    try:
+        cache_key = f"{len(ventas)}|{getattr(app, 'mbrp_fecha_inicio', None)}|{getattr(app, 'mbrp_fecha_fin', None)}|{getattr(app, 'mbrp_sede_codigo', None)}"
+    except Exception:
+        cache_key = None
+
+    dias_map = getattr(app, '_stats_mbrp_dias_map', None)
+    dias_key = getattr(app, '_stats_mbrp_dias_key', None)
+
+    if dias_map is None or dias_key != cache_key:
+        dias_map = _stats_mbrp_compute_days_map(app, ventas)
+        app._stats_mbrp_dias_map = dias_map
+        app._stats_mbrp_dias_key = cache_key
+
+    if not dias_map:
+        _stats_clear_container(app)
+        ttk.Label(app.graph_container, text="No se pudieron calcular días sin venta para MBRP.").pack(pady=20)
+        return
+
+    # Estado inicial específico para MBRP
+    state = getattr(app, 'stats_pie_state', None)
+    if not state or state.get('mode') != 'mbrp':
+        app.stats_pie_state = {
+            "mode": "mbrp",
+            "level": "dept",
+            "dept": None,
+            "group": None,
+            "sub": None,
+        }
+        state = app.stats_pie_state
+
+    lvl = state.get('level', 'dept')
+
+    inv = getattr(app, '_stats_inv_maps', _stats_build_inverse_maps(app))
+    app._stats_inv_maps = inv
+
+    # Días de rango MBRP (para título opcional)
+    try:
+        fecha_ini = getattr(app, 'mbrp_fecha_inicio', None)
+        fecha_fin = getattr(app, 'mbrp_fecha_fin', None)
+        if fecha_ini and fecha_fin:
+            dias_rango = (fecha_fin - fecha_ini).days + 1
+            rango_suffix = f" - Rango {dias_rango} días"
+        else:
+            rango_suffix = ""
+    except Exception:
+        rango_suffix = ""
+
+    # Nivel Departamento
+    if lvl == 'dept':
+        data_map = _stats_mbrp_aggregate_days(ventas, dias_map, 'dept')
         if not data_map:
             _stats_clear_container(app)
-            dname = inv['dept'].get(str(dept), str(dept)) if dept else 'N/A'
-            gname = inv['group'].get((str(dept), str(group)), str(group)) if group else 'N/A'
-            ttk.Label(app.graph_container, text=f"Sin datos de subgrupos para {dname} / {gname}{provider_suffix}").pack(pady=10)
+            ttk.Label(app.graph_container, text="Sin datos de días sin venta por departamento.").pack(pady=10)
             return
-        labels, sizes, meta, legend = _stats_format_labels(data_map, inv_maps=inv, level='sub', dept=dept, group=group)
-        dname = inv['dept'].get(str(dept), str(dept)) if dept else ''
-        gname = inv['group'].get((str(dept), str(group)), str(group)) if group else ''
-        title = f"{dname} → {gname} — Representación por Subgrupo{days_suffix}{provider_suffix}"
+        labels, sizes, meta, legend = _stats_format_labels(data_map, inv_maps=inv, level='dept')
+        title = f"MBRP — Días sin venta promedio por Departamento{rango_suffix}"
         _stats_update_breadcrumb(app)
         if chart_type == 'bar':
             _stats_render_bar(app, labels, sizes, title, on_pick_codes=meta, legend_rows=legend)
         else:
             _stats_render_pie(app, labels, sizes, title, on_pick_codes=meta, legend_rows=legend)
         return
-    elif lvl == 'product':
+
+    # Nivel Grupo
+    if lvl == 'group':
+        dept = state.get('dept')
+        data_map = _stats_mbrp_aggregate_days(ventas, dias_map, 'group', dept=dept)
+        if not data_map:
+            _stats_clear_container(app)
+            name = inv['dept'].get(str(dept), str(dept)) if dept else 'N/A'
+            ttk.Label(app.graph_container, text=f"Sin datos de días sin venta por grupo en {name}.").pack(pady=10)
+            return
+        labels, sizes, meta, legend = _stats_format_labels(data_map, inv_maps=inv, level='group', dept=dept)
+        name = inv['dept'].get(str(dept), str(dept)) if dept else ''
+        title = f"MBRP — {name} — Días sin venta promedio por Grupo{rango_suffix}"
+        _stats_update_breadcrumb(app)
+        if chart_type == 'bar':
+            _stats_render_bar(app, labels, sizes, title, on_pick_codes=meta, legend_rows=legend)
+        else:
+            _stats_render_pie(app, labels, sizes, title, on_pick_codes=meta, legend_rows=legend)
+        return
+
+    # Nivel Subgrupo
+    if lvl == 'sub':
+        dept = state.get('dept')
+        group = state.get('group')
+        data_map = _stats_mbrp_aggregate_days(ventas, dias_map, 'sub', dept=dept, group=group)
+        if not data_map:
+            _stats_clear_container(app)
+            dname = inv['dept'].get(str(dept), str(dept)) if dept else 'N/A'
+            gname = inv['group'].get((str(dept), str(group)), str(group)) if group else 'N/A'
+            ttk.Label(app.graph_container, text=f"Sin datos de días sin venta por subgrupo en {dname} / {gname}.").pack(pady=10)
+            return
+        labels, sizes, meta, legend = _stats_format_labels(data_map, inv_maps=inv, level='sub', dept=dept, group=group)
+        dname = inv['dept'].get(str(dept), str(dept)) if dept else ''
+        gname = inv['group'].get((str(dept), str(group)), str(group)) if group else ''
+        title = f"MBRP — {dname} → {gname} — Días sin venta promedio por Subgrupo{rango_suffix}"
+        _stats_update_breadcrumb(app)
+        if chart_type == 'bar':
+            _stats_render_bar(app, labels, sizes, title, on_pick_codes=meta, legend_rows=legend)
+        else:
+            _stats_render_pie(app, labels, sizes, title, on_pick_codes=meta, legend_rows=legend)
+        return
+
+    # Nivel Producto dentro de un subgrupo
+    if lvl == 'product':
         dept = state.get('dept')
         group = state.get('group')
         sub = state.get('sub')
-        # Validar que haya contexto completo para productos
         if not (dept and group and sub):
-            # Si falta algo, regresar a nivel de subgrupos
             state['level'] = 'sub'
             app.stats_pie_state = state
             app.mostrar_estadisticas()
             return
 
-        # Filtrar registros del subgrupo seleccionado y agrupar por producto
-        product_totals = {}
+        product_days = {}
         product_names = {}
         for r in ventas:
             if len(r) < 6:
@@ -1083,66 +1420,56 @@ def _stats_compute_and_draw(app):
                 continue
             code = str(r[0])
             name = str(r[1]) if len(r) > 1 and r[1] is not None else code
-            try:
-                neto = float(r[5] or 0)
-            except Exception:
-                neto = 0.0
-            if neto <= 0:
+            dias = dias_map.get(code)
+            if dias is None or dias < 0:
                 continue
-            product_totals[code] = product_totals.get(code, 0.0) + neto
+            product_days[code] = dias
             if code not in product_names:
                 product_names[code] = name
 
-        if not product_totals:
+        if not product_days:
             _stats_clear_container(app)
             dname = inv['dept'].get(str(dept), str(dept)) if dept else 'N/A'
             gname = inv['group'].get((str(dept), str(group)), str(group)) if group else 'N/A'
             sname = inv['sub'].get((str(dept), str(group), str(sub)), str(sub)) if sub else 'N/A'
-            ttk.Label(app.graph_container, text=f"Sin datos de productos para {dname} / {gname} / {sname}{provider_suffix}").pack(pady=10)
+            ttk.Label(app.graph_container, text=f"Sin datos de días sin venta por producto en {dname} / {gname} / {sname}.").pack(pady=10)
             return
 
-        # Ordenar productos por neto y limitar a top 25 para estética
         max_products = 25
-        items = sorted(product_totals.items(), key=lambda kv: kv[1], reverse=True)[:max_products]
+        items = sorted(product_days.items(), key=lambda kv: kv[1], reverse=True)[:max_products]
         total = sum(v for _, v in items) or 1.0
 
         labels = []
         sizes = []
         meta = []
         legend = []
-        hover_meta = {}
-        for code, val in items:
+        for code, dias in items:
             full_name = product_names.get(code, code)
-            # Limitar nombre visible a 15 caracteres para mantener estética en la etiqueta
             name = str(full_name)
             max_len = 15
             if len(name) > max_len:
                 name = name[:max_len]
-            pct = (val / total) * 100.0
-            labels.append(f"{name}\n{pct:.1f}%")
-            sizes.append(val)
+            pct = (dias / total) * 100.0
+            labels.append(f"{name}\n{dias:.0f} días ({pct:.1f}%)")
+            sizes.append(dias)
             meta.append(code)
-            legend.append((name, pct, float(val)))
-            hover_meta[str(code)] = {
-                'full_name': str(full_name),
-                'code': str(code),
-                'ventas': float(val),
-                'pct': float(pct),
-            }
+            legend.append((name, pct, float(dias)))
 
         dname = inv['dept'].get(str(dept), str(dept)) if dept else ''
         gname = inv['group'].get((str(dept), str(group)), str(group)) if group else ''
         sname = inv['sub'].get((str(dept), str(group), str(sub)), str(sub)) if sub else ''
-        title = f"{dname} → {gname} → {sname} — Top {len(items)} productos{days_suffix}{provider_suffix}"
+        title = f"MBRP — {dname} → {gname} → {sname} — Top {len(items)} productos por días sin venta{rango_suffix}"
         _stats_update_breadcrumb(app)
         if chart_type == 'bar':
-            _stats_render_bar(app, labels, sizes, title, on_pick_codes=meta, legend_rows=legend, hover_meta=hover_meta)
+            _stats_render_bar(app, labels, sizes, title, on_pick_codes=meta, legend_rows=legend)
         else:
-            _stats_render_pie(app, labels, sizes, title, on_pick_codes=meta, legend_rows=legend, hover_meta=hover_meta)
+            _stats_render_pie(app, labels, sizes, title, on_pick_codes=meta, legend_rows=legend)
         return
 
+
+
+
 def setup_stats_tab(app):
-    """Configura la pestaña de Estadísticas en la aplicación"""
     app.stats_frame = ttk.Frame(app.stats_tab)
     app.stats_frame.pack(fill=tk.BOTH, expand=True)
 
@@ -1193,6 +1520,7 @@ def setup_stats_tab(app):
         values=[
             "Jerarquía productos (Depto/Grupo/Sub)",
             "Distribución por Proveedor",
+            "MBRP — Días sin venta (Depto/Grupo/Sub)",
         ],
     )
     view_mode_combo.pack(side=tk.RIGHT, padx=(5, 0))

@@ -9939,13 +9939,14 @@ class DatabaseApp:
             self.log(f"[MBRP] Error actualizando info ICH: {e}", "ERROR")
 
     def generar_reporte_mbrp(self):
-        """Genera el "Reporte 0" para MBRP: productos que NUNCA se han vendido.
+        """Genera el "Reporte 0" para MBRP: productos que no se han vendido en X días.
 
         Criterio:
           - Se parte del universo actual MBRP (cargado en cached_ventas_mbrp)
           - Se consulta TR_INVENTARIO (obtener_ultimas_ventas_bulk) por sede para
-            identificar productos sin ninguna venta registrada (solo devoluciones o
-            sin movimientos de venta).
+             identificar productos sin ventas recientes (según criterio de días)
+          - Por defecto muestra productos NUNCA vendidos, pero se puede configurar
+             un umbral de días (ej: 30 días sin venta)
         """
         if not hasattr(self, 'cached_ventas_mbrp') or not self.cached_ventas_mbrp:
             messagebox.showwarning("Sin datos", "No hay datos MBRP disponibles. Cargue datos primero.")
@@ -10026,8 +10027,25 @@ class DatabaseApp:
             # 6) Consultar últimas ventas; sólo regresan productos que ALGUNA vez se vendieron
             ultimas_ventas = obtener_ultimas_ventas_bulk(self.db_manager, codigos_unicos, sede)
 
-            # 7) Filtrar productos que NO aparecen en ultimas_ventas => nunca vendidos
-            nunca_vendidos = []
+            # 7) Calcular días del período seleccionado en el módulo MBRP
+            from datetime import datetime
+            dias_criterio = -1  # Default: nunca vendidos
+            if hasattr(self, 'mbrp_fecha_inicio') and hasattr(self, 'mbrp_fecha_fin') and self.mbrp_fecha_inicio and self.mbrp_fecha_fin:
+                try:
+                    fecha_inicio = self.mbrp_fecha_inicio if hasattr(self.mbrp_fecha_inicio, 'date') else datetime.strptime(str(self.mbrp_fecha_inicio), '%Y-%m-%d').date()
+                    fecha_fin = self.mbrp_fecha_fin if hasattr(self.mbrp_fecha_fin, 'date') else datetime.strptime(str(self.mbrp_fecha_fin), '%Y-%m-%d').date()
+                    dias_criterio = (fecha_fin - fecha_inicio).days
+                    if dias_criterio < 0:
+                        dias_criterio = 30  # Default si hay error
+                except Exception:
+                    dias_criterio = 30  # Default período de 30 días
+            else:
+                dias_criterio = 30  # Default período de 30 días
+
+            # 8) Filtrar productos según criterio de días
+            from pal.services.mbrp import calcular_dias_sin_venta
+            productos_filtrados = []
+            
             for item in datos_filtrados:
                 if not item or len(item) < 1:
                     continue
@@ -10035,83 +10053,145 @@ class DatabaseApp:
                     codigo = str(item[0])
                 except Exception:
                     continue
-                if codigo in ultimas_ventas:
-                    continue  # tiene al menos una venta registrada
+                
+                # Obtener fecha de última venta
+                fecha_ultima = ultimas_ventas.get(codigo)
+                
+                if dias_criterio == -1:
+                    # Modo original: productos NUNCA vendidos
+                    if codigo in ultimas_ventas:
+                        continue  # tiene al menos una venta registrada
+                    dias_sin_venta = -1
+                else:
+                    # Modo nuevo: productos sin venta en X días
+                    if fecha_ultima is None:
+                        # Nunca vendido, cumple cualquier criterio de días
+                        dias_sin_venta = 9999
+                    else:
+                        dias_sin_venta = calcular_dias_sin_venta(fecha_ultima)
+                        if dias_sin_venta < dias_criterio:
+                            continue  # Tiene venta más reciente que el criterio
+                
                 # Estructura MBRP: (codigo, desc, dept, group, sub, neto, rotacion, ...)
                 desc = str(item[1]) if len(item) > 1 and item[1] is not None else codigo
                 dept = item[2] if len(item) > 2 else None
                 grupo = item[3] if len(item) > 3 else None
                 sub = item[4] if len(item) > 4 else None
                 rotacion = item[6] if len(item) > 6 else 'SIN_MOVIMIENTO'
-                nunca_vendidos.append({
+                
+                productos_filtrados.append({
                     'codigo': codigo,
                     'descripcion': desc,
                     'dept': dept,
                     'grupo': grupo,
                     'sub': sub,
                     'rotacion': rotacion,
+                    'dias_sin_venta': dias_sin_venta,
+                    'fecha_ultima': fecha_ultima,
                 })
 
-            if not nunca_vendidos:
+            if not productos_filtrados:
+                criterio_texto = "nunca vendidos" if dias_criterio == -1 else f"sin venta en los últimos {dias_criterio} días"
                 messagebox.showinfo(
                     "Reporte 0 MBRP",
-                    "No se encontraron productos que nunca se hayan vendido para el criterio actual.",
+                    f"No se encontraron productos {criterio_texto} para los filtros actuales.",
                 )
                 return
 
-            # Crear ventana de reporte
-            reporte_window = tk.Toplevel(self.root)
-            reporte_window.title("Reporte 0 MBRP - Productos NUNCA vendidos")
-            reporte_window.geometry("600x500")
+            # Generar archivo Excel en lugar de ventana de texto
+            try:
+                import openpyxl
+                from openpyxl import Workbook
+                from openpyxl.styles import Font, PatternFill, Alignment
+                from datetime import datetime
+                import os
+                
+                # Crear nombre de archivo
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                criterio_nombre = "NUNCA_VENDIDOS" if dias_criterio == -1 else f"SIN_VENTA_{dias_criterio}_DIAS"
+                filename = f"reporte_0_mbrp_{criterio_nombre}_{timestamp}.xlsx"
+                
+                # Crear workbook
+                wb = Workbook()
+                ws = wb.active
+                ws.title = "Reporte 0 MBRP"
+                
+                # Título del reporte
+                criterio_texto = "NUNCA VENDIDOS" if dias_criterio == -1 else f"SIN VENTA EN ÚLTIMOS {dias_criterio} DÍAS"
+                ws['A1'] = f"REPORTE 0 MBRP - PRODUCTOS {criterio_texto}"
+                ws['A1'].font = Font(size=14, bold=True, color="FFFFFF")
+                ws['A1'].fill = PatternFill(start_color="2F5597", end_color="2F5597", fill_type="solid")
+                
+                # Información del reporte
+                ws['A2'] = f"Período MBRP: {self.mbrp_fecha_inicio} - {self.mbrp_fecha_fin}"
+                ws['A3'] = f"Sede: {sede}"
+                ws['A4'] = f"Fecha generación: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}"
+                ws['A5'] = f"Total productos filtrados en MBRP: {len(datos_filtrados)}"
+                ws['A6'] = f"Productos {criterio_texto.lower()}: {len(productos_filtrados)}"
+                
+                # Encabezados de la tabla
+                headers = ['Código', 'Descripción', 'Departamento', 'Grupo', 'Subgrupo', 'Rotación', 'Días sin venta', 'Última venta']
+                for col, header in enumerate(headers, 1):
+                    cell = ws.cell(row=8, column=col, value=header)
+                    cell.font = Font(bold=True, color="FFFFFF")
+                    cell.fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+                    cell.alignment = Alignment(horizontal='center', vertical='center')
+                
+                # Datos de productos
+                for i, producto in enumerate(productos_filtrados, 1):
+                    row = 8 + i
+                    ws.cell(row=row, column=1, value=producto['codigo'])
+                    ws.cell(row=row, column=2, value=producto['descripcion'][:60])
+                    ws.cell(row=row, column=3, value=producto['dept'] or '')
+                    ws.cell(row=row, column=4, value=producto['grupo'] or '')
+                    ws.cell(row=row, column=5, value=producto['sub'] or '')
+                    ws.cell(row=row, column=6, value=producto['rotacion'])
+                    
+                    # Días sin venta
+                    if producto['dias_sin_venta'] == -1 or producto['dias_sin_venta'] == 9999:
+                        ws.cell(row=row, column=7, value="NUNCA")
+                    else:
+                        ws.cell(row=row, column=7, value=producto['dias_sin_venta'])
+                    
+                    # Última venta
+                    if producto['fecha_ultima']:
+                        ws.cell(row=row, column=8, value=producto['fecha_ultima'].strftime('%d/%m/%Y'))
+                    else:
+                        ws.cell(row=row, column=8, value="NUNCA")
+                
+                # Ajustar ancho de columnas
+                column_widths = [12, 50, 15, 15, 15, 12, 15, 15]
+                for i, width in enumerate(column_widths, 1):
+                    ws.column_dimensions[chr(64 + i)].width = width
+                
+                # Guardar archivo
+                wb.save(filename)
+                
+                messagebox.showinfo(
+                    "Reporte 0 MBRP",
+                    f"Reporte 0 MBRP generado exitosamente:\n\n"
+                    f"• Archivo: {filename}\n"
+                    f"• Productos: {len(productos_filtrados)}\n"
+                    f"• Criterio: {criterio_texto.lower()}\n\n"
+                    f"Archivo guardado en el directorio actual."
+                )
+                
+                self.log(f"Reporte 0 MBRP Excel generado: {filename} - {len(productos_filtrados)} productos", "SUCCESS")
+                
+            except ImportError:
+                messagebox.showerror(
+                    "Error",
+                    "Para generar el reporte Excel necesita instalar openpyxl:\n\n"
+                    "pip install openpyxl\n\n"
+                    "Instale la librería y vuelva a intentar."
+                )
+                return
+            except Exception as e:
+                self.log(f"Error generando reporte Excel: {str(e)}", "ERROR")
+                messagebox.showerror("Error", f"Error generando reporte Excel: {str(e)}")
+                return
             
-            # Texto del reporte
-            texto_frame = ttk.Frame(reporte_window)
-            texto_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-            
-            texto = tk.Text(texto_frame, wrap=tk.WORD, font=('Consolas', 10))
-            scrollbar = ttk.Scrollbar(texto_frame, orient=tk.VERTICAL, command=texto.yview)
-            texto.configure(yscrollcommand=scrollbar.set)
-            
-            # Generar contenido del reporte 0
-            total_nunca = len(nunca_vendidos)
 
-            contenido = f"""REPORTE 0 MBRP - PRODUCTOS NUNCA VENDIDOS
-{'='*55}
-
-Período MBRP actual: {self.mbrp_fecha_inicio} - {self.mbrp_fecha_fin}
-Sede: {sede}
-Fecha reporte: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-
-RESUMEN:
-{'-'*20}
-Total productos filtrados en MBRP: {len(datos_filtrados)}
-Productos NUNCA vendidos (según TR_INVENTARIO, concepto VEN): {total_nunca}
-
-DETALLE DE PRODUCTOS NUNCA VENDIDOS (RESPETA FILTROS ACTUALES):
-{'-'*55}
-"""
-
-            for i, producto in enumerate(nunca_vendidos, 1):
-                desc_corta = producto['descripcion'][:60]
-                contenido += f"{i}. {producto['codigo']} - {desc_corta}\n"
-                contenido += f"   Rotación: {producto['rotacion']}\n\n"
-
-            contenido += "\nNOTA:\n"
-            contenido += "-"*20 + "\n"
-            contenido += "Este listado se basa en TR_INVENTARIO filtrando únicamente transacciones \
-VEN con cantidad > 0. Los productos aquí listados no poseen ninguna venta registrada \
-según ese criterio para la sede seleccionada.\n"
-            
-            texto.insert('1.0', contenido)
-            texto.config(state='disabled')
-            
-            texto.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-            scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-            
-            # Botón para cerrar
-            ttk.Button(reporte_window, text="Cerrar", command=reporte_window.destroy).pack(pady=10)
-            
-            self.log(f"Reporte 0 MBRP generado: {total_nunca} productos nunca vendidos", "SUCCESS")
             
         except Exception as e:
             self.log(f"Error generando reporte MBRP: {str(e)}", "ERROR")

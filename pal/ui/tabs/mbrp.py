@@ -23,7 +23,7 @@ def setup_mbrp_tab(app):
     ttk.Label(fecha_frame, text="Rango:").pack(side=tk.LEFT)
     app.mbrp_rango_var = tk.StringVar(value="30 días")
     rango_combo = ttk.Combobox(fecha_frame, textvariable=app.mbrp_rango_var, state='readonly', width=10)
-    rango_combo['values'] = ["7 días", "15 días", "30 días", "60 días", "90 días", "Personalizado"]
+    rango_combo['values'] = ["7 días", "15 días", "30 días", "60 días", "90 días", "120 días", "365 días", "Personalizado"]
     rango_combo.pack(side=tk.LEFT, padx=5)
     
     ttk.Label(fecha_frame, text="Desde:").pack(side=tk.LEFT, padx=(10,0))
@@ -88,7 +88,7 @@ def setup_mbrp_tab(app):
         except Exception:
             btn_export_mbrp.config(state='disabled')
 
-    ttk.Button(top_controls, text="📊 Reporte", command=app.generar_reporte_mbrp).pack(side=tk.RIGHT, padx=5)
+    ttk.Button(top_controls, text="📊 Reporte 0", command=app.generar_reporte_mbrp).pack(side=tk.RIGHT, padx=5)
 
     # Checkbox para cambiar entre unidades y dólares en ventas
     app.mbrp_mostrar_dolares_var = tk.BooleanVar(value=False)
@@ -245,6 +245,9 @@ def setup_mbrp_tab(app):
                     app.mbrp_current_selected_item = item
                     # Asegurar que sea visible
                     app.mbrp_tree.see(item)
+                    # Actualizar info ICH (última venta / stock por sede) si está disponible
+                    if hasattr(app, '_update_mbrp_ich_info'):
+                        app._update_mbrp_ich_info()
         except Exception:
             pass
     
@@ -254,6 +257,9 @@ def setup_mbrp_tab(app):
             selected = app.mbrp_tree.selection()
             if selected:
                 app.mbrp_current_selected_item = selected[0]
+                # Actualizar info ICH al cambiar selección
+                if hasattr(app, '_update_mbrp_ich_info'):
+                    app._update_mbrp_ich_info()
         except Exception:
             pass
     
@@ -267,6 +273,17 @@ def setup_mbrp_tab(app):
     hsb.grid(row=1, column=0, sticky="ew")
     tree_frame.grid_rowconfigure(0, weight=1)
     tree_frame.grid_columnconfigure(0, weight=1)
+
+    # Información adicional para modo ICH (global): última venta y stock por sede
+    app.mbrp_ich_info_var = tk.StringVar(value="")
+    app.mbrp_ich_info_label = ttk.Label(
+        app.mbrp_tab_frame,
+        textvariable=app.mbrp_ich_info_var,
+        foreground="#555555",
+        wraplength=900,
+        justify='left',
+    )
+    app.mbrp_ich_info_label.pack(fill=tk.X, pady=(4, 0))
 
     # Inicializar diccionarios vacíos SOLO si no existen aún
     # NOTA: La jerarquía se carga en create_main_workspace() ANTES de crear esta pestaña

@@ -1464,14 +1464,17 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
         
     from datetime import datetime
     try:
-        total_registros = len(datos_mbrp)
-        logger.info(f"Iniciando exportación MBRP Excel de {total_registros} registros a {filename}")
+        total_registros_entrada = len(datos_mbrp)
+        logger.info(f"Iniciando exportación MBRP Excel de {total_registros_entrada} registros a {filename}")
         
+        # Determinar si el filtro de sede es global (modo ICH)
+        ich_mode = sede_codigo in (None, '%', '00', 'ICH', 'ALL')
+
         # Crear workbook
         wb = Workbook()
-        wb.remove(wb.active)  # Remover hoja por defecto
+        wb.remove(wactive := wb.active)  # Remover hoja por defecto
         
-        # === HOJA 1: DATOS PRINCIPALES MBRP ===
+        # === HOUGHT 1: DATOS PRINCIPALES MBRP ===
         ws_main = wb.create_sheet("Datos MBRP")
         
         # Encabezado del reporte
@@ -1479,7 +1482,7 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
         ws_main['A2'] = f'Generado el {datetime.now().strftime("%d/%m/%Y a las %H:%M:%S")}'
         if provider_label:
             ws_main['A3'] = f'Proveedor: {provider_label}'
-        ws_main['A4'] = f'Total de productos analizados: {total_registros}'
+        ws_main['A4'] = f'Total de productos analizados: {total_registros_entrada}'
         
         # Verificar permiso para ver costo y utilidad
         mostrar_costo_utilidad = False
@@ -1492,33 +1495,38 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
         
         # Formato del encabezado
         header_font = Font(size=14, bold=True, color="FFFFFF")
-        header_fill = PatternFill(start_color="2F5597", end_color="2F5597", fill_type="solid")
+        header_fill = new_fill = PatternFill(start_color="2F5597", end_color="2F5597", fill_type="solid")
         ws_main['A1'].font = header_font
         ws_main['A1'].fill = header_fill
-        # Ajustar merge según si incluye columnas de costo/utilidad
-        # Base: 11 columnas (Código, Descripción, Depto, Grupo, Subgrupo, Rotación,
-        #         Ventas, Stock Actual, Días de Stock, IM %, Última Venta(DIAS));
-        # con precio/costo/utilidad: 14 columnas (A:N)
-        merge_range = 'A1:N1' if mostrar_costo_utilidad else 'A1:K1'
-        ws_main.merge_cells(merge_range)
-        
+
         # Headers de la tabla (fila 7) alineados con el módulo MBRP
         # Incluimos jerarquía para permitir filtros por Departamento/Grupo/Subgrupo
         headers = [
             'Código', 'Descripción', 'Departamento', 'Grupo', 'Subgrupo',
-            'Rotación', 'Ventas', 'Stock Actual', 'Días de Stock', 'IM %', 'Última Venta(DIAS)'
+            'Rotación', 'Ventas', 'Stock Actual', 'Días de Stock', 'IM %', 'Última Venta (DIAS)'
         ]
+        # Columnas adicionales de análisis económico
         if mostrar_costo_utilidad:
-            # Columnas adicionales de análisis económico
             headers.extend(['Precio + IVA', 'Costo', 'Utilidad %'])
-        
+        # Columnas adicionales cuando la sede es ICH (global)
+        if ich_mode:
+            headers.append('Detalle ICH (última venta / stock por sede)')
+
+        # Ajustar merge del título según cantidad total de columnas
+        from openpyxl.utils import get_column_letter as _col_letter
+        last_col_letter = _col_letter(len(headers))
+        ws_main.merge_cells(f"A1:{last_col_letter}1")
+
         start_row = 7
         for col, header in enumerate(headers, 1):
             cell = ws_main.cell(row=start_row, column=col, value=header)
             cell.font = Font(bold=True, color="FFFFFF")
             cell.fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
-            cell.alignment = Alignment(horizontal="center", vertical="center")
-        
+            cell.alignment = Alignment(horizontal='center', vertical='center')
+
+        # Índice de la columna de detalle ICH (si aplica)
+        detalle_ich_col = len(headers) if ich_mode else None
+
         # Datos de productos
         data_start_row = start_row + 1
 
@@ -1588,6 +1596,90 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
                 return resultados
             except Exception as e:
                 logger.error(f"[EXPORT MBRP] Error obteniendo stock actual: {e}")
+                return resultados
+
+        def _map_deposito_to_sede(dep: str) -> str:
+            """Mapea un código de depósito a una sede legible."""
+            try:
+                c = (dep or "").strip()
+                if c.startswith('03'):
+                    return 'Cabudare'
+                if c.startswith('01'):
+                    return 'Barinas'
+                if c.startswith('04'):
+                    return 'Guanare'
+                return 'Otra'
+            except Exception:
+                return 'Otra'
+
+        def _get_stock_por_sede_mbrp(codigos: List[str]) -> Dict[str, Dict[str, int]]:
+            """Obtiene distribución de stock por sede para cada código (solo modo ICH)."""
+            resultados: Dict[str, Dict[str, int]] = {}
+            if not db_manager or not db_manager.ensure_connection() or not codigos:
+                return resultados
+            try:
+                MAX_IN = 900
+                for i in range(0, len(codigos), MAX_IN):
+                    chunk = codigos[i:i + MAX_IN]
+                    placeholders = ','.join(['?'] * len(chunk))
+                    sql = (
+                        f"SELECT c_codarticulo, c_coddeposito, SUM(n_cantidad) "
+                        f"FROM MA_DEPOPROD WITH (NOLOCK) "
+                        f"WHERE c_codarticulo IN ({placeholders}) "
+                        f"GROUP BY c_codarticulo, c_coddeposito"
+                    )
+                    rows = db_manager.fetch_data(sql, chunk) or []
+                    for cod, dep, qty in rows:
+                        try:
+                            cod_str = str(cod).strip()
+                            dep_str = str(dep).strip()
+                            sede_nombre = _map_deposito_to_sede(dep_str)
+                            q = int(qty or 0)
+                        except Exception:
+                            continue
+                        if cod_str not in resultados:
+                            resultados[cod_str] = {}
+                        resultados[cod_str][sede_nombre] = resultados[cod_str].get(sede_nombre, 0) + q
+                return resultados
+            except Exception as e:
+                logger.error(f"[EXPORT MBRP] Error obteniendo stock por sede: {e}")
+                return resultados
+
+        def _get_last_sale_deposito_bulk(codigos: List[str]) -> Dict[str, str]:
+            """Obtiene el depósito de la última venta global (todas las sedes) para cada código."""
+            resultados: Dict[str, str] = {}
+            if not db_manager or not db_manager.ensure_connection() or not codigos:
+                return resultados
+            try:
+                MAX_IN = 900
+                for i in range(0, len(codigos), MAX_IN):
+                    chunk = codigos[i:i + MAX_IN]
+                    placeholders = ','.join(['?'] * len(chunk))
+                    query = f"""
+                        WITH ult AS (
+                            SELECT c_Codarticulo, c_Deposito, f_fecha,
+                                   ROW_NUMBER() OVER (PARTITION BY c_Codarticulo ORDER BY f_fecha DESC) AS rn
+                            FROM TR_INVENTARIO WITH (NOLOCK)
+                            WHERE c_Codarticulo IN ({placeholders})
+                              AND c_Concepto = 'VEN'
+                              AND n_Cantidad > 0
+                        )
+                        SELECT c_Codarticulo, c_Deposito
+                        FROM ult
+                        WHERE rn = 1
+                    """
+                    rows = db_manager.fetch_data(query, chunk) or []
+                    for cod, dep in rows:
+                        try:
+                            cod_str = str(cod).strip()
+                            dep_str = str(dep).strip() if dep is not None else ''
+                        except Exception:
+                            continue
+                        if cod_str and dep_str and cod_str not in resultados:
+                            resultados[cod_str] = dep_str
+                return resultados
+            except Exception as e:
+                logger.error(f"[EXPORT MBRP] Error obteniendo última venta por depósito: {e}")
                 return resultados
 
         # Mapas de descripciones jerárquicas (Depto/Grupo/Subgrupo) para MBRP
@@ -1690,6 +1782,13 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
         if db_manager and db_manager.ensure_connection() and codigos_lista:
             ultimas_ventas = obtener_ultimas_ventas_bulk(db_manager, codigos_lista, sede)
 
+        # Mapas adicionales solo para modo ICH (global)
+        stock_por_sede_map: Dict[str, Dict[str, int]] = {}
+        last_dep_map: Dict[str, str] = {}
+        if ich_mode and db_manager and db_manager.ensure_connection() and codigos_lista:
+            stock_por_sede_map = _get_stock_por_sede_mbrp(codigos_lista)
+            last_dep_map = _get_last_sale_deposito_bulk(codigos_lista)
+
         costo_map_mbrp: Dict[str, float] = {}
         if mostrar_costo_utilidad:
             try:
@@ -1744,6 +1843,7 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
         except Exception:
             precio_map_mbrp = {}
 
+        filas_exportadas = 0
         for i, fila in enumerate(datos_mbrp):
             try:
                 # Normalizar a lista para poder inspeccionar la estructura
@@ -1778,6 +1878,15 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
                     codigo_str = ''
 
                 stock_actual = int(stock_map.get(codigo_str, 0) or 0)
+
+                # Regla solicitada: excluir de la exportación productos con stock actual = 0
+                if stock_actual <= 0:
+                    if progress_cb:
+                        # Seguimos reportando progreso sobre el total de entradas,
+                        # aunque este registro no se exporte.
+                        progress_cb(i + 1, total_registros_entrada)
+                    continue
+
                 im_valor = float(indices_movilidad.get(codigo_str, 0.0))
 
                 # Días desde última venta (valor numérico para filtrar en Excel)
@@ -1789,7 +1898,8 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
                 # Días de Stock basados en promedio diario del período
                 dias_stock = _calcular_dias_restantes(stock_actual, neto_valor)
 
-                row = data_start_row + i
+                # Calcular fila real en función de cuántos registros ya se exportaron
+                row = data_start_row + filas_exportadas
 
                 # Escribir columnas principales (mismas que el Treeview + jerarquía)
                 ws_main.cell(row=row, column=1, value=clean_for_excel(codigo))
@@ -1803,6 +1913,78 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
                 ws_main.cell(row=row, column=9, value=dias_stock)
                 ws_main.cell(row=row, column=10, value=round(im_valor, 2))
                 ws_main.cell(row=row, column=11, value=dias_ultima_venta_excel)
+
+                # Columna de detalle ICH (solo modo ICH) - Mejorado con más detalles
+                if ich_mode and detalle_ich_col is not None:
+                    # Última venta global: sede con más detalles
+                    dep_ult = last_dep_map.get(codigo_str)
+                    if dep_ult:
+                        sede_ult = _map_deposito_to_sede(dep_ult)
+                        # Obtener fecha de la última venta para más contexto
+                        fecha_ultima_str = ""
+                        try:
+                            if fecha_ultima:
+                                fecha_ultima_str = f" el {fecha_ultima.strftime('%d/%m/%Y')}"
+                        except Exception:
+                            pass
+                        ultima_txt = f"*Última venta en {sede_ult}{fecha_ultima_str} (dep: {dep_ult})"
+                    else:
+                        ultima_txt = "*Sin ventas registradas (global)"
+
+                    # Stock global y distribución por sede con más detalles
+                    dist = stock_por_sede_map.get(codigo_str, {})
+                    if dist:
+                        total_global = sum(dist.values())
+                        # Ordenar sedes: Cabudare, Barinas, Guanare, otras
+                        orden_sedes = ['Cabudare', 'Barinas', 'Guanare']
+                        partes_ordenadas = []
+                        for sede in orden_sedes:
+                            if sede in dist:
+                                partes_ordenadas.append(f"{sede}: {dist[sede]}")
+                        # Agregar otras sedes si existen
+                        for s, q in sorted(dist.items()):
+                            if s not in orden_sedes:
+                                partes_ordenadas.append(f"{s}: {q}")
+                        
+                        # Calcular porcentajes por sede
+                        partes_con_pct = []
+                        for parte in partes_ordenadas:
+                            if ':' in parte:
+                                nombre_sede, cantidad = parte.split(':', 1)
+                                try:
+                                    qty = int(cantidad.strip())
+                                    pct = (qty / total_global * 100) if total_global > 0 else 0
+                                    partes_con_pct.append(f"{nombre_sede.strip()}: {qty} ({pct:.1f}%)")
+                                except Exception:
+                                    partes_con_pct.append(parte)
+                        
+                        stock_txt = f"*Stock global: {total_global} | Distribución: " + " | ".join(partes_con_pct)
+                        
+                        # Agregar alerta si el stock está concentrado en una sola sede (>80%)
+                        if len(dist) > 1:
+                            max_qty = max(dist.values())
+                            max_pct = (max_qty / total_global * 100) if total_global > 0 else 0
+                            if max_pct > 80:
+                                for s, q in dist.items():
+                                    if q == max_qty:
+                                        stock_txt += f" | ALERTA: {max_pct:.0f}% concentrado en {s}"
+                                        break
+                    else:
+                        stock_txt = f"*Stock global: {stock_actual}"
+
+                    # Combinar toda la información en un formato legible
+                    detalle_completo = f"{ultima_txt}\n{stock_txt}"
+                    
+                    # Agregar recomendación basada en la distribución
+                    if dist and len(dist) > 1:
+                        total_global = sum(dist.values())
+                        # Verificar si hay stock en Cabudare (sede principal)
+                        stock_cabudare = dist.get('Cabudare', 0)
+                        if stock_cabudare == 0 and total_global > 0:
+                            detalle_completo += f"\nALERTA: Sin stock en Cabudare (sede principal)"
+                    
+                    detalle_cell = ws_main.cell(row=row, column=detalle_ich_col, value=clean_for_excel(detalle_completo))
+                    detalle_cell.alignment = Alignment(wrap_text=True, vertical='top')
 
                 # Agregar columnas de precio + IVA, costo y utilidad si el usuario tiene permiso
                 if mostrar_costo_utilidad:
@@ -1827,39 +2009,60 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
                     ws_main.cell(row=row, column=14, value=round(utilidad_pct, 2))
 
                 if progress_cb:
-                    progress_cb(i + 1, total_registros)
+                    progress_cb(i + 1, total_registros_entrada)
+
+                filas_exportadas += 1
 
             except Exception as e:
                 logger.error(f"Error procesando fila MBRP {i}: {fila} - {e}")
                 continue
 
-        # Crear tabla con filtros
+        # Crear tabla con filtros sólo si hubo filas exportadas
         end_col_letter = get_column_letter(len(headers))
-        table_range = f"A{start_row}:{end_col_letter}{data_start_row + total_registros - 1}"
-        table = Table(displayName="TablaMBRP", ref=table_range)
-        table.tableStyleInfo = TableStyleInfo(
-            name="TableStyleMedium9", showFirstColumn=False,
-            showLastColumn=False, showRowStripes=True, showColumnStripes=False
-        )
-        ws_main.add_table(table)
+        if filas_exportadas > 0:
+            last_data_row = data_start_row + filas_exportadas - 1
+            table_range = f"A{start_row}:{end_col_letter}{last_data_row}"
+            table = Table(displayName="TablaMBRP", ref=table_range)
+            table.tableStyleInfo = TableStyleInfo(
+                name="TableStyleMedium9", showFirstColumn=False,
+                showLastColumn=False, showRowStripes=True, showColumnStripes=False
+            )
+            ws_main.add_table(table)
         
         # Formato condicional para Índice de Movilidad (IM %)
-        im_range = f"J{data_start_row}:J{data_start_row + total_registros - 1}"
+        if filas_exportadas > 0:
+            im_range = f"J{data_start_row}:J{data_start_row + filas_exportadas - 1}"
+            
+            # IM < 5% = Rojo (crítico)
+            ws_main.conditional_formatting.add(im_range,
+                CellIsRule(operator='lessThan', formula=[5],
+                          fill=PatternFill(start_color="F44336", end_color="F44336")))
         
-        # IM < 5% = Rojo (crítico)
-        ws_main.conditional_formatting.add(im_range,
-            CellIsRule(operator='lessThan', formula=[5],
-                      fill=PatternFill(start_color="F44336", end_color="F44336")))
-        
-        # 5% <= IM <= 10% = Naranja (muy bajo)
-        ws_main.conditional_formatting.add(im_range,
-            CellIsRule(operator='between', formula=[5, 10],
-                      fill=PatternFill(start_color="FF9800", end_color="FF9800")))
-        
-        # 10% < IM <= 20% = Amarillo (bajo)
-        ws_main.conditional_formatting.add(im_range,
-            CellIsRule(operator='between', formula=[10, 20],
-                      fill=PatternFill(start_color="FFEB3B", end_color="FFEB3B")))
+            # 5% <= IM <= 10% = Naranja (muy bajo)
+            ws_main.conditional_formatting.add(im_range,
+                CellIsRule(operator='between', formula=[5, 10],
+                          fill=PatternFill(start_color="FF9800", end_color="FF9800")))
+            
+            # 10% < IM <= 20% = Amarillo (bajo)
+            ws_main.conditional_formatting.add(im_range,
+                CellIsRule(operator='between', formula=[10, 20],
+                          fill=PatternFill(start_color="FFEB3B", end_color="FFEB3B")))
+            
+            # Formato condicional especial para modo ICH - resaltar productos sin stock en Cabudare
+            if ich_mode and filas_exportadas > 0:
+                # Columna de stock actual (columna H)
+                stock_range = f"H{data_start_row}:H{data_start_row + filas_exportadas - 1}"
+                ws_main.conditional_formatting.add(stock_range,
+                    CellIsRule(operator='equal', formula=[0],
+                              fill=PatternFill(start_color="FFE5E5", end_color="FFE5E5"),
+                              font=Font(color="CC0000")))
+                
+                # Columna de días sin venta (columna K) - resaltar valores altos
+                dias_range = f"K{data_start_row}:K{data_start_row + filas_exportadas - 1}"
+                ws_main.conditional_formatting.add(dias_range,
+                    CellIsRule(operator='greaterThan', formula=[180],
+                              fill=PatternFill(start_color="FFCDD2", end_color="FFCDD2"),
+                              font=Font(color="B71C1C")))
         
         # Ajustar anchos de columna
         ws_main.column_dimensions['A'].width = 12  # Código
@@ -1874,10 +2077,15 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
         ws_main.column_dimensions['J'].width = 12  # IM %
         ws_main.column_dimensions['K'].width = 18  # Última Venta (DIAS)
         
+        if ich_mode:
+            ws_main.column_dimensions[get_column_letter(detalle_ich_col)].width = 60  # Detalle ICH (más ancho para multilinea)
+        
         if mostrar_costo_utilidad:
-            ws_main.column_dimensions['L'].width = 15  # Precio + IVA
-            ws_main.column_dimensions['M'].width = 15  # Costo
-            ws_main.column_dimensions['N'].width = 15  # Utilidad %
+            # Ajustar columnas de costo/utilidad según si hay columna ICH
+            start_costo_col = detalle_ich_col + 1 if ich_mode else 12
+            ws_main.column_dimensions[get_column_letter(start_costo_col)].width = 15  # Precio + IVA
+            ws_main.column_dimensions[get_column_letter(start_costo_col + 1)].width = 15  # Costo
+            ws_main.column_dimensions[get_column_letter(start_costo_col + 2)].width = 15  # Utilidad %
         
         # === HOJA 2: RESUMEN POR MOVILIDAD ===
         ws_summary = wb.create_sheet("Resumen por Movilidad")
@@ -1912,7 +2120,7 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
         ]
         
         for i, (categoria, count) in enumerate(categorias, 4):
-            porcentaje = (count / total_registros * 100) if total_registros > 0 else 0
+            porcentaje = (count / total_registros_entrada * 100) if total_registros_entrada > 0 else 0
             ws_summary.cell(row=i, column=1, value=categoria)
             ws_summary.cell(row=i, column=2, value=count)
             ws_summary.cell(row=i, column=3, value=f"{porcentaje:.1f}%")
@@ -1972,8 +2180,8 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
         
         # Guardar archivo
         wb.save(filename)
-        logger.info(f"Exportación MBRP Excel completada: {total_registros} registros en {filename}")
-        return total_registros
+        logger.info(f"Exportación MBRP Excel completada: {filas_exportadas} registros exportados (de {total_registros_entrada}) en {filename}")
+        return filas_exportadas
         
     except Exception as e:
         logger.error(f"Error en exportación MBRP Excel: {e}")

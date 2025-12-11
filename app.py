@@ -9761,6 +9761,20 @@ class DatabaseApp:
                     values=(codigo, desc, rotacion, neto_formateado, stock_actual, dias_stock, f"{im_porcentaje}%", ultima_venta_texto),
                     tags=(tag_final,)
                 )
+
+                # Si estamos en modo ICH, actualizar info de detalle para el primer elemento
+                if idx == 0 and hasattr(self, '_update_mbrp_ich_info') and (
+                    getattr(self, 'mbrp_sede_codigo', None) in (None, '%', '00', 'ICH', 'ALL')
+                ):
+                    try:
+                        # Seleccionar visualmente la primera fila solo si no hay selección previa
+                        if not self.mbrp_tree.selection():
+                            first_item = self.mbrp_tree.get_children()[0]
+                            self.mbrp_tree.selection_set(first_item)
+                            self.mbrp_tree.focus(first_item)
+                        self._update_mbrp_ich_info()
+                    except Exception:
+                        pass
             except Exception as e:
                 self.log(f"Error procesando fila MBRP {fila}: {str(e)}", "ERROR")
                 continue
@@ -9802,29 +9816,252 @@ class DatabaseApp:
         except Exception as e:
             self.log(f"Error actualizando últimas ventas MBRP: {e}", "ERROR")
 
+    def _map_deposito_to_sede(self, cod: str) -> str:
+        """Mapea un código de depósito a una sede legible (Cabudare, Barinas, Guanare, Otra)."""
+        try:
+            c = (cod or "").strip()
+            if c.startswith('03'):
+                return 'Cabudare'
+            if c.startswith('01'):
+                return 'Barinas'
+            if c.startswith('04'):
+                return 'Guanare'
+            return 'Otra'
+        except Exception:
+            return 'Otra'
+
+    def _get_mbrp_last_sale_global(self, codigo: str):
+        """Obtiene depósito y fecha de la última venta global (todas las sedes) para un producto."""
+        try:
+            sql = """
+                SELECT TOP 1 c_Deposito, f_fecha
+                FROM TR_INVENTARIO WITH (NOLOCK)
+                WHERE c_Codarticulo = ?
+                  AND c_Concepto = 'VEN'
+                  AND n_Cantidad > 0
+                ORDER BY f_fecha DESC
+            """
+            rows = self.db_manager.fetch_data(sql, (str(codigo),)) if hasattr(self, 'db_manager') and self.db_manager else None
+            if rows:
+                dep, fecha = rows[0]
+                return (str(dep).strip() if dep is not None else None, fecha)
+            return (None, None)
+        except Exception as e:
+            self.log(f"[MBRP] Error obteniendo última venta global para {codigo}: {e}", "ERROR")
+            return (None, None)
+
+    def _get_mbrp_stock_por_sede(self, codigo: str):
+        """Obtiene stock global y distribución por sede para un producto (solo modo ICH)."""
+        try:
+            if not hasattr(self, 'db_manager') or not self.db_manager:
+                return 0, {}
+            sql = """
+                SELECT c_coddeposito, SUM(n_cantidad)
+                FROM MA_DEPOPROD WITH (NOLOCK)
+                WHERE c_codarticulo = ?
+                GROUP BY c_coddeposito
+            """
+            rows = self.db_manager.fetch_data(sql, (str(codigo),)) or []
+            sede_totals = {}
+            total = 0
+            for dep, qty in rows:
+                try:
+                    dep_str = str(dep).strip()
+                    sede = self._map_deposito_to_sede(dep_str)
+                    q = int(qty or 0)
+                except Exception:
+                    continue
+                total += q
+                sede_totals[sede] = sede_totals.get(sede, 0) + q
+            return total, sede_totals
+        except Exception as e:
+            self.log(f"[MBRP] Error obteniendo stock por sede para {codigo}: {e}", "ERROR")
+            return 0, {}
+
+    def _update_mbrp_ich_info(self):
+        """Actualiza la etiqueta informativa de MBRP cuando el filtro de sede es ICH (global).
+
+        Muestra:
+          - Dónde fue la última venta (sede)
+          - Stock global y cómo se reparte entre sedes
+        """
+        try:
+            if not hasattr(self, 'mbrp_ich_info_var'):
+                return
+
+            # Solo aplica cuando MBRP está en modo ICH/global
+            sede_codigo = getattr(self, 'mbrp_sede_codigo', None)
+            if sede_codigo not in (None, '%', '00', 'ICH', 'ALL'):
+                self.mbrp_ich_info_var.set("")
+                return
+
+            tree = getattr(self, 'mbrp_tree', None)
+            if tree is None:
+                self.mbrp_ich_info_var.set("")
+                return
+
+            sel = tree.selection()
+            if not sel:
+                self.mbrp_ich_info_var.set("")
+                return
+
+            values = tree.item(sel[0], 'values') or []
+            if not values:
+                self.mbrp_ich_info_var.set("")
+                return
+
+            codigo = str(values[0])
+
+            # Última venta global (todas las sedes)
+            dep_ult, fecha_ult = self._get_mbrp_last_sale_global(codigo)
+            if dep_ult:
+                sede_ult = self._map_deposito_to_sede(dep_ult)
+                ultima_txt = f"Última venta en {sede_ult} ({dep_ult})"
+            else:
+                ultima_txt = "Sin ventas registradas (global)"
+
+            # Stock por sede
+            total_stock, sede_totals = self._get_mbrp_stock_por_sede(codigo)
+            if not sede_totals:
+                stock_txt = "Sin stock en ninguna sede"
+            else:
+                partes = []
+                # Ordenar por nombre de sede para consistencia
+                for sede_nombre in sorted(sede_totals.keys()):
+                    partes.append(f"{sede_nombre}: {sede_totals[sede_nombre]}")
+                stock_txt = "Stock por sede: " + "  •  ".join(partes)
+
+            self.mbrp_ich_info_var.set(
+                f"* {ultima_txt}  |  Stock global: {total_stock}  |  {stock_txt}"
+            )
+        except Exception as e:
+            # No romper la UI por errores de detalle
+            self.log(f"[MBRP] Error actualizando info ICH: {e}", "ERROR")
+
     def generar_reporte_mbrp(self):
-        """Genera un reporte detallado de productos de baja rotación"""
+        """Genera el "Reporte 0" para MBRP: productos que NUNCA se han vendido.
+
+        Criterio:
+          - Se parte del universo actual MBRP (cargado en cached_ventas_mbrp)
+          - Se consulta TR_INVENTARIO (obtener_ultimas_ventas_bulk) por sede para
+            identificar productos sin ninguna venta registrada (solo devoluciones o
+            sin movimientos de venta).
+        """
         if not hasattr(self, 'cached_ventas_mbrp') or not self.cached_ventas_mbrp:
             messagebox.showwarning("Sin datos", "No hay datos MBRP disponibles. Cargue datos primero.")
             return
             
         try:
-            from pal.services.mbrp import generar_reporte_baja_rotacion
+            from pal.services.mbrp import obtener_ultimas_ventas_bulk
+            from pal.services.tra import filter_ventas_tra
             
             sede = self.mbrp_sede_codigo or '0301'
-            reporte = generar_reporte_baja_rotacion(
-                self.cached_ventas_mbrp, 
-                self.db_manager, 
-                sede
+
+            # 1) Partir de todos los datos MBRP en caché
+            datos_filtrados = list(self.cached_ventas_mbrp)
+
+            # 2) Exclusión global por departamento (igual que en aplicar_filtro_mbrp)
+            excluded_set = getattr(self, '_excluded_depts_set', set())
+            if excluded_set:
+                datos_filtrados = [r for r in datos_filtrados if len(r) > 2 and str(r[2]) not in excluded_set]
+
+            # 3) Filtro por proveedor (si está seleccionado en MBRP)
+            proveedor_cod = getattr(self, 'mbrp_proveedor_codigo', None)
+            if proveedor_cod and datos_filtrados:
+                codigos_prov = self._get_codigos_por_proveedor_cached(proveedor_cod)
+                if codigos_prov:
+                    codigos_prov = set(str(c) for c in codigos_prov)
+                    datos_filtrados = [r for r in datos_filtrados if str(r[0]) in codigos_prov]
+                else:
+                    datos_filtrados = []
+
+            # 4) Filtros jerárquicos y de búsqueda (mismos que la grilla MBRP)
+            dept_cod = self.mbrp_dept_dict.get(self.mbrp_dept_var.get()) if hasattr(self, 'mbrp_dept_var') else None
+            group_cod = None
+            sub_cod = None
+            if dept_cod and hasattr(self, 'mbrp_group_var'):
+                group_desc = self.mbrp_group_var.get()
+                group_cod = self.mbrp_group_dict.get(dept_cod, {}).get(group_desc)
+                if group_cod and hasattr(self, 'mbrp_sub_var'):
+                    sub_desc = self.mbrp_sub_var.get()
+                    key = f"{dept_cod}|{group_cod}"
+                    sub_cod = self.mbrp_sub_dict.get(key, {}).get(sub_desc)
+
+            texto = self.mbrp_search_var.get() if hasattr(self, 'mbrp_search_var') else ''
+
+            datos_filtrados = filter_ventas_tra(
+                ventas=datos_filtrados,
+                dept_code=dept_cod,
+                group_code=group_cod,
+                sub_code=sub_cod,
+                search_text=texto,
+                filter_rotacion='TODAS',
+                favoritos=self._get_favoritos_local(),
             )
-            
-            if "error" in reporte:
-                messagebox.showerror("Error", f"Error generando reporte: {reporte['error']}")
+
+            if not datos_filtrados:
+                messagebox.showinfo(
+                    "Reporte 0 MBRP",
+                    "No hay productos MBRP para el Reporte 0 con los filtros actuales.",
+                )
                 return
-            
+
+            # 5) Construir lista de códigos únicos del conjunto YA filtrado
+            codigos = []
+            for item in datos_filtrados:
+                try:
+                    if item and len(item) > 0 and item[0] is not None:
+                        codigos.append(str(item[0]))
+                except Exception:
+                    continue
+            codigos_unicos = sorted(set(codigos))
+
+            if not codigos_unicos:
+                messagebox.showinfo(
+                    "Reporte 0 MBRP",
+                    "No hay códigos de producto en el dataset filtrado actual.",
+                )
+                return
+
+            # 6) Consultar últimas ventas; sólo regresan productos que ALGUNA vez se vendieron
+            ultimas_ventas = obtener_ultimas_ventas_bulk(self.db_manager, codigos_unicos, sede)
+
+            # 7) Filtrar productos que NO aparecen en ultimas_ventas => nunca vendidos
+            nunca_vendidos = []
+            for item in datos_filtrados:
+                if not item or len(item) < 1:
+                    continue
+                try:
+                    codigo = str(item[0])
+                except Exception:
+                    continue
+                if codigo in ultimas_ventas:
+                    continue  # tiene al menos una venta registrada
+                # Estructura MBRP: (codigo, desc, dept, group, sub, neto, rotacion, ...)
+                desc = str(item[1]) if len(item) > 1 and item[1] is not None else codigo
+                dept = item[2] if len(item) > 2 else None
+                grupo = item[3] if len(item) > 3 else None
+                sub = item[4] if len(item) > 4 else None
+                rotacion = item[6] if len(item) > 6 else 'SIN_MOVIMIENTO'
+                nunca_vendidos.append({
+                    'codigo': codigo,
+                    'descripcion': desc,
+                    'dept': dept,
+                    'grupo': grupo,
+                    'sub': sub,
+                    'rotacion': rotacion,
+                })
+
+            if not nunca_vendidos:
+                messagebox.showinfo(
+                    "Reporte 0 MBRP",
+                    "No se encontraron productos que nunca se hayan vendido para el criterio actual.",
+                )
+                return
+
             # Crear ventana de reporte
             reporte_window = tk.Toplevel(self.root)
-            reporte_window.title("Reporte MBRP - Productos de Baja Rotación")
+            reporte_window.title("Reporte 0 MBRP - Productos NUNCA vendidos")
             reporte_window.geometry("600x500")
             
             # Texto del reporte
@@ -9835,39 +10072,35 @@ class DatabaseApp:
             scrollbar = ttk.Scrollbar(texto_frame, orient=tk.VERTICAL, command=texto.yview)
             texto.configure(yscrollcommand=scrollbar.set)
             
-            # Generar contenido del reporte
-            contenido = f"""REPORTE MBRP - PRODUCTOS DE BAJA ROTACIÓN
-{'='*50}
+            # Generar contenido del reporte 0
+            total_nunca = len(nunca_vendidos)
 
-Período: {self.mbrp_fecha_inicio} - {self.mbrp_fecha_fin}
+            contenido = f"""REPORTE 0 MBRP - PRODUCTOS NUNCA VENDIDOS
+{'='*55}
+
+Período MBRP actual: {self.mbrp_fecha_inicio} - {self.mbrp_fecha_fin}
 Sede: {sede}
 Fecha reporte: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
-RESUMEN EJECUTIVO:
+RESUMEN:
 {'-'*20}
-Total productos analizados: {reporte['total_productos']}
-Sin movimiento (IM = 0%): {reporte['sin_movimiento']}
-Baja rotación (IM ≤ 10%): {reporte['baja_rotacion']}
-Rotación media (IM ≤ 30%): {reporte['media_rotacion']}
-Alta rotación (IM > 30%): {reporte['alta_rotacion']}
+Total productos filtrados en MBRP: {len(datos_filtrados)}
+Productos NUNCA vendidos (según TR_INVENTARIO, concepto VEN): {total_nunca}
 
-Productos críticos identificados: {reporte['productos_criticos']}
-Porcentaje de baja rotación: {reporte['porcentaje_baja_rotacion']}%
-
-PRODUCTOS MÁS CRÍTICOS:
-{'-'*30}
+DETALLE DE PRODUCTOS NUNCA VENDIDOS (RESPETA FILTROS ACTUALES):
+{'-'*55}
 """
-            
-            for i, producto in enumerate(reporte['detalle_criticos'], 1):
-                contenido += f"{i}. {producto['codigo']} - {producto['descripcion'][:50]}\n"
-                contenido += f"   IM: {producto['im']}% | Días sin venta: {producto['dias_sin_venta']}\n\n"
-            
-            contenido += "\nRECOMENDACIONES:\n"
+
+            for i, producto in enumerate(nunca_vendidos, 1):
+                desc_corta = producto['descripcion'][:60]
+                contenido += f"{i}. {producto['codigo']} - {desc_corta}\n"
+                contenido += f"   Rotación: {producto['rotacion']}\n\n"
+
+            contenido += "\nNOTA:\n"
             contenido += "-"*20 + "\n"
-            contenido += "1. Revisar productos sin movimiento para posible descontinuación\n"
-            contenido += "2. Implementar estrategias de liquidación para productos críticos\n"
-            contenido += "3. Analizar causa raíz de baja rotación\n"
-            contenido += "4. Considerar reposicionamiento o cambio de precio\n"
+            contenido += "Este listado se basa en TR_INVENTARIO filtrando únicamente transacciones \
+VEN con cantidad > 0. Los productos aquí listados no poseen ninguna venta registrada \
+según ese criterio para la sede seleccionada.\n"
             
             texto.insert('1.0', contenido)
             texto.config(state='disabled')
@@ -9878,7 +10111,7 @@ PRODUCTOS MÁS CRÍTICOS:
             # Botón para cerrar
             ttk.Button(reporte_window, text="Cerrar", command=reporte_window.destroy).pack(pady=10)
             
-            self.log(f"Reporte MBRP generado: {reporte['productos_criticos']} productos críticos encontrados", "SUCCESS")
+            self.log(f"Reporte 0 MBRP generado: {total_nunca} productos nunca vendidos", "SUCCESS")
             
         except Exception as e:
             self.log(f"Error generando reporte MBRP: {str(e)}", "ERROR")

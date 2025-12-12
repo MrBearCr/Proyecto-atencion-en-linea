@@ -1,21 +1,12 @@
-import pyodbc
 import tkinter as tk
-import csv
 from tkinter import ttk, messagebox, simpledialog
 from tkinter import font 
-from cryptography.fernet import Fernet
-import keyring
 import re
 import configparser
 import os
-import webbrowser
-import logging
 from logging.handlers import RotatingFileHandler
 import time
 from typing import Optional
-import socket
-import http.server
-import socketserver
 import threading 
 import json
 import inspect
@@ -38,10 +29,7 @@ from pal.services.cache import CacheDescripciones
 from pal.services.envios import EnvioProgramado, ProgramadorEnvios
 from pal.core.log import set_component_level
 from pal.core.license import LicenseChecker, LicenseError
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from win10toast import ToastNotifier
-from PIL import Image, ImageTk
 from threading import Event, Timer
 
 

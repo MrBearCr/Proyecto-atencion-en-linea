@@ -55,7 +55,7 @@ class SplashScreen(tk.Toplevel):
         
         # Texto de carga
         ttk.Label(self.container, 
-                  text="PAL - Plataforma de Administración Local 1.0", 
+                  text="Casapro Nexus - Plataforma de Administracion local", 
                   font=("Segoe UI", 13)).pack(pady=4)
         
         # Barra de progreso

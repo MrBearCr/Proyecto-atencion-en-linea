@@ -1535,8 +1535,14 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
             cell.fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
             cell.alignment = Alignment(horizontal='center', vertical='center')
 
-        # Índice de la columna de detalle ICH (si aplica)
-        detalle_ich_col = len(headers) if ich_mode else None
+# Índice de la columna de detalle ICH (si aplica)
+        # Con ICH y costo/utilidad: columna R (18)
+        # Con ICH sin costo/utilidad: columna O (15) 
+        # Sin ICH: no hay detalle ICH
+        if ich_mode:
+            detalle_ich_col = 18 if mostrar_costo_utilidad else 15
+        else:
+            detalle_ich_col = None
 
         # Datos de productos
         data_start_row = start_row + 1
@@ -2074,23 +2080,7 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
                     
                     ws_main.cell(row=row, column=current_col, value=clean_for_excel(detalle_ich))
 
-                # Agregar columnas de precio + IVA, costo y utilidad si el usuario tiene permiso
-                if mostrar_costo_utilidad:
-                    precio_base = fila_datos['precio_base']
-                    costo_val = fila_datos['costo_val']
-                    iva_pct = fila_datos['iva_pct']
-                    precio_con_iva = precio_base * (1.0 + (iva_pct / 100.0)) if precio_base > 0 else 0.0
 
-                    # Columnas adicionales (después de Última Venta(DIAS))
-                    ws_main.cell(row=row, column=12, value=round(precio_con_iva, 2))
-                    ws_main.cell(row=row, column=13, value=round(costo_val, 2))
-
-                    if precio_base > 0:
-                        utilidad_raw = (costo_val / precio_base) * 100 - 100
-                        utilidad_pct = abs(utilidad_raw)
-                    else:
-                        utilidad_pct = 0.0
-                    ws_main.cell(row=row, column=14, value=round(utilidad_pct, 2))
 
             except Exception as e:
                 logger.error(f"Error procesando fila MBRP: {fila_datos} - {e}")
@@ -2108,15 +2098,19 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
             )
             ws_main.add_table(table)
         
-        # Formato condicional para Índice de Movilidad (IM %)
+# Formato condicional para Índice de Movilidad (IM %)
         if filas_exportadas > 0:
-            im_range = f"J{data_start_row}:J{data_start_row + filas_exportadas - 1}"
+            # Determinar columna de IM % según modo ICH
+            # Sin ICH: Columna M (13), Con ICH: Columna M (13) 
+            # Las columnas de stock por sede (I,K) no afectan la posición del IM %
+            im_col_letter = 'M'  # Siempre columna 13 (IM %)
+            im_range = f"{im_col_letter}{data_start_row}:{im_col_letter}{data_start_row + filas_exportadas - 1}"
             
             # IM < 5% = Rojo (crítico)
             ws_main.conditional_formatting.add(im_range,
                 CellIsRule(operator='lessThan', formula=[5],
                           fill=PatternFill(start_color="F44336", end_color="F44336")))
-        
+            
             # 5% <= IM <= 10% = Naranja (muy bajo)
             ws_main.conditional_formatting.add(im_range,
                 CellIsRule(operator='between', formula=[5, 10],
@@ -2127,23 +2121,31 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
                 CellIsRule(operator='between', formula=[10, 20],
                           fill=PatternFill(start_color="FFEB3B", end_color="FFEB3B")))
             
-            # Formato condicional especial para modo ICH - resaltar productos sin stock en Cabudare
+            # Formato condicional especial para modo ICH
             if ich_mode and filas_exportadas > 0:
-                # Columna de stock actual (columna H)
+                # Columna de stock actual (siempre columna H)
                 stock_range = f"H{data_start_row}:H{data_start_row + filas_exportadas - 1}"
                 ws_main.conditional_formatting.add(stock_range,
                     CellIsRule(operator='equal', formula=[0],
                               fill=PatternFill(start_color="FFE5E5", end_color="FFE5E5"),
                               font=Font(color="CC0000")))
                 
-                # Columna de días sin venta (columna K) - resaltar valores altos
-                dias_range = f"K{data_start_row}:K{data_start_row + filas_exportadas - 1}"
+                # Columna de días sin venta (siempre columna N)
+                dias_col_letter = 'N'  # Última Venta (DIAS)
+                dias_range = f"{dias_col_letter}{data_start_row}:{dias_col_letter}{data_start_row + filas_exportadas - 1}"
                 ws_main.conditional_formatting.add(dias_range,
                     CellIsRule(operator='greaterThan', formula=[180],
                               fill=PatternFill(start_color="FFCDD2", end_color="FFCDD2"),
                               font=Font(color="B71C1C")))
+                
+                # Resaltar stock bajo en Cabudare (columna I)
+                cabudare_range = f"I{data_start_row}:I{data_start_row + filas_exportadas - 1}"
+                ws_main.conditional_formatting.add(cabudare_range,
+                    CellIsRule(operator='equal', formula=[0],
+                              fill=PatternFill(start_color="FFCDD2", end_color="FFCDD2"),
+                              font=Font(color="B71C1C")))
         
-        # Ajustar anchos de columna
+# Ajustar anchos de columna - Actualizado para mapeo correcto
         ws_main.column_dimensions['A'].width = 12  # Código
         ws_main.column_dimensions['B'].width = 40  # Descripción
         ws_main.column_dimensions['C'].width = 14  # Departamento
@@ -2152,19 +2154,36 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
         ws_main.column_dimensions['F'].width = 12  # Rotación
         ws_main.column_dimensions['G'].width = 15  # Ventas
         ws_main.column_dimensions['H'].width = 15  # Stock Actual
-        ws_main.column_dimensions['I'].width = 15  # Días de Stock
-        ws_main.column_dimensions['J'].width = 12  # IM %
-        ws_main.column_dimensions['K'].width = 18  # Última Venta (DIAS)
         
         if ich_mode:
-            ws_main.column_dimensions[get_column_letter(detalle_ich_col)].width = 60  # Detalle ICH (más ancho para multilinea)
+            # Columnas de stock por sede
+            ws_main.column_dimensions['I'].width = 15  # Stock Cabudare
+            ws_main.column_dimensions['J'].width = 15  # Stock Barinas
+            ws_main.column_dimensions['K'].width = 15  # Stock Guanare
+            # Columnas de análisis (después de stock por sede)
+            ws_main.column_dimensions['L'].width = 15  # Días de Stock
+            ws_main.column_dimensions['M'].width = 12  # IM %
+            ws_main.column_dimensions['N'].width = 18  # Última Venta (DIAS)
+        else:
+            # Sin ICH: columnas de análisis después de Stock Actual
+            ws_main.column_dimensions['I'].width = 15  # Días de Stock
+            ws_main.column_dimensions['J'].width = 12  # IM %
+            ws_main.column_dimensions['K'].width = 18  # Última Venta (DIAS)
         
+        # Columnas de costo/utilidad (siempre al final)
         if mostrar_costo_utilidad:
-            # Ajustar columnas de costo/utilidad según si hay columna ICH
-            start_costo_col = detalle_ich_col + 1 if ich_mode else 12
-            ws_main.column_dimensions[get_column_letter(start_costo_col)].width = 15  # Precio + IVA
-            ws_main.column_dimensions[get_column_letter(start_costo_col + 1)].width = 15  # Costo
-            ws_main.column_dimensions[get_column_letter(start_costo_col + 2)].width = 15  # Utilidad %
+            if ich_mode:
+                # Con ICH: O, P, Q
+                ws_main.column_dimensions['O'].width = 15  # Precio + IVA
+                ws_main.column_dimensions['P'].width = 15  # Costo
+                ws_main.column_dimensions['Q'].width = 15  # Utilidad %
+                # Detalle ICH es la última columna R
+                ws_main.column_dimensions['R'].width = 60  # Detalle ICH (más ancho para multilinea)
+            else:
+                # Sin ICH: L, M, N
+                ws_main.column_dimensions['L'].width = 15  # Precio + IVA
+                ws_main.column_dimensions['M'].width = 15  # Costo
+                ws_main.column_dimensions['N'].width = 15  # Utilidad %
         
         # === HOJA 2: RESUMEN POR MOVILIDAD ===
         ws_summary = wb.create_sheet("Resumen por Movilidad")

@@ -2019,15 +2019,9 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
                     stock_barinas = dist.get('Barinas', 0)
                     stock_guanare = dist.get('Guanare', 0)
                     
-                    # Columnas de stock por sede sin color
-                    cell_cabudare = ws_main.cell(row=row, column=9, value=stock_cabudare)
-                    cell_barinas = ws_main.cell(row=row, column=10, value=stock_barinas)
-                    cell_guanare = ws_main.cell(row=row, column=11, value=stock_guanare)
-                    
-                    # Asegurar que no tengan color de fondo
-                    cell_cabudare.fill = PatternFill(start_color="FFFFFF", end_color="FFFFFF", fill_type="solid")
-                    cell_barinas.fill = PatternFill(start_color="FFFFFF", end_color="FFFFFF", fill_type="solid")
-                    cell_guanare.fill = PatternFill(start_color="FFFFFF", end_color="FFFFFF", fill_type="solid")
+                    ws_main.cell(row=row, column=9, value=stock_cabudare)
+                    ws_main.cell(row=row, column=10, value=stock_barinas)
+                    ws_main.cell(row=row, column=11, value=stock_guanare)
                     current_col = 11
                 else:
                     # Si no es modo ICH, dejamos espacios para las columnas de sede

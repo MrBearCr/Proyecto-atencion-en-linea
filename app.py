@@ -10025,10 +10025,13 @@ class DatabaseApp:
                 return
 
             # 6) Consultar últimas ventas; sólo regresan productos que ALGUNA vez se vendieron
+            from datetime import datetime
+            start_time = datetime.now()
             ultimas_ventas = obtener_ultimas_ventas_bulk(self.db_manager, codigos_unicos, sede)
+            query_time = (datetime.now() - start_time).total_seconds()
+            self.log(f"Reporte 0: Consulta de últimas ventas completada en {query_time:.2f}s", "INFO")
 
             # 7) Calcular días del período seleccionado en el módulo MBRP
-            from datetime import datetime
             dias_criterio = -1  # Default: nunca vendidos
             if hasattr(self, 'mbrp_fecha_inicio') and hasattr(self, 'mbrp_fecha_fin') and self.mbrp_fecha_inicio and self.mbrp_fecha_fin:
                 try:

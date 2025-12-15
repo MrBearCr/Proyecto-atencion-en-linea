@@ -302,8 +302,9 @@ class DatabaseApp:
             self.current_filter = 'TODAS'
             self.cached_alertas = []
             self.last_refresh = None
-            # Carga paralela de stock
+         # Carga paralela de stock
             self.stock_full_loading_started = False
+            self._stock_loading_in_progress = False
 
             self.tra_page_size = 500
             self.tra_current_page = 1
@@ -573,8 +574,11 @@ class DatabaseApp:
                         except Exception as debug_e:
                             self.stock_debug_log(f"⚠️ No se pudo obtener total de registros: {debug_e}")
                         
-                        threading.Thread(target=self._background_load_alertas_stock, daemon=True).start()
-                        self.log("Carga paralela de alertas iniciada", "INFO")
+                        if not getattr(self, '_stock_loading_in_progress', False):
+                            threading.Thread(target=self._background_load_alertas_stock, daemon=True).start()
+                            self.log("Carga paralela de alertas iniciada", "INFO")
+                        else:
+                            self.log("📡 Carga de alertas ya en progreso, omitiendo", "DEBUG")
                 except Exception as e:
                     self.log(f"No se pudo iniciar carga paralela: {e}", "ERROR")
         
@@ -587,6 +591,14 @@ class DatabaseApp:
         if not self.modules_enabled.get("stock", False):
             self.log("Módulo de stock deshabilitado", "WARNING")
             return
+        
+        # Verificar si ya hay una carga en progreso antes de resetear flags
+        if getattr(self, '_stock_loading_in_progress', False):
+            self.log("📡 Carga de stock ya en progreso, omitiendo recarga", "DEBUG")
+            return
+        
+        # Resetear flags para permitir nueva carga
+        self.stock_full_loading_started = False
         
         # Confirmar acción con el usuario
         from tkinter import messagebox
@@ -710,11 +722,13 @@ class DatabaseApp:
             # FASE 6: Iniciar carga completa en segundo plano (100%)
             self._update_stock_reload_progress(95, "Iniciando carga completa...")
             
-            # Iniciar carga completa de alertas en background
-            if not getattr(self, 'stock_full_loading_started', False):
+          # Iniciar carga completa de alertas en background
+            if not getattr(self, 'stock_full_loading_started', False) and not getattr(self, '_stock_loading_in_progress', False):
                 self.stock_full_loading_started = True
                 threading.Thread(target=self._background_load_alertas_stock, daemon=True).start()
                 self.root.after(0, lambda: self.log("✅ Carga paralela de alertas iniciada", "SUCCESS"))
+            elif getattr(self, '_stock_loading_in_progress', False):
+                self.root.after(0, lambda: self.log("📡 Carga de alertas ya en progreso", "DEBUG"))
             
             # FINALIZACIÓN (100%)
             elapsed_time = time.perf_counter() - start_time
@@ -8211,12 +8225,20 @@ class DatabaseApp:
         Usa chunks adaptativos para optimizar latencia y rendimiento.
         Soporta múltiples depósitos seleccionados.
         """
-        from pal.core.chunks import AdaptiveChunkController
-        total_loaded = 0
-        chunk_count = 0
-        load_start_time = time.perf_counter()
+        # Evitar múltiples ejecuciones simultáneas
+        if getattr(self, '_stock_loading_in_progress', False):
+            self.stock_debug_log("⚠️ Carga de stock ya en progreso, ignorando nueva solicitud")
+            return
+        
+        self._stock_loading_in_progress = True
         
         try:
+            from pal.core.chunks import AdaptiveChunkController
+            total_loaded = 0
+            chunk_count = 0
+            load_start_time = time.perf_counter()
+            
+            # Usar SOLO depósitos de la localidad actual para la carga y el ordenamiento
             # Usar SOLO depósitos de la localidad actual para la carga y el ordenamiento
             localidad = getattr(self, 'stock_localidad_actual', 'Cabudare')
             locs = getattr(self, 'stock_localidades', {}) or {}
@@ -8348,6 +8370,9 @@ class DatabaseApp:
             # Log adicional para debugging
             import traceback
             self.log(f"❌ [DEBUG] Traceback: {traceback.format_exc()}", "ERROR")
+        finally:
+            # Liberar el bloqueo para permitir futuras cargas
+            self._stock_loading_in_progress = False
     
     def _update_ui_after_chunk(self, total_records, chunk_number):
         """Actualiza la UI después de cargar un chunk de datos"""
@@ -8421,10 +8446,16 @@ class DatabaseApp:
     def _retry_stock_loading(self):
         """Reintenta la carga de stock automáticamente tras un fallo"""
         try:
+            # Evitar múltiples reintentos simultáneos
+            if getattr(self, '_stock_loading_in_progress', False):
+                self.log("🔄 [AUTO-RETRY] Carga ya en progreso, omitiendo reintento", "DEBUG")
+                return
+                
             self.log("🔄 [AUTO-RETRY] Reintentando carga de stock automáticamente...", "INFO")
             
             # Resetear estado para permitir nueva carga
             self.stock_full_loading_started = False
+            self._stock_loading_in_progress = False  # Resetear también el flag de bloqueo
             
             # Limpiar datos parciales
             if len(self.cached_alertas) < 1000:
@@ -9624,7 +9655,15 @@ class DatabaseApp:
         
         # Cache de stock rápido
         codigos = [r[0] for r in datos]
-        sede = self.mbrp_sede_codigo or '0301'
+        # Alinear sede de stock con RI/TRA; si el filtro es ICH/global, se suman todas las sedes
+        sede = None
+        try:
+            sede = getattr(self, 'mbrp_sede_codigo', None)
+            if not sede and hasattr(self, 'sede_var'):
+                sede = (self.sede_var.get() or '').split(' - ')[0]
+        except Exception:
+            sede = None
+        # Por defecto usar ICH (global) para evitar caer a Cabudare cuando no hay sede explícita
         stock_map = self.obtener_stock_actual_bulk(codigos, sede)
         
         # Calcular Índices de Movilidad para todos los productos

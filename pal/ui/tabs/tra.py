@@ -88,9 +88,18 @@ def setup_tra_tab(app):
             btn_export.config(state='disabled')
 
     ttk.Button(top_controls, text="Cargar", command=app.cargar_tra_base).pack(side=tk.RIGHT, padx=10)
-
-    # Checkbox para cambiar entre unidades y dólares en ventas
+    
+    # Checkbox para cambiar entre unidades y dólares en ventas (protegido por permiso)
     app.tra_mostrar_dolares_var = tk.BooleanVar(value=False)
+    can_view_dollars_tra = False
+    try:
+        if hasattr(app, 'permissions') and app.current_user:
+            can_view_dollars_tra = app.permissions.tiene_permiso(app.current_user['id'], 'TRA', 'ver_ventas_dolares')
+        if app.current_user and app.current_user.get('username','').lower() == 'admin':
+            can_view_dollars_tra = True
+    except Exception:
+        can_view_dollars_tra = False
+    
     tra_dolares_check = ttk.Checkbutton(
         top_controls, 
         text="Ventas en $", 
@@ -98,6 +107,11 @@ def setup_tra_tab(app):
         command=lambda: app.actualizar_display_ventas_tra()
     )
     tra_dolares_check.pack(side=tk.RIGHT, padx=5)
+    if not can_view_dollars_tra:
+        try:
+            tra_dolares_check.state(["disabled"])
+        except Exception:
+            tra_dolares_check.config(state='disabled')
 
     # Frame para filtros jerárquicos
     filter_frame = ttk.Frame(app.tra_tab_frame)

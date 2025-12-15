@@ -1583,7 +1583,27 @@ class DatabaseApp:
             self.global_progress['maximum'] = total_registros
             self.api_status.config(text="Exportando RI: 0%", foreground="#004C97")
             
-            filename = f"reporte_tra_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+            # Sugerir nombre por defecto y permitir al usuario elegir carpeta/archivo
+            default_name = f"reporte_tra_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+            try:
+                from tkinter import filedialog
+                filename = filedialog.asksaveasfilename(
+                    parent=self.root if hasattr(self, 'root') else None,
+                    title="Guardar reporte RI como...",
+                    defaultextension=".xlsx",
+                    initialfile=default_name,
+                    filetypes=[("Archivos de Excel", "*.xlsx"), ("Todos los archivos", "*.*")]
+                )
+            except Exception as e:
+                # Si falla el diálogo, caer al nombre por defecto en la carpeta actual
+                self.log(f"[EXPORT] Error mostrando diálogo de guardar RI: {e} - usando ruta por defecto", "WARNING")
+                filename = default_name
+
+            if not filename:
+                # Usuario canceló
+                self.log("[EXPORT] Usuario canceló el diálogo de guardar RI", "INFO")
+                self._cleanup_export_progress()
+                return
             
             # Callback de progreso thread-safe
             def progress_cb(i, total):
@@ -1750,7 +1770,27 @@ class DatabaseApp:
             self.global_progress['maximum'] = total_registros
             self.api_status.config(text="Exportando MBRP: 0%", foreground="#004C97")
             
-            filename = f"reporte_mbrp_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+            # Sugerir nombre por defecto y permitir al usuario elegir carpeta/archivo
+            default_name = f"reporte_mbrp_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+            try:
+                from tkinter import filedialog
+                filename = filedialog.asksaveasfilename(
+                    parent=self.root if hasattr(self, 'root') else None,
+                    title="Guardar reporte MBRP como...",
+                    defaultextension=".xlsx",
+                    initialfile=default_name,
+                    filetypes=[("Archivos de Excel", "*.xlsx"), ("Todos los archivos", "*.*")]
+                )
+            except Exception as e:
+                # Si falla el diálogo, caer al nombre por defecto en la carpeta actual
+                self.log(f"[EXPORT] Error mostrando diálogo de guardar MBRP: {e} - usando ruta por defecto", "WARNING")
+                filename = default_name
+
+            if not filename:
+                # Usuario canceló
+                self.log("[EXPORT] Usuario canceló el diálogo de guardar MBRP", "INFO")
+                self._cleanup_export_progress()
+                return
             
             # Callback de progreso thread-safe
             def progress_cb(i, total):
@@ -1904,7 +1944,27 @@ class DatabaseApp:
             self.global_progress['maximum'] = total_registros
             self.api_status.config(text="Creando Excel: 0%", foreground="#004C97")
 
-            filename = f"reporte_stock_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+            # Sugerir nombre por defecto y permitir al usuario elegir carpeta/archivo
+            default_name = f"reporte_stock_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+            try:
+                from tkinter import filedialog
+                filename = filedialog.asksaveasfilename(
+                    parent=self.root if hasattr(self, 'root') else None,
+                    title="Guardar reporte de Stock como...",
+                    defaultextension=".xlsx",
+                    initialfile=default_name,
+                    filetypes=[("Archivos de Excel", "*.xlsx"), ("Todos los archivos", "*.*")]
+                )
+            except Exception as e:
+                # Si falla el diálogo, caer al nombre por defecto en la carpeta actual
+                self.log(f"[EXPORT] Error mostrando diálogo de guardar Stock: {e} - usando ruta por defecto", "WARNING")
+                filename = default_name
+
+            if not filename:
+                # Usuario canceló
+                self.log("[EXPORT] Usuario canceló el diálogo de guardar Stock", "INFO")
+                self._cleanup_export_progress()
+                return
 
             # Callback de progreso thread-safe
             def progress_cb(i, total):
@@ -9338,6 +9398,7 @@ class DatabaseApp:
             fecha_fin = self.mbrp_fecha_fin_entry.get_date()
             sede = (self.mbrp_sede_var.get() or '').split(' - ')[0]
             
+            # Log básico siempre visible al iniciar carga MBRP
             self.log(f"[MBRP] Iniciando carga: {fecha_inicio} a {fecha_fin}, Sede: {sede}", "INFO")
 
             # Evitar cargas simultáneas
@@ -9368,7 +9429,8 @@ class DatabaseApp:
             if hasattr(self, '_mbrp_ultimas_ventas_cache'):
                 self._mbrp_ultimas_ventas_cache = {}
                 self._mbrp_ultimas_ventas_time = 0
-                self.log("[MBRP] Caché de últimas ventas invalidado", "DEBUG")
+                # Detalle solo cuando debug MBRP está activo
+                self.mbrp_debug_log("Caché de últimas ventas invalidado")
 
             # Estado UI
             try:
@@ -9408,6 +9470,7 @@ class DatabaseApp:
             seen = set()
             acumulados = []
             
+            # INFO: inicio de carga adaptativa siempre visible; detalles de chunks van por debug
             self.log(f"[MBRP] Iniciando carga adaptativa (chunk inicial: {chunk_size})", "INFO")
 
             chunk_count = 0
@@ -9455,19 +9518,21 @@ class DatabaseApp:
             self.log(f"[MBRP] Carga completada: {len(acumulados)} productos únicos", "SUCCESS")
             
             # Clasificar y filtrar por rotación usando lógica específica para MBRP
-            from pal.services.mbrp import clasificar_rotacion_mbrp, filtrar_productos_baja_rotacion
+            from pal.services.mbrp import clasificar_rotacion_mbrp
             from pal.services.tra import clasificar_rotacion_tra
             try:
+                # INFO general siempre visible
                 self.log("[MBRP] Clasificando y filtrando productos de baja rotación...", "INFO")
-                self.log(f"[MBRP] Datos acumulados antes de filtrar: {len(acumulados)} productos", "DEBUG")
+                # Detalles solo en modo debug
+                self.mbrp_debug_log(f"Datos acumulados antes de filtrar: {len(acumulados)} productos")
                 
                 if acumulados:
                     primera = acumulados[0]
-                    self.log(f"[MBRP] Primera fila acumulada: {primera} (len={len(primera)})", "DEBUG")
+                    self.mbrp_debug_log(f"Primera fila acumulada: {primera} (len={len(primera)})")
                 
                 # PASO 1: Clasificar con la lógica RI/TRA para aislar solo BAJA/SIN MOVIMIENTO
                 try:
-                    self.log("[MBRP] Clasificando rotación base (RI/TRA) para aislar BAJA/SIN MOVIMIENTO...", "DEBUG")
+                    self.mbrp_debug_log("[MBRP] Clasificando rotación base (RI/TRA) para aislar BAJA/SIN MOVIMIENTO...")
                     base_clasificados = clasificar_rotacion_tra(acumulados)
                 except Exception as e:
                     self.log(f"[MBRP] Error clasificando con RI/TRA: {e} - usando datos sin clasificar", "WARNING")
@@ -9486,18 +9551,17 @@ class DatabaseApp:
                     self.log("[MBRP] ADVERTENCIA: No hay productos BAJA/SIN_MOVIMIENTO tras clasificación RI", "WARNING")
                     productos_baja_base = list(base_clasificados)  # fallback para no quedar vacíos
                 
-                # PASO 2: Dentro del conjunto de baja rotación, recalcular IM y filtrar por umbral
-                self.log(f"[MBRP] Filtrando por IM dentro del set BAJA/SIN_MOVIMIENTO (umbral_im=30.0)...", "DEBUG")
-                productos_baja_rotacion = filtrar_productos_baja_rotacion(productos_baja_base, umbral_im=30.0)
-                self.log(f"[MBRP] Filtrados IM<=30: {len(productos_baja_rotacion)}/{len(productos_baja_base)} productos", "INFO")
+                # PASO 2: Dentro del conjunto de baja rotación, solo recalcular IM (sin excluir por umbral)
+                #         Todos los productos BAJA/SIN_MOVIMIENTO participan en el cálculo de IM%.
+                productos_para_mbrp = list(productos_baja_base)
+                self.log(
+                    f"[MBRP] Productos incluidos para MBRP (BAJA/SIN_MOVIMIENTO): {len(productos_para_mbrp)}/{len(productos_baja_base)}",
+                    "INFO",
+                )
                 
-                if not productos_baja_rotacion:
-                    self.log(f"[MBRP] ADVERTENCIA: Filtrado retornó lista vacía; usando set BAJA base", "WARNING")
-                    productos_baja_rotacion = list(productos_baja_base)
-                
-                # PASO 3: Clasificar MBRP (usa IM ya calculado en paso previo, pero se recalcula por seguridad)
-                self.log(f"[MBRP] Iniciando clasificación de {len(productos_baja_rotacion)} productos...", "DEBUG")
-                productos_clasificados = clasificar_rotacion_mbrp(productos_baja_rotacion)
+                # PASO 3: Clasificar MBRP (calcula IM internamente y etiqueta rotación específica MBRP)
+                self.mbrp_debug_log(f"Iniciando clasificación de {len(productos_para_mbrp)} productos...")
+                productos_clasificados = clasificar_rotacion_mbrp(productos_para_mbrp)
                 self.log(f"[MBRP] Clasificados: {len(productos_clasificados)} productos", "INFO")
                 
                 if not productos_clasificados:
@@ -9516,8 +9580,8 @@ class DatabaseApp:
             # Actualizar UI
             def _finish():
                 try:
-                    self.log("[MBRP] _finish() iniciado", "DEBUG")
-                    self.log(f"[MBRP] _finish() - cached_ventas_mbrp tiene {len(self.cached_ventas_mbrp)} productos", "DEBUG")
+                    self.mbrp_debug_log("_finish() iniciado")
+                    self.mbrp_debug_log(f"_finish() - cached_ventas_mbrp tiene {len(self.cached_ventas_mbrp)} productos")
                     
                     # Reconstruir vistas efectivas para MBRP
                     try:
@@ -9525,18 +9589,18 @@ class DatabaseApp:
                     except Exception:
                         pass
                     self.aplicar_filtro_mbrp()
-                    self.log("[MBRP] _finish() - aplicar_filtro_mbrp completado", "DEBUG")
+                    self.mbrp_debug_log("_finish() - aplicar_filtro_mbrp completado")
                     
                     try:
                         self.api_status.config(text="MBRP: Completo", foreground="green")
-                        self.log("[MBRP] _finish() - api_status actualizado", "DEBUG")
+                        self.mbrp_debug_log("_finish() - api_status actualizado")
                     except Exception as e:
                         self.log(f"[MBRP] Error actualizando api_status: {e}", "WARNING")
                     
                     try:
                         self.global_progress.stop()
                         self.global_progress.pack_forget()
-                        self.log("[MBRP] _finish() - progress bar detenido", "DEBUG")
+                        self.mbrp_debug_log("_finish() - progress bar detenido")
                     except Exception as e:
                         self.log(f"[MBRP] Error deteniendo progress bar: {e}", "WARNING")
                     
@@ -9545,7 +9609,7 @@ class DatabaseApp:
                     self.log(f"[MBRP] ERROR en _finish: {e}", "ERROR")
                     import traceback
                     tb = traceback.format_exc()
-                    self.log(f"[MBRP] Traceback: {tb}", "DEBUG")
+                    self.mbrp_debug_log(f"Traceback en _finish: {tb}")
                     # Intentar detener progress bar de todas formas
                     try:
                         self.global_progress.stop()
@@ -9571,7 +9635,7 @@ class DatabaseApp:
                 )
                 return
             
-            self.log(f"[MBRP] aplicar_filtro_mbrp() iniciado con {len(self.cached_ventas_mbrp)} productos en cache", "DEBUG")
+            self.mbrp_debug_log(f"aplicar_filtro_mbrp() iniciado con {len(self.cached_ventas_mbrp)} productos en cache")
             
             # Inicializar diccionarios si no existen
             if not hasattr(self, 'mbrp_dept_dict'):
@@ -9613,9 +9677,8 @@ class DatabaseApp:
 
             texto = self.mbrp_search_var.get() if hasattr(self, 'mbrp_search_var') else ''
             
-            self.log(
-                f"[MBRP] Aplicando filtros - Dept: {dept_cod}, Group: {group_cod}, Sub: {sub_cod}, Texto: '{texto}'",
-                "DEBUG"
+            self.mbrp_debug_log(
+                f"Aplicando filtros - Dept: {dept_cod}, Group: {group_cod}, Sub: {sub_cod}, Texto: '{texto}'"
             )
 
             from pal.services.tra import filter_ventas_tra, paginate_tra
@@ -9629,9 +9692,8 @@ class DatabaseApp:
                 favoritos=self._get_favoritos_local(),
             )
             
-            self.log(
-                f"[MBRP] Después de filter_ventas_tra: {len(datos_filtrados)} productos filtrados",
-                "DEBUG"
+            self.mbrp_debug_log(
+                f"Después de filter_ventas_tra: {len(datos_filtrados)} productos filtrados"
             )
 
             if not hasattr(self, 'mbrp_current_page') or self.mbrp_current_page < 1:
@@ -9642,20 +9704,19 @@ class DatabaseApp:
                 datos_filtrados, self.mbrp_current_page, self.mbrp_page_size
             )
             
-            self.log(
-                f"[MBRP] Página {self.mbrp_current_page}/{total_paginas} ({len(datos_pagina)} filas en página)",
-                "DEBUG"
+            self.mbrp_debug_log(
+                f"Página {self.mbrp_current_page}/{total_paginas} ({len(datos_pagina)} filas en página)"
             )
             
-            self.log(f"[MBRP] Llamando a mostrar_mbrp_paginado con {len(datos_pagina)} productos", "DEBUG")
+            self.mbrp_debug_log(f"Llamando a mostrar_mbrp_paginado con {len(datos_pagina)} productos")
             self.mostrar_mbrp_paginado(datos_pagina)
-            self.log(f"[MBRP] mostrar_mbrp_paginado completado", "DEBUG")
+            self.mbrp_debug_log("mostrar_mbrp_paginado completado")
             
             self.actualizar_controles_paginacion_mbrp(total_paginas)
         except Exception as e:
             self.log(f"[MBRP] ERROR en aplicar_filtro_mbrp: {e}", "ERROR")
             import traceback
-            self.log(f"[MBRP] Traceback: {traceback.format_exc()}", "DEBUG")
+            self.mbrp_debug_log(f"Traceback en aplicar_filtro_mbrp: {traceback.format_exc()}")
 
     def mostrar_mbrp_paginado(self, datos):
         if not hasattr(self, 'mbrp_tree'):
@@ -9668,7 +9729,7 @@ class DatabaseApp:
             return
         
         if not datos:
-            self.log("[MBRP] datos vacío en mostrar_mbrp_paginado", "DEBUG")
+            self.mbrp_debug_log("datos vacío en mostrar_mbrp_paginado")
             return
             
         # Importar servicios MBRP

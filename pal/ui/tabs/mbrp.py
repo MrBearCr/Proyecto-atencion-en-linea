@@ -70,15 +70,20 @@ def setup_mbrp_tab(app):
     ttk.Button(top_controls, text="Cargar", command=app.cargar_mbrp_base).pack(side=tk.RIGHT, padx=10)
     ttk.Button(top_controls, text="🔄 Actualizar Ventas", 
                command=lambda: getattr(app, 'actualizar_ultimas_ventas_mbrp', lambda: None)()).pack(side=tk.RIGHT, padx=5)
-
+    
+    # Permisos para exportar y ver ventas en dólares
     can_export_mbrp = False
+    can_view_dollars_mbrp = False
     try:
         if hasattr(app, 'permissions') and app.current_user:
             can_export_mbrp = app.permissions.tiene_permiso(app.current_user['id'], 'MBRP', 'exportar')
+            can_view_dollars_mbrp = app.permissions.tiene_permiso(app.current_user['id'], 'MBRP', 'ver_ventas_dolares')
         if app.current_user and app.current_user.get('username','').lower() == 'admin':
             can_export_mbrp = True
+            can_view_dollars_mbrp = True
     except Exception:
         can_export_mbrp = False
+        can_view_dollars_mbrp = False
     btn_export_mbrp = ttk.Button(top_controls, text="📈 Exportar Excel", 
                command=lambda: getattr(app, 'exportar_mbrp_excel', lambda: None)())
     btn_export_mbrp.pack(side=tk.RIGHT, padx=5)
@@ -89,8 +94,8 @@ def setup_mbrp_tab(app):
             btn_export_mbrp.config(state='disabled')
 
     ttk.Button(top_controls, text="📊 Reporte 0", command=app.generar_reporte_mbrp).pack(side=tk.RIGHT, padx=5)
-
-    # Checkbox para cambiar entre unidades y dólares en ventas
+    
+    # Checkbox para cambiar entre unidades y dólares en ventas (protegido por permiso)
     app.mbrp_mostrar_dolares_var = tk.BooleanVar(value=False)
     mbrp_dolares_check = ttk.Checkbutton(
         top_controls, 
@@ -99,6 +104,11 @@ def setup_mbrp_tab(app):
         command=lambda: app.actualizar_display_ventas_mbrp()
     )
     mbrp_dolares_check.pack(side=tk.RIGHT, padx=5)
+    if not can_view_dollars_mbrp:
+        try:
+            mbrp_dolares_check.state(["disabled"])
+        except Exception:
+            mbrp_dolares_check.config(state='disabled')
 
     # Filtros jerárquicos
     filter_frame = ttk.Frame(app.mbrp_tab_frame)

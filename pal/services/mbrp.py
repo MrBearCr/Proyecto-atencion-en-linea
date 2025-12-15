@@ -21,9 +21,11 @@ def calcular_indice_movilidad(ventas_data: List, total_ventas_periodo: float = N
     Returns:
         dict: Mapeo código -> índice de movilidad (0-100%)
         
-    El IM se calcula como:
-    - 100% = Producto con máximas ventas
-    - 0% = Producto sin ventas o con ventas netas <= 0
+    El IM se calcula usando la misma lógica de la curva ABC de RI/TRA
+    (porcentaje acumulado de neto). De esta forma, un producto clasificado
+    como ALTA en RI nunca tendrá un IM bajo en MBRP:
+    - IM = 100 - % acumulado de neto
+    - 0% para productos sin ventas o neto <= 0
     """
     if not ventas_data:
         logger.debug(f"[CALC IM] ventas_data vacía")
@@ -32,68 +34,55 @@ def calcular_indice_movilidad(ventas_data: List, total_ventas_periodo: float = N
     try:
         logger.debug(f"[CALC IM] Iniciando cálculo IM para {len(ventas_data)} productos")
         
-        # Extraer ventas por código
+        # Extraer ventas por código (item[5] siempre es neto)
         ventas_por_codigo = {}
         items_invalidos = 0
-        
         for item in ventas_data:
             if len(item) >= 6:
                 codigo = str(item[0])
-                # El neto siempre está en item[5], independiente de clasificación
                 try:
                     neto = float(item[5]) if item[5] is not None else 0.0
-                    ventas_por_codigo[codigo] = neto
                 except (ValueError, TypeError) as e:
                     logger.warning(f"[CALC IM] Neto inválido para {codigo}: {item[5]} - {e}")
-                    ventas_por_codigo[codigo] = 0.0
+                    neto = 0.0
+                ventas_por_codigo[codigo] = neto
             else:
                 items_invalidos += 1
         
         logger.debug(f"[CALC IM] Extraídos {len(ventas_por_codigo)} productos válidos, {items_invalidos} items inválidos")
-        
         if not ventas_por_codigo:
             logger.warning(f"[CALC IM] No se extrajeron ventas válidas")
             return {}
         
-        # Filtrar solo productos con ventas positivas para el cálculo del IM
-        ventas_positivas = {k: v for k, v in ventas_por_codigo.items() if v > 0}
-        
+        # Solo ventas positivas participan en el % acumulado (igual que RI/TRA)
+        ventas_positivas = [(cod, neto) for cod, neto in ventas_por_codigo.items() if neto > 0]
         logger.debug(f"[CALC IM] Productos con ventas positivas: {len(ventas_positivas)}/{len(ventas_por_codigo)}")
-        
-        # Si no hay ventas positivas, todos tienen IM = 0
         if not ventas_positivas:
             logger.info(f"[CALC IM] Ningún producto con ventas positivas - asignando IM=0 a todos")
             return {codigo: 0.0 for codigo in ventas_por_codigo.keys()}
         
-        # Encontrar máximo y mínimo para normalización (solo de ventas positivas)
-        max_ventas = max(ventas_positivas.values())
-        min_ventas_positivas = min(ventas_positivas.values())
+        # Total de neto para el período (permitir inyección externa opcional)
+        total_neto = float(total_ventas_periodo) if total_ventas_periodo not in (None, 0) else sum(n for _, n in ventas_positivas)
+        if total_neto <= 0:
+            logger.info(f"[CALC IM] Total de neto <= 0 - asignando IM=0 a todos")
+            return {codigo: 0.0 for codigo in ventas_por_codigo.keys()}
         
-        logger.debug(f"[CALC IM] Rango de ventas: min={min_ventas_positivas}, max={max_ventas}")
+        # Orden descendente por neto para replicar la curva ABC
+        ventas_positivas.sort(key=lambda x: x[1], reverse=True)
         
-        # Evitar división por cero
-        rango_ventas = max_ventas - min_ventas_positivas
-        if rango_ventas == 0:
-            # Todos los productos con ventas tienen las mismas ventas
-            logger.info(f"[CALC IM] Todas las ventas iguales - asignando IM=50% a productos con ventas")
-            indices = {codigo: 50.0 for codigo in ventas_positivas.keys()}
-            # Productos sin ventas tienen IM = 0
-            for codigo in ventas_por_codigo:
-                if codigo not in indices:
-                    indices[codigo] = 0.0
-            return indices
-        
-        # Calcular IM para cada producto
         indices_movilidad = {}
-        for codigo, ventas in ventas_por_codigo.items():
-            if ventas <= 0:
-                # Productos sin ventas o con neto negativo tienen IM = 0
+        neto_acumulado = 0.0
+        for codigo, neto in ventas_positivas:
+            neto_acumulado += neto
+            porcentaje_acumulado = (neto_acumulado / total_neto) * 100
+            # IM = 100 - % acumulado, mínimo 0.1 para productos con venta
+            im = max(0.1, round(100.0 - porcentaje_acumulado, 1))
+            indices_movilidad[codigo] = im
+        
+        # Asignar IM=0 a productos sin ventas o neto <= 0
+        for codigo, neto in ventas_por_codigo.items():
+            if neto <= 0:
                 indices_movilidad[codigo] = 0.0
-            else:
-                # IM = (ventas - min_positivas) / (max_ventas - min_positivas) * 100
-                im = ((ventas - min_ventas_positivas) / rango_ventas) * 100
-                # Asegurar que el IM mínimo para productos con ventas sea > 0.1%
-                indices_movilidad[codigo] = max(0.1, round(im, 1))
         
         logger.debug(f"[CALC IM] Cálculo completado: {len(indices_movilidad)} índices generados")
         return indices_movilidad

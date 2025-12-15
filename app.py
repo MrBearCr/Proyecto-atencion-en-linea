@@ -9456,6 +9456,7 @@ class DatabaseApp:
             
             # Clasificar y filtrar por rotación usando lógica específica para MBRP
             from pal.services.mbrp import clasificar_rotacion_mbrp, filtrar_productos_baja_rotacion
+            from pal.services.tra import clasificar_rotacion_tra
             try:
                 self.log("[MBRP] Clasificando y filtrando productos de baja rotación...", "INFO")
                 self.log(f"[MBRP] Datos acumulados antes de filtrar: {len(acumulados)} productos", "DEBUG")
@@ -9464,17 +9465,37 @@ class DatabaseApp:
                     primera = acumulados[0]
                     self.log(f"[MBRP] Primera fila acumulada: {primera} (len={len(primera)})", "DEBUG")
                 
-                # PASO 1: Primero filtrar por IM (usa datos sin clasificar)
-                # Filtrar productos con Índice de Movilidad bajo (umbral 30%)
-                self.log(f"[MBRP] Iniciando filtrado con umbral_im=30.0...", "DEBUG")
-                productos_baja_rotacion = filtrar_productos_baja_rotacion(acumulados, umbral_im=30.0)
-                self.log(f"[MBRP] Filtrados: {len(productos_baja_rotacion)}/{len(acumulados)} productos (IM <= 30%)", "INFO")
+                # PASO 1: Clasificar con la lógica RI/TRA para aislar solo BAJA/SIN MOVIMIENTO
+                try:
+                    self.log("[MBRP] Clasificando rotación base (RI/TRA) para aislar BAJA/SIN MOVIMIENTO...", "DEBUG")
+                    base_clasificados = clasificar_rotacion_tra(acumulados)
+                except Exception as e:
+                    self.log(f"[MBRP] Error clasificando con RI/TRA: {e} - usando datos sin clasificar", "WARNING")
+                    base_clasificados = list(acumulados)
+                
+                productos_baja_base = [
+                    r for r in base_clasificados
+                    if len(r) > 6 and str(r[6]).upper() in {"BAJA", "SIN MOVIMIENTO"}
+                ]
+                self.log(
+                    f"[MBRP] Productos BAJA/SIN_MOVIMIENTO (RI): {len(productos_baja_base)}/{len(base_clasificados)}",
+                    "INFO"
+                )
+                
+                if not productos_baja_base:
+                    self.log("[MBRP] ADVERTENCIA: No hay productos BAJA/SIN_MOVIMIENTO tras clasificación RI", "WARNING")
+                    productos_baja_base = list(base_clasificados)  # fallback para no quedar vacíos
+                
+                # PASO 2: Dentro del conjunto de baja rotación, recalcular IM y filtrar por umbral
+                self.log(f"[MBRP] Filtrando por IM dentro del set BAJA/SIN_MOVIMIENTO (umbral_im=30.0)...", "DEBUG")
+                productos_baja_rotacion = filtrar_productos_baja_rotacion(productos_baja_base, umbral_im=30.0)
+                self.log(f"[MBRP] Filtrados IM<=30: {len(productos_baja_rotacion)}/{len(productos_baja_base)} productos", "INFO")
                 
                 if not productos_baja_rotacion:
-                    self.log(f"[MBRP] ADVERTENCIA: Filtrado retornó lista vacía", "WARNING")
+                    self.log(f"[MBRP] ADVERTENCIA: Filtrado retornó lista vacía; usando set BAJA base", "WARNING")
+                    productos_baja_rotacion = list(productos_baja_base)
                 
-                # PASO 2: Luego clasificar los productos filtrados
-                # Usar clasificación MBRP que se enfoca en productos de baja rotación
+                # PASO 3: Clasificar MBRP (usa IM ya calculado en paso previo, pero se recalcula por seguridad)
                 self.log(f"[MBRP] Iniciando clasificación de {len(productos_baja_rotacion)} productos...", "DEBUG")
                 productos_clasificados = clasificar_rotacion_mbrp(productos_baja_rotacion)
                 self.log(f"[MBRP] Clasificados: {len(productos_clasificados)} productos", "INFO")

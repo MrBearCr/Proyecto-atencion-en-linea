@@ -1,10 +1,10 @@
-# WARP.md
 
-Este archivo proporciona orientación a WARP (warp.dev) al trabajar con código en este repositorio.
+
+Este archivo proporciona orientación a WARP al trabajar con código en este repositorio.
 
 ## Resumen del Proyecto
 
-**PAL (Proyecto Atención en Línea)** es una aplicación de escritorio basada en Python para gestión de clientes, monitoreo de inventario e integración de mensajería por WhatsApp. Utiliza Tkinter para la interfaz gráfica y SQL Server como backend de base de datos.
+**NEXUS (Plataforma de Administracion Local)** es una aplicación de escritorio basada en Python para gestión de clientes, monitoreo de inventario e integración de mensajería por WhatsApp. Utiliza Tkinter para la interfaz gráfica y SQL Server como backend de base de datos.
 
 **Propósito Principal:** Gestionar información de clientes con almacenamiento seguro de credenciales, monitorear niveles de stock con alertas inteligentes, analizar rotación de productos (módulo TRA), identificar productos de baja rotación (módulo MBRP) y enviar mensajes masivos por WhatsApp.
 
@@ -174,10 +174,6 @@ IM = ((Ventas_Producto - Ventas_Mínimas) / (Ventas_Máximas - Ventas_Mínimas))
 
 ### Módulo Stock (Alertas de Inventario)
 
-**Niveles de Alerta**:
-- **Crítica**: Stock < 8 unidades → Reorden urgente
-- **Media**: 8 ≤ Stock < 15 → Monitoreo cercano
-- **Leve**: 15 ≤ Stock < 25 → Monitoreo normal
 
 **Características Clave**:
 - Carga paginada (300 registros iniciales, carga en segundo plano para conjunto completo)
@@ -407,7 +403,7 @@ datos_filtrados = aplicar_filtro_jerarquico(
 ### Consideraciones Específicas de Windows
 
 - **Keyring**: Usa librería `keyring` con backend de Windows Credential Manager
-- **Notificaciones Toast**: `win10toast` para notificaciones de bandeja del sistema (módulo Stock)
+- **Notificaciones Toast**: `win10toast` para notificaciones de bandeja del sistema (módulo Stock) ---OBSOLETO
 - **Rutas**: Usar `os.path.join()` para compatibilidad multiplataforma (aunque esta es una app solo Windows)
 
 ### Integración con SQL Server
@@ -433,7 +429,7 @@ datos_filtrados = aplicar_filtro_jerarquico(
 
 ## Dependencias Externas
 
-### API de WhatsApp Business
+### API de WhatsApp Business --- EN DESARROLLO / CHEQUEO CON META
 
 - **Endpoint**: Facebook Graph API v18+
 - **Almacenamiento de Token**: Cifrado en Windows Keyring
@@ -543,7 +539,7 @@ Asegurar que las operaciones corran en hilos en segundo plano, no en el hilo pri
 - `fix/nombre-bug`: Correcciones de bugs
 
 **Commits**:
-- Usar mensajes descriptivos en español
+- Usar mensajes descriptivos 
 - Formato: `[Módulo] Acción realizada`
 - Ejemplo: `[TRA] Agregar jerarquía drill-down en exportación Excel`
 
@@ -619,12 +615,4 @@ Asegurar que las operaciones corran en hilos en segundo plano, no en el hilo pri
 - Ninguna. Esta actualización es completamente compatible.
 ```
 
-## Recursos Adicionales
 
-- **Registro de Cambios**: `CHANGELOG.md`
-- **Diagramas de Arquitectura**: `docs/arquitectura/general.md`
-- **Detalles Módulo TRA**: `docs/modulo_tra_completo.md`
-- **Detalles Módulo MBRP**: `docs/modulo_mbrp_completo.md`
-- **Configuración de Seguridad**: `docs/configuracion/seguridad.md`
-- **Integración WhatsApp**: `docs/configuracion/whatsapp.md`
-- **Guía de Instalación**: `docs/instalacion/pasos_instalacion.md`

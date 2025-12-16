@@ -1,6 +1,7 @@
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
 from tkinter import font 
+from cryptography.fernet import Fernet
 import re
 import configparser
 import os
@@ -2873,8 +2874,19 @@ class DatabaseApp:
             except Exception:
                 self.cached_ventas_mbrp_effective = list(getattr(self, 'cached_ventas_mbrp', []) or [])
             
-            # Precargar mapeo producto->proveedor para estadísticas coherentes
-            self._preload_productos_proveedores()
+            # Precargar mapeo producto->proveedor para estadísticas coherentes.
+            # IMPORTANTE: esto puede implicar consultas pesadas a BD, por lo que se
+            # ejecuta en un hilo separado para no bloquear la UI.
+            try:
+                threading.Thread(
+                    target=self._preload_productos_proveedores,
+                    daemon=True,
+                    name="PreloadProdProv"
+                ).start()
+            except Exception:
+                # Si por alguna razón no se puede crear el hilo, intentar al menos
+                # ejecutar de forma síncrona sin romper la aplicación.
+                self._preload_productos_proveedores()
             
         except Exception:
             pass
@@ -9530,29 +9542,30 @@ class DatabaseApp:
                     primera = acumulados[0]
                     self.mbrp_debug_log(f"Primera fila acumulada: {primera} (len={len(primera)})")
                 
-                # PASO 1: Clasificar con la lógica RI/TRA para aislar solo BAJA/SIN MOVIMIENTO
+                # PASO 1: Clasificar con la lógica RI/TRA para aislar solo BAJA/SIN MOVIMIENTO/SIN CLASIFICAR
                 try:
-                    self.mbrp_debug_log("[MBRP] Clasificando rotación base (RI/TRA) para aislar BAJA/SIN MOVIMIENTO...")
+                    self.mbrp_debug_log("[MBRP] Clasificando rotación base (RI/TRA) para aislar BAJA/SIN MOVIMIENTO/SIN CLASIFICAR...")
                     base_clasificados = clasificar_rotacion_tra(acumulados)
                 except Exception as e:
                     self.log(f"[MBRP] Error clasificando con RI/TRA: {e} - usando datos sin clasificar", "WARNING")
                     base_clasificados = list(acumulados)
                 
+                # Importante: incluir también "SIN CLASIFICAR" para contemplar casos de cero ventas
                 productos_baja_base = [
                     r for r in base_clasificados
-                    if len(r) > 6 and str(r[6]).upper() in {"BAJA", "SIN MOVIMIENTO"}
+                    if len(r) > 6 and str(r[6]).upper() in {"BAJA", "SIN MOVIMIENTO", "SIN CLASIFICAR"}
                 ]
                 self.log(
-                    f"[MBRP] Productos BAJA/SIN_MOVIMIENTO (RI): {len(productos_baja_base)}/{len(base_clasificados)}",
+                    f"[MBRP] Productos BAJA/SIN_MOVIMIENTO/SIN_CLASIFICAR (RI): {len(productos_baja_base)}/{len(base_clasificados)}",
                     "INFO"
                 )
                 
                 if not productos_baja_base:
-                    self.log("[MBRP] ADVERTENCIA: No hay productos BAJA/SIN_MOVIMIENTO tras clasificación RI", "WARNING")
+                    self.log("[MBRP] ADVERTENCIA: No hay productos BAJA/SIN_MOVIMIENTO/SIN_CLASIFICAR tras clasificación RI", "WARNING")
                     productos_baja_base = list(base_clasificados)  # fallback para no quedar vacíos
                 
                 # PASO 2: Dentro del conjunto de baja rotación, solo recalcular IM (sin excluir por umbral)
-                #         Todos los productos BAJA/SIN_MOVIMIENTO participan en el cálculo de IM%.
+                #         Todos los productos BAJA/SIN_MOVIMIENTO/SIN_CLASIFICAR participan en el cálculo de IM%.
                 productos_para_mbrp = list(productos_baja_base)
                 self.log(
                     f"[MBRP] Productos incluidos para MBRP (BAJA/SIN_MOVIMIENTO): {len(productos_para_mbrp)}/{len(productos_baja_base)}",
@@ -10217,11 +10230,31 @@ class DatabaseApp:
                 from openpyxl.styles import Font, PatternFill, Alignment
                 from datetime import datetime
                 import os
+                from tkinter import filedialog
                 
-                # Crear nombre de archivo
+                # Crear nombre de archivo por defecto
                 timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
                 criterio_nombre = "NUNCA_VENDIDOS" if dias_criterio == -1 else f"SIN_VENTA_{dias_criterio}_DIAS"
-                filename = f"reporte_0_mbrp_{criterio_nombre}_{timestamp}.xlsx"
+                default_name = f"reporte_0_mbrp_{criterio_nombre}_{timestamp}.xlsx"
+
+                # Permitir al usuario escoger dónde guardar el reporte 0
+                try:
+                    filename = filedialog.asksaveasfilename(
+                        parent=self.root if hasattr(self, 'root') else None,
+                        title="Guardar Reporte 0 MBRP como...",
+                        defaultextension=".xlsx",
+                        initialfile=default_name,
+                        filetypes=[("Archivos de Excel", "*.xlsx"), ("Todos los archivos", "*.*")]
+                    )
+                except Exception as e:
+                    # Si falla el diálogo, caer al nombre por defecto en el directorio actual
+                    self.log(f"[MBRP] Error mostrando diálogo de guardar Reporte 0: {e} - usando ruta por defecto", "WARNING")
+                    filename = default_name
+
+                if not filename:
+                    # Usuario canceló el guardado
+                    self.log("[MBRP] Usuario canceló el guardado del Reporte 0 MBRP", "INFO")
+                    return
                 
                 # Crear workbook
                 wb = Workbook()
@@ -10284,8 +10317,7 @@ class DatabaseApp:
                     f"Reporte 0 MBRP generado exitosamente:\n\n"
                     f"• Archivo: {filename}\n"
                     f"• Productos: {len(productos_filtrados)}\n"
-                    f"• Criterio: {criterio_texto.lower()}\n\n"
-                    f"Archivo guardado en el directorio actual."
+                    f"• Criterio: {criterio_texto.lower()}\n"
                 )
                 
                 self.log(f"Reporte 0 MBRP Excel generado: {filename} - {len(productos_filtrados)} productos", "SUCCESS")

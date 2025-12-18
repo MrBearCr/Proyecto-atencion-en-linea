@@ -1,42 +1,68 @@
-import tkinter as tk
-from tkinter import ttk, messagebox, simpledialog
-from tkinter import font 
-from cryptography.fernet import Fernet
-import re
 import configparser
-import os
-from logging.handlers import RotatingFileHandler
-import time
-from typing import Optional
-import threading 
-import json
-import inspect
-import math
-from tkcalendar import Calendar, DateEntry
 from datetime import datetime, timedelta
-import requests
-import bcrypt
 from enum import Enum
-from pal.core.errors import ErrorCode
-from pal.core.credentials import SecureCredentialsManager
+import inspect
+import json
+from logging.handlers import RotatingFileHandler
+import math
+import os
+import re
+import threading
+from threading import Event, Timer
+import time
+import tkinter as tk
+from tkinter import messagebox, simpledialog, ttk
+from tkinter import font
+from typing import Optional
+
+import requests
+
+import bcrypt
+from cryptography.fernet import Fernet
 from pal.core.audit import AuditLogger
-from pal.infrastructure.database import DatabaseManager
-from pal.ui.splash import SplashScreen
-from pal.ui.header import setup_styles as ui_setup_styles, create_header
-from pal.ui.debug_console import DebugConsole
-from pal.core.session import SessionManager
 from pal.core.auth import AuthManager
+from pal.core.credentials import SecureCredentialsManager
+from pal.core.errors import ErrorCode
+from pal.core.license import LicenseChecker, LicenseError
+from pal.core.log import set_component_level
+from pal.core.session import SessionManager
+from pal.core.updater import UpdateManager
+UPDATE_MANAGER_AVAILABLE = True
+from pal.infrastructure.database import DatabaseManager
 from pal.services.cache import CacheDescripciones
 from pal.services.envios import EnvioProgramado, ProgramadorEnvios
-from pal.core.log import set_component_level
-from pal.core.license import LicenseChecker, LicenseError
+from pal.ui.debug_console import DebugConsole
+from pal.ui.header import create_header, setup_styles as ui_setup_styles
+from pal.ui.splash import SplashScreen
+from tkcalendar import Calendar, DateEntry
 from win10toast import ToastNotifier
-from threading import Event, Timer
 
 
 CONFIG_FILE = 'db_config.ini'
 LICENSE_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTdAdOg6pI7tOF-9UdFDzw0P5aSpNRc-jGIYHwOHmXb7qqOtag9QTYAi4JU0U2VoIZLd_TjvK_7cxX9/pub?output=csv"
 LICENSE_CLIENT_NAME = "PALPY"
+APP_VERSION = "1.0.0"  # Versión actual de la aplicación
+UPDATE_URL_DEFAULT = "https://tu-servidor.com/updates/"  # URL base por defecto para actualizaciones
+
+def load_update_url():
+    """Carga la URL de actualizaciones desde la configuración."""
+    config = configparser.ConfigParser()
+    if os.path.exists(CONFIG_FILE):
+        config.read(CONFIG_FILE)
+        if 'Updates' in config and 'url' in config['Updates']:
+            return config['Updates']['url']
+    return UPDATE_URL_DEFAULT
+
+def save_update_url(url: str):
+    """Guarda la URL de actualizaciones en la configuración."""
+    config = configparser.ConfigParser()
+    if os.path.exists(CONFIG_FILE):
+        config.read(CONFIG_FILE)
+    if 'Updates' not in config:
+        config.add_section('Updates')
+    config['Updates']['url'] = url
+    with open(CONFIG_FILE, 'w') as f:
+        config.write(f)
 JERARQUIA_CACHE_FILE = "productos_jerarquia_cache.json"
 FAVORITOS_CACHE_FILE = 'favoritos_cache.json'
 JERARQUIA_CACHE_TTL = timedelta(hours=15)
@@ -394,6 +420,26 @@ class DatabaseApp:
             self.notification_manager = self.NotificationManager(self.root)  
             self.help_tooltips = self.HelpTooltips(self.root)  
             self.setup_tooltips()
+            
+            # Inicializar gestor de actualizaciones automáticas
+            try:
+                update_url = load_update_url()  # Cargar desde configuración
+                self.update_manager = UpdateManager(
+                    app_name="Casapro Nexus",
+                    current_version=APP_VERSION,
+                    update_url=update_url,
+                    update_check_interval=3600,  # Verificar cada hora
+                    auto_download=False,  # Pedir confirmación al usuario
+                    auto_install=False
+                )
+                # Iniciar verificación periódica en segundo plano
+                self.update_manager.start_periodic_check(
+                    callback=lambda has_update: self._on_update_available(has_update)
+                )
+                print(f"[DEBUG] Gestor de actualizaciones inicializado (versión {APP_VERSION})", flush=True)
+            except Exception as e:
+                print(f"[WARNING] Error al inicializar actualizaciones: {e}", flush=True)
+                self.update_manager = None
             
             self.attempt_auto_connect()
             self.programar_actualizaciones_stock()
@@ -6141,6 +6187,11 @@ class DatabaseApp:
         notebook.add(modules_frame, text="Gestión de Usuarios")
         self._create_user_management_tab(modules_frame)
 
+        # Pestaña de Actualizaciones
+        update_frame = ttk.Frame(notebook)
+        notebook.add(update_frame, text="Actualizaciones")
+        self.create_update_tab(update_frame)
+        
         # Pestaña de Depuración
         debug_frame = ttk.Frame(notebook)
         notebook.add(debug_frame, text="Depuración")
@@ -7682,6 +7733,155 @@ class DatabaseApp:
                 self.token_entry.insert(0, token)
         except Exception as e:
             self.notification_manager.show_error("Error cargando token")
+
+    def create_update_tab(self, parent):
+        """Crea la pestaña de configuración de actualizaciones."""
+        frame = ttk.Frame(parent, padding=20)
+        frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Información de versión actual
+        version_label = ttk.Label(frame, text=f"Versión actual: {APP_VERSION}", font=("Arial", 10, "bold"))
+        version_label.grid(row=0, column=0, columnspan=2, sticky="w", pady=10)
+        
+        # URL de actualizaciones
+        ttk.Label(frame, text="URL de actualizaciones:").grid(row=1, column=0, sticky="w", pady=5)
+        self.update_url_entry = ttk.Entry(frame, width=50)
+        self.update_url_entry.grid(row=1, column=1, sticky="ew", pady=5, padx=5)
+        # Cargar URL desde configuración
+        try:
+            current_url = load_update_url()
+        except Exception:
+            current_url = UPDATE_URL_DEFAULT
+        self.update_url_entry.insert(0, current_url)
+        
+        # Estado de verificación periódica
+        self.update_status_label = ttk.Label(frame, text="Estado: Verificación periódica activa", foreground="green")
+        self.update_status_label.grid(row=2, column=0, columnspan=2, sticky="w", pady=5)
+        
+        # Botones
+        btn_frame = ttk.Frame(frame)
+        btn_frame.grid(row=3, column=0, columnspan=2, pady=20, sticky="ew")
+        
+        ttk.Button(btn_frame, text="Verificar actualizaciones ahora", 
+            command=self.check_updates_manual).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Actualizar e instalar", 
+            command=self.update_and_install).pack(side=tk.LEFT, padx=5)
+        
+        frame.columnconfigure(1, weight=1)
+    
+    def _on_update_available(self, has_update: bool):
+        """Callback cuando se encuentra una actualización disponible."""
+        if has_update and hasattr(self, 'update_manager') and self.update_manager:
+            try:
+                latest_info = self.update_manager.get_latest_version_info()
+                if latest_info:
+                    message = f"Hay una nueva versión disponible:\n\n"
+                    message += f"Versión actual: {APP_VERSION}\n"
+                    message += f"Nueva versión: {latest_info.get('version', 'Desconocida')}\n\n"
+                    if latest_info.get('changelog'):
+                        message += f"Cambios:\n{latest_info['changelog']}\n\n"
+                    message += "¿Deseas actualizar ahora?"
+                    
+                    response = messagebox.askyesno("Actualización disponible", message)
+                    if response:
+                        self.update_and_install()
+            except Exception as e:
+                print(f"[ERROR] Error al procesar actualización disponible: {e}", flush=True)
+    
+    def save_update_url_config(self):
+        """Guarda la URL de actualizaciones desde la UI."""
+        new_url = self.update_url_entry.get().strip()
+        if not new_url:
+            messagebox.showerror("Error", "La URL no puede estar vacía.")
+            return
+        
+        # Validar formato básico de URL
+        if not (new_url.startswith('http://') or new_url.startswith('https://')):
+            messagebox.showerror("Error", "La URL debe comenzar con http:// o https://")
+            return
+        
+        # Guardar en configuración
+        save_update_url(new_url)
+        
+        # Actualizar el UpdateManager si existe
+        if hasattr(self, 'update_manager') and self.update_manager:
+            self.update_manager.update_url = new_url
+            # Reiniciar verificación periódica con nueva URL
+            self.update_manager.stop_periodic_check()
+            self.update_manager.start_periodic_check(
+                callback=lambda has_update: self._on_update_available(has_update)
+            )
+        
+        messagebox.showinfo("Éxito", f"URL de actualizaciones guardada:\n{new_url}")
+        self.update_status_label.config(text=f"URL actualizada: {new_url}", foreground="green")
+    
+    def check_updates_manual(self):
+        """Verifica actualizaciones manualmente desde la UI."""
+        if not hasattr(self, 'update_manager') or not self.update_manager:
+            messagebox.showerror("Error", "El gestor de actualizaciones no está disponible.")
+            return
+        
+        try:
+            # Obtener URL actual del campo de texto (puede haber cambiado)
+            current_url = self.update_url_entry.get().strip()
+            if current_url and current_url != self.update_manager.update_url:
+                # Actualizar URL si cambió
+                self.update_manager.update_url = current_url
+            
+            # Mostrar mensaje de verificación
+            self.update_status_label.config(text="Verificando actualizaciones...", foreground="blue")
+            self.settings_window.update()
+            
+            # Verificar actualizaciones
+            has_update = self.update_manager.check_for_updates(show_no_update_message=True)
+            
+            if has_update:
+                latest_info = self.update_manager.get_latest_version_info()
+                if latest_info:
+                    self.update_status_label.config(
+                        text=f"Actualización disponible: {latest_info.get('version', 'Desconocida')}", 
+                        foreground="orange"
+                    )
+                else:
+                    self.update_status_label.config(text="Actualización disponible", foreground="orange")
+            else:
+                self.update_status_label.config(text="Ya tienes la versión más reciente", foreground="green")
+        except Exception as e:
+            self.update_status_label.config(text=f"Error: {str(e)}", foreground="red")
+            messagebox.showerror("Error", f"No se pudo verificar actualizaciones: {str(e)}")
+    
+    def update_and_install(self):
+        """Descarga e instala la actualización disponible."""
+        if not hasattr(self, 'update_manager') or not self.update_manager:
+            messagebox.showerror("Error", "El gestor de actualizaciones no está disponible.")
+            return
+        
+        try:
+            # Verificar primero si hay actualización
+            if not self.update_manager.check_for_updates():
+                messagebox.showinfo("Información", "No hay actualizaciones disponibles.")
+                return
+            
+            # Mostrar progreso
+            self.update_status_label.config(text="Descargando actualización...", foreground="blue")
+            self.settings_window.update()
+            
+            # Descargar
+            if self.update_manager.download_update():
+                self.update_status_label.config(text="Instalando actualización...", foreground="blue")
+                self.settings_window.update()
+                
+                # Instalar (esto reiniciará la aplicación)
+                if self.update_manager.install_update():
+                    messagebox.showinfo("Éxito", "La actualización se instalará al reiniciar la aplicación.")
+                    # El gestor de actualizaciones manejará el reinicio automáticamente
+                else:
+                    self.update_status_label.config(text="Error al instalar actualización", foreground="red")
+            else:
+                self.update_status_label.config(text="Error al descargar actualización", foreground="red")
+        except Exception as e:
+            self.update_status_label.config(text=f"Error: {str(e)}", foreground="red")
+            messagebox.showerror("Error", f"No se pudo completar la actualización: {str(e)}")
 
     def _splash_login_submit(self, username: str, password: str) -> tuple[bool, str]:
         """

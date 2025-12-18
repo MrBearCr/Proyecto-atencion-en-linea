@@ -7,3 +7,4 @@ matplotlib
 win10toast
 Pillow
 bcrypt
+packaging

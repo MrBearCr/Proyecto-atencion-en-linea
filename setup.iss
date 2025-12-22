@@ -1,15 +1,16 @@
 
 
 #define MyAppName "Casapro Nexus"
-#define MyAppVersion "1.0"
+#define MyAppVersion "1.1.1"
 #define MyAppPublisher "rafael3gn@gmail.com"
 #define MyAppURL "http://www.example.com/"
 #define MyAppExeName "Casapro Nexus.exe"
 
+
 [Setup]
 ; A unique AppId is required for each application.
 ; You can generate a new one from the Inno Setup IDE (Tools > Generate GUID)
-AppId={228B5B49-524C-4328-8A33-524787258525}
+AppId={{228B5B49-524C-4328-8A33-524787258525}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
@@ -22,7 +23,7 @@ SetupIconFile=pal\ui\image.ico
 AllowNoIcons=no
 ; The installer will be created in the 'dist' folder.
 OutputDir=dist
-OutputBaseFilename=NEXUS-Setup
+OutputBaseFilename=NEXUS-Setup-v{#MyAppVersion}
 ; Icon for the installer itself. It must be a .ico file.
 ; To use an icon, convert your png to a .ico file, place it in the project root,
 ; and uncomment the following line.

@@ -8,10 +8,50 @@ import threading
 import tkinter.messagebox as messagebox
 from typing import Optional, Callable
 import logging
+import re
 
 # pyautoupdate no es compatible con Python 3.13+
 # Implementamos una solución personalizada usando requests
 PY_AUTOUPDATE_AVAILABLE = True  # Siempre disponible con nuestra implementación
+
+
+def _normalize_github_url(url: str) -> str:
+    """
+    Convierte URLs de GitHub web interface a raw URLs para acceso directo a archivos.
+    
+    Convierte:
+    - https://github.com/user/repo/tree/branch/path -> https://raw.githubusercontent.com/user/repo/branch/path
+    - https://github.com/user/repo/blob/branch/path -> https://raw.githubusercontent.com/user/repo/branch/path
+    - Deja intactas las URLs que ya son raw.githubusercontent.com
+    - Deja intactas otras URLs
+    
+    Args:
+        url: URL a normalizar
+        
+    Returns:
+        URL normalizada a formato raw
+    """
+    if not url:
+        return url
+    
+    # Si ya es una URL raw, no hacer nada
+    if 'raw.githubusercontent.com' in url:
+        return url
+    
+    # Patrón para URLs de GitHub web interface
+    # github.com/user/repo/tree/branch/path
+    # github.com/user/repo/blob/branch/path
+    pattern = r'https?://github\.com/([^/]+)/([^/]+)/(?:tree|blob)/([^/]+)(/.+)?'
+    match = re.match(pattern, url)
+    
+    if match:
+        user, repo, branch, path = match.groups()
+        path = path or ''
+        # Construir URL raw
+        return f"https://raw.githubusercontent.com/{user}/{repo}/{branch}{path}"
+    
+    # Si no es una URL de GitHub web, devolverla tal cual
+    return url
 
 
 class UpdateManager:
@@ -93,19 +133,40 @@ class UpdateManager:
             import requests
             from packaging import version
             
-            self.logger.info(f"Verificando actualizaciones desde {self.update_url}")
+            # Normalizar URL de GitHub a formato raw si es necesario
+            normalized_url = _normalize_github_url(self.update_url)
+            self.logger.info(f"Verificando actualizaciones desde {normalized_url}")
             
             # Obtener información de versión del servidor
-            # Asegurar que la URL termine con / y luego agregar version.json
-            base_url = self.update_url.rstrip('/')
-            version_url = f"{base_url}/version.json"
+            # Asegurar que la URL termine sin / y luego agregar version.json
+            base_url = normalized_url.rstrip('/')
+            # Evitar duplicar version.json si ya está en la URL
+            if base_url.endswith('/version.json'):
+                version_url = base_url
+            else:
+                version_url = f"{base_url}/version.json"
             
             self.logger.info(f"URL completa de versión: {version_url}")
             
             response = requests.get(version_url, timeout=10)
             response.raise_for_status()
             
-            version_data = response.json()
+            # Verificar que la respuesta es JSON válido
+            if not response.text.strip():
+                raise ValueError("La respuesta del servidor está vacía")
+            
+            # Intentar parsear JSON con mejor manejo de errores
+            try:
+                version_data = response.json()
+            except ValueError as json_error:
+                # Mostrar los primeros caracteres de la respuesta para debugging
+                preview = response.text[:200] if len(response.text) > 200 else response.text
+                raise ValueError(
+                    f"Error al parsear JSON de la respuesta. "
+                    f"Status: {response.status_code}, "
+                    f"Content-Type: {response.headers.get('Content-Type', 'unknown')}, "
+                    f"Preview: {preview}"
+                ) from json_error
             latest_version = version_data.get('version', '')
             
             # Comparar versiones
@@ -399,15 +460,38 @@ class UpdateManager:
         """
         try:
             import requests
+            # Normalizar URL de GitHub a formato raw si es necesario
+            normalized_url = _normalize_github_url(self.update_url)
             # Intentar obtener el archivo version.json del servidor
-            version_url = self.update_url.rstrip('/') + '/version.json'
+            base_url = normalized_url.rstrip('/')
+            # Evitar duplicar version.json si ya está en la URL
+            if base_url.endswith('/version.json'):
+                version_url = base_url
+            else:
+                version_url = f"{base_url}/version.json"
+            
             response = requests.get(version_url, timeout=10)
             if response.status_code == 200:
-                version_data = response.json()
-                return {
-                    'version': version_data.get('version', 'Desconocida'),
-                    'changelog': version_data.get('changelog', '')
-                }
+                # Verificar que la respuesta es JSON válido
+                if not response.text.strip():
+                    self.logger.error("La respuesta del servidor está vacía")
+                    return None
+                # Intentar parsear JSON con mejor manejo de errores
+                try:
+                    version_data = response.json()
+                    return {
+                        'version': version_data.get('version', 'Desconocida'),
+                        'changelog': version_data.get('changelog', '')
+                    }
+                except ValueError as json_error:
+                    # Mostrar los primeros caracteres de la respuesta para debugging
+                    preview = response.text[:200] if len(response.text) > 200 else response.text
+                    self.logger.error(
+                        f"Error al parsear JSON. Status: {response.status_code}, "
+                        f"Content-Type: {response.headers.get('Content-Type', 'unknown')}, "
+                        f"Preview: {preview}"
+                    )
+                    return None
             return None
         except Exception as e:
             self.logger.error(f"Error al obtener información de versión: {str(e)}")

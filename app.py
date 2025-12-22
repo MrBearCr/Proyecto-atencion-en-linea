@@ -41,8 +41,8 @@ from win10toast import ToastNotifier
 CONFIG_FILE = 'db_config.ini'
 LICENSE_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTdAdOg6pI7tOF-9UdFDzw0P5aSpNRc-jGIYHwOHmXb7qqOtag9QTYAi4JU0U2VoIZLd_TjvK_7cxX9/pub?output=csv"
 LICENSE_CLIENT_NAME = "PALPY"
-APP_VERSION = "1.0.0"  # Versión actual de la aplicación
-UPDATE_URL_DEFAULT = "https://tu-servidor.com/updates/"  # URL base por defecto para actualizaciones
+APP_VERSION = "1.1.1"  # Versión actual de la aplicación
+UPDATE_URL_DEFAULT = "https://raw.githubusercontent.com/MrBearCr/nexus/main/updates"  # URL base por defecto para actualizaciones (formato raw)
 
 def load_update_url():
     """Carga la URL de actualizaciones desde la configuración."""

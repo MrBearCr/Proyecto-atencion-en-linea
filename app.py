@@ -14,6 +14,7 @@ import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
 from tkinter import font
 from typing import Optional
+from collections.abc import Callable
 
 import requests
 
@@ -41,7 +42,7 @@ from win10toast import ToastNotifier
 CONFIG_FILE = 'db_config.ini'
 LICENSE_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTdAdOg6pI7tOF-9UdFDzw0P5aSpNRc-jGIYHwOHmXb7qqOtag9QTYAi4JU0U2VoIZLd_TjvK_7cxX9/pub?output=csv"
 LICENSE_CLIENT_NAME = "PALPY"
-APP_VERSION = "1.1.1"  # Versión actual de la aplicación
+APP_VERSION = "1.1.2"  # Versión actual de la aplicación
 UPDATE_URL_DEFAULT = "https://raw.githubusercontent.com/MrBearCr/nexus/main/updates"  # URL base por defecto para actualizaciones (formato raw)
 
 def load_update_url():
@@ -7784,7 +7785,11 @@ class DatabaseApp:
                     
                     response = messagebox.askyesno("Actualización disponible", message)
                     if response:
-                        self.update_and_install()
+                        # Ejecutar en un hilo para no bloquear el messagebox
+                        threading.Thread(
+                            target=lambda: self.update_and_install(progress_callback=self.splash.set_progress),
+                            daemon=True
+                        ).start()
             except Exception as e:
                 print(f"[ERROR] Error al procesar actualización disponible: {e}", flush=True)
     
@@ -7850,7 +7855,7 @@ class DatabaseApp:
             self.update_status_label.config(text=f"Error: {str(e)}", foreground="red")
             messagebox.showerror("Error", f"No se pudo verificar actualizaciones: {str(e)}")
     
-    def update_and_install(self):
+    def update_and_install(self, progress_callback: Optional[Callable[[float], None]] = None):
         """Descarga e instala la actualización disponible."""
         if not hasattr(self, 'update_manager') or not self.update_manager:
             messagebox.showerror("Error", "El gestor de actualizaciones no está disponible.")
@@ -7862,25 +7867,30 @@ class DatabaseApp:
                 messagebox.showinfo("Información", "No hay actualizaciones disponibles.")
                 return
             
-            # Mostrar progreso
-            self.update_status_label.config(text="Descargando actualización...", foreground="blue")
-            self.settings_window.update()
-            
-            # Descargar
-            if self.update_manager.download_update():
-                self.update_status_label.config(text="Instalando actualización...", foreground="blue")
+            # Mostrar progreso si la UI de settings está disponible
+            if hasattr(self, 'settings_window') and self.settings_window and hasattr(self, 'update_status_label'):
+                self.update_status_label.config(text="Descargando actualización...", foreground="blue")
                 self.settings_window.update()
+            
+            # Descargar con el callback de progreso
+            if self.update_manager.download_update(progress_callback=progress_callback):
+                if hasattr(self, 'settings_window') and self.settings_window and hasattr(self, 'update_status_label'):
+                    self.update_status_label.config(text="Instalando actualización...", foreground="blue")
+                    self.settings_window.update()
                 
                 # Instalar (esto reiniciará la aplicación)
                 if self.update_manager.install_update():
                     messagebox.showinfo("Éxito", "La actualización se instalará al reiniciar la aplicación.")
                     # El gestor de actualizaciones manejará el reinicio automáticamente
                 else:
-                    self.update_status_label.config(text="Error al instalar actualización", foreground="red")
+                    if hasattr(self, 'settings_window') and self.settings_window and hasattr(self, 'update_status_label'):
+                        self.update_status_label.config(text="Error al instalar actualización", foreground="red")
             else:
-                self.update_status_label.config(text="Error al descargar actualización", foreground="red")
+                if hasattr(self, 'settings_window') and self.settings_window and hasattr(self, 'update_status_label'):
+                    self.update_status_label.config(text="Error al descargar actualización", foreground="red")
         except Exception as e:
-            self.update_status_label.config(text=f"Error: {str(e)}", foreground="red")
+            if hasattr(self, 'settings_window') and self.settings_window and hasattr(self, 'update_status_label'):
+                self.update_status_label.config(text=f"Error: {str(e)}", foreground="red")
             messagebox.showerror("Error", f"No se pudo completar la actualización: {str(e)}")
 
     def _splash_login_submit(self, username: str, password: str) -> tuple[bool, str]:

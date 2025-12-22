@@ -3,7 +3,8 @@ Utilidades compartidas de filtrado para módulos PAL (stock, tra, mbrp).
 Unifican el comportamiento de filtros jerárquicos para evitar duplicación y
 mantener consistencia entre módulos.
 """
-from typing import Callable, Iterable, Dict, Any, Optional, List
+from typing import Iterable, Dict, Any, Optional, List
+from collections.abc import Callable
 
 
 def _normalize(value: Any) -> str:

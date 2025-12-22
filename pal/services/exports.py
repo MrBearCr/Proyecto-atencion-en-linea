@@ -3,7 +3,8 @@ Módulo de servicios de exportación para la aplicación PAL
 """
 import csv
 import os
-from typing import List, Dict, Any, Callable, Optional
+from typing import List, Dict, Any, Optional
+from collections.abc import Callable
 from pal.core.log import get_logger
 from pal.services.tra import _get_tra_neto
 

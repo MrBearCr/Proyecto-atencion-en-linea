@@ -42,7 +42,7 @@ from win10toast import ToastNotifier
 CONFIG_FILE = 'db_config.ini'
 LICENSE_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTdAdOg6pI7tOF-9UdFDzw0P5aSpNRc-jGIYHwOHmXb7qqOtag9QTYAi4JU0U2VoIZLd_TjvK_7cxX9/pub?output=csv"
 LICENSE_CLIENT_NAME = "PALPY"
-APP_VERSION = "1.1.2"  # Versión actual de la aplicación
+APP_VERSION = "1.2.0"# Versión actual de la aplicación
 UPDATE_URL_DEFAULT = "https://raw.githubusercontent.com/MrBearCr/nexus/main/updates"  # URL base por defecto para actualizaciones (formato raw)
 
 def load_update_url():
@@ -2475,7 +2475,7 @@ class DatabaseApp:
         
         # Cargar depósitos y preferencias
         try:
-            self._load_stock_depositos_preference()
+            self._load_global_settings()
             self.load_depositos_stock()
             self._update_stock_depositos_label()
         except Exception as e:
@@ -3204,7 +3204,7 @@ class DatabaseApp:
                     self.stock_depositos_seleccionados.extend(lst)
                 # Actualizar columnas dinámicas y guardar preferencias (incluye sedes_custom)
                 self._update_stock_depositos_label()
-                self._save_stock_depositos_preference()
+                self._save_stock_preferences()
                 # Recargar
                 self.current_page = 1
                 self.recargar_stock()
@@ -3386,8 +3386,8 @@ class DatabaseApp:
             return []
         return resultado
     
-    def _save_stock_depositos_preference(self):
-        """Guarda preferencia de localidad y depósitos seleccionados en archivo local"""
+    def _save_stock_preferences(self):
+        """Guarda las preferencias de stock en un archivo local."""
         try:
             import json
             pref_file = "stock_depositos_preference.json"
@@ -3396,51 +3396,64 @@ class DatabaseApp:
                 'depositos': self.stock_depositos_seleccionados,
                 'depositos_por_sede': getattr(self, 'stock_depositos_por_sede', {}),
                 'sedes_custom': getattr(self, 'stock_localidades_custom', {}),
-                'excluded_depts': list(getattr(self, 'excluded_depts', []) or []),
                 'timestamp': str(time.time())
             }
             with open(pref_file, 'w', encoding='utf-8') as f:
                 json.dump(pref_data, f, ensure_ascii=False)
-            self.log(f"💾 Preferencia guardada", "DEBUG")
+            self.log(f"💾 Preferencia de stock guardada", "DEBUG")
         except Exception as e:
-            self.log(f"Error guardando preferencia de depósitos: {e}", "DEBUG")
-    
-    def _load_stock_depositos_preference(self):
-        """Carga preferencia de localidad y depósitos guardada"""
+            self.log(f"Error guardando preferencia de stock: {e}", "DEBUG")
+
+    def _save_global_settings(self):
+        """Guarda configuraciones globales en la base de datos."""
         try:
-            import json
-            import os
-            pref_file = "stock_depositos_preference.json"
-            if os.path.exists(pref_file):
-                with open(pref_file, 'r', encoding='utf-8') as f:
-                    pref_data = json.load(f)
-                    self.stock_localidad_actual = pref_data.get('localidad', 'Cabudare')
-                    # Soportar nuevo formato por sede
-                    self.stock_depositos_por_sede = pref_data.get('depositos_por_sede', {}) or {}
-                    # Sedes personalizadas (agrupaciones manuales)
-                    self.stock_localidades_custom = pref_data.get('sedes_custom', {}) or {}
-                    # Departamentos excluidos
-                    excl = pref_data.get('excluded_depts', []) or []
-                    self.excluded_depts = set(str(x) for x in excl)
-                    if self.stock_depositos_por_sede:
-                        # Combinar todas las sedes
-                        self.stock_depositos_seleccionados = []
-                        for lst in self.stock_depositos_por_sede.values():
-                            self.stock_depositos_seleccionados.extend(lst or [])
-                    else:
-                        # Compatibilidad con formato viejo
-                        self.stock_depositos_seleccionados = pref_data.get('depositos', ['0301'])
-                    # Actualizar set y vistas efectivas con las exclusiones cargadas
-                    self._update_excluded_set()
-                    self._rebuild_effective_views()
-                    self.log(f"📂 Preferencia cargada - Localidad: {self.stock_localidad_actual}", "DEBUG")
-            else:
-                self.stock_localidad_actual = 'Cabudare'
-                self.stock_depositos_seleccionados = ['0301']
+            if not self.db_manager.conn:
+                return
+
+            # Guardar exclusiones de departamentos
+            excluded_list = list(getattr(self, 'excluded_depts', []) or [])
+            json_value = json.dumps(excluded_list)
+            
+            query = """
+            MERGE pal_global_settings AS target
+            USING (SELECT 'excluded_depts' AS setting_key) AS source
+            ON (target.setting_key = source.setting_key)
+            WHEN MATCHED THEN
+                UPDATE SET setting_value = ?, last_modified = GETDATE()
+            WHEN NOT MATCHED THEN
+                INSERT (setting_key, setting_value, description, last_modified)
+                VALUES ('excluded_depts', ?, 'Lista de codigos de departamento excluidos globalmente de los reportes.', GETDATE());
+            """
+            self.db_manager.execute_query(query, (json_value, json_value))
+            self.log(f"🌍 Guardadas {len(excluded_list)} exclusiones globales en la BD", "INFO")
+
         except Exception as e:
-            self.log(f"Error cargando preferencia: {e}", "DEBUG")
-            self.stock_localidad_actual = 'Cabudare'
-            self.stock_depositos_seleccionados = ['0301']
+            self.log(f"Error guardando configuraciones globales: {e}", "ERROR")
+    
+    def _load_global_settings(self):
+        """Carga configuraciones globales desde la base de datos."""
+        try:
+            if not self.db_manager.conn:
+                return
+
+            # Cargar exclusiones de departamentos
+            query = "SELECT setting_value FROM pal_global_settings WHERE setting_key = 'excluded_depts'"
+            result = self.db_manager.fetch_data(query)
+            
+            if result and result[0][0]:
+                excluded_list = json.loads(result[0][0])
+                self.excluded_depts = set(str(x) for x in excluded_list)
+            else:
+                self.excluded_depts = set()
+            
+            self._update_excluded_set()
+            self.log(f"🌍 Cargadas {len(self.excluded_depts)} exclusiones globales desde la BD", "INFO")
+
+        except Exception as e:
+            self.log(f"Error cargando configuraciones globales: {e}", "WARNING")
+            self.excluded_depts = set()
+        
+        self._update_excluded_set()
     
     def on_deposito_stock_selected(self):
         """Handler cuando cambian los depósitos seleccionados"""
@@ -3747,6 +3760,15 @@ class DatabaseApp:
                 roles_frame = ttk.Frame(admin_nb)
                 admin_nb.add(roles_frame, text="Roles y Permisos")
                 self._create_roles_permissions_tab(roles_frame)
+
+            # Tab: Exclusiones (visible si admin o tiene permiso admin.exclusiones)
+            # TODO: Añadir permiso granular 'admin.exclusiones'
+            show_exclusions = self.current_user and self.current_user.get('username', '').lower() == 'admin'
+            
+            if show_exclusions:
+                exclusions_frame = ttk.Frame(admin_nb)
+                admin_nb.add(exclusions_frame, text="Exclusiones")
+                self._create_admin_exclusions_tab(exclusions_frame)
 
             # Tab: Auditoría (visible si admin o permiso admin.auditoria)
             show_audit = False
@@ -6214,136 +6236,6 @@ class DatabaseApp:
             text="Guardar Depuración",
             command=self._save_debug_config
         ).grid(row=4, column=0, sticky="e", pady=10, padx=10)
-        
-        # Pestaña de Preferencias (exclusiones, etc.)
-        prefs_frame = ttk.Frame(notebook)
-        notebook.add(prefs_frame, text="Preferencias")
-
-        # Sección: Excluir departamentos globalmente
-        prefs_excl = ttk.LabelFrame(prefs_frame, text="Excluir departamentos (no considerar en reportes)", padding=10)
-        prefs_excl.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-
-        row1 = ttk.Frame(prefs_excl)
-        row1.pack(fill=tk.X, pady=(0,6))
-        ttk.Label(row1, text="Departamento:").pack(side=tk.LEFT)
-        dep_ex_var = tk.StringVar()
-        dep_names = sorted(list(getattr(self, 'tra_dept_dict', {}).keys())) if hasattr(self, 'tra_dept_dict') and self.tra_dept_dict else []
-        cb_dep_ex = ttk.Combobox(row1, textvariable=dep_ex_var, state='readonly', values=dep_names, width=32)
-        cb_dep_ex.pack(side=tk.LEFT, padx=6)
-
-        def _refresh_excl_list():
-            # Reconstruir listado a partir de códigos
-            excl_codes = list(set(str(x) for x in (getattr(self, 'excluded_depts', []) or [])))
-            # Convertir a nombres usando tra_dept_dict
-            names = []
-            for code in sorted(excl_codes):
-                desc = None
-                for d, c in (getattr(self, 'tra_dept_dict', {}) or {}).items():
-                    if str(c) == str(code):
-                        desc = d; break
-                names.append(desc or code)
-            excl_listbox.delete(0, tk.END)
-            for n in names:
-                excl_listbox.insert(tk.END, n)
-
-        def _prefs_exclude_add():
-            sel_desc = (dep_ex_var.get() or '').strip()
-            if not sel_desc:
-                return
-            code = (getattr(self, 'tra_dept_dict', {}) or {}).get(sel_desc)
-            if not code:
-                return
-            if not hasattr(self, 'excluded_depts') or self.excluded_depts is None:
-                self.excluded_depts = set()
-            self.excluded_depts = set(str(x) for x in (self.excluded_depts or set()))
-            self.excluded_depts.add(str(code))
-            try:
-                self._save_stock_depositos_preference()
-            except Exception:
-                pass
-            # Actualizar set y vistas efectivas
-            self._update_excluded_set()
-            self._rebuild_effective_views()
-            _refresh_excl_list()
-            try:
-                self.aplicar_filtro_stock()
-            except Exception:
-                pass
-            try:
-                self.aplicar_filtro_tra()
-            except Exception:
-                pass
-
-        def _prefs_exclude_remove():
-            sel = excl_listbox.curselection()
-            if not sel:
-                return
-            name = excl_listbox.get(sel[0])
-            # map name back to code
-            code = None
-            for d, c in (getattr(self, 'tra_dept_dict', {}) or {}).items():
-                if d == name:
-                    code = c; break
-            if not code:
-                return
-            codes = set(str(x) for x in (getattr(self, 'excluded_depts', []) or []))
-            if str(code) in codes:
-                codes.discard(str(code))
-                self.excluded_depts = codes
-                try:
-                    self._save_stock_depositos_preference()
-                except Exception:
-                    pass
-                # Actualizar set y vistas efectivas
-                self._update_excluded_set()
-                self._rebuild_effective_views()
-                _refresh_excl_list()
-                try:
-                    self.aplicar_filtro_stock()
-                except Exception:
-                    pass
-                try:
-                    self.aplicar_filtro_tra()
-                except Exception:
-                    pass
-
-        def _prefs_exclude_clear():
-            self.excluded_depts = set()
-            try:
-                self._save_stock_depositos_preference()
-            except Exception:
-                pass
-            # Actualizar set y vistas efectivas
-            self._update_excluded_set()
-            self._rebuild_effective_views()
-            _refresh_excl_list()
-            try:
-                self.aplicar_filtro_stock()
-            except Exception:
-                pass
-            try:
-                self.aplicar_filtro_tra()
-            except Exception:
-                pass
-
-        ttk.Button(row1, text="➖ Excluir", command=_prefs_exclude_add).pack(side=tk.LEFT, padx=6)
-
-        # Listado actual
-        list_frame = ttk.Frame(prefs_excl)
-        list_frame.pack(fill=tk.BOTH, expand=True)
-        excl_listbox = tk.Listbox(list_frame, height=8)
-        excl_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0,6))
-        sb = ttk.Scrollbar(list_frame, orient="vertical", command=excl_listbox.yview)
-        excl_listbox.configure(yscrollcommand=sb.set)
-        sb.pack(side=tk.LEFT, fill=tk.Y)
-
-        # Botonera
-        buttons = ttk.Frame(prefs_excl)
-        buttons.pack(fill=tk.X, pady=(6,0))
-        ttk.Button(buttons, text="🗑️ Quitar seleccionado", command=_prefs_exclude_remove).pack(side=tk.LEFT)
-        ttk.Button(buttons, text="♻️ Limpiar todos", command=_prefs_exclude_clear).pack(side=tk.LEFT, padx=6)
-
-        _refresh_excl_list()
         
         # Pestaña de Caché y Limpieza
         cache_frame = ttk.Frame(notebook)
@@ -10550,6 +10442,134 @@ class DatabaseApp:
         except Exception as e:
             self.log(f"Error generando reporte MBRP: {str(e)}", "ERROR")
             messagebox.showerror("Error", f"Error generando reporte: {str(e)}")
+
+    def _create_admin_exclusions_tab(self, parent):
+        """Crea la pestaña para gestionar exclusiones globales de departamentos."""
+        prefs_excl = ttk.LabelFrame(parent, text="Excluir departamentos (no considerar en reportes)", padding=10)
+        prefs_excl.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        row1 = ttk.Frame(prefs_excl)
+        row1.pack(fill=tk.X, pady=(0,6))
+        ttk.Label(row1, text="Departamento:").pack(side=tk.LEFT)
+        dep_ex_var = tk.StringVar()
+        dep_names = sorted(list(getattr(self, 'tra_dept_dict', {}).keys())) if hasattr(self, 'tra_dept_dict') and self.tra_dept_dict else []
+        cb_dep_ex = ttk.Combobox(row1, textvariable=dep_ex_var, state='readonly', values=dep_names, width=32)
+        cb_dep_ex.pack(side=tk.LEFT, padx=6)
+
+        excl_listbox = tk.Listbox(prefs_excl, height=8)
+
+        def _refresh_excl_list():
+            # Reconstruir listado a partir de códigos
+            excl_codes = list(set(str(x) for x in (getattr(self, 'excluded_depts', []) or [])))
+            # Convertir a nombres usando tra_dept_dict
+            names = []
+            for code in sorted(excl_codes):
+                desc = None
+                for d, c in (getattr(self, 'tra_dept_dict', {}) or {}).items():
+                    if str(c) == str(code):
+                        desc = d; break
+                names.append(desc or code)
+            excl_listbox.delete(0, tk.END)
+            for n in names:
+                excl_listbox.insert(tk.END, n)
+
+        def _prefs_exclude_add():
+            sel_desc = (dep_ex_var.get() or '').strip()
+            if not sel_desc:
+                return
+            code = (getattr(self, 'tra_dept_dict', {}) or {}).get(sel_desc)
+            if not code:
+                return
+            if not hasattr(self, 'excluded_depts') or self.excluded_depts is None:
+                self.excluded_depts = set()
+            self.excluded_depts = set(str(x) for x in (self.excluded_depts or set()))
+            self.excluded_depts.add(str(code))
+            try:
+                self._save_global_settings()
+            except Exception:
+                pass
+            # Actualizar set y vistas efectivas
+            self._update_excluded_set()
+            self._rebuild_effective_views()
+            _refresh_excl_list()
+            try:
+                self.aplicar_filtro_stock()
+            except Exception:
+                pass
+            try:
+                self.aplicar_filtro_tra()
+            except Exception:
+                pass
+
+        def _prefs_exclude_remove():
+            sel = excl_listbox.curselection()
+            if not sel:
+                return
+            name = excl_listbox.get(sel[0])
+            # map name back to code
+            code = None
+            for d, c in (getattr(self, 'tra_dept_dict', {}) or {}).items():
+                if d == name:
+                    code = c; break
+            if not code:
+                return
+            codes = set(str(x) for x in (getattr(self, 'excluded_depts', []) or []))
+            if str(code) in codes:
+                codes.discard(str(code))
+                self.excluded_depts = codes
+                try:
+                    self._save_global_settings()
+                except Exception:
+                    pass
+                # Actualizar set y vistas efectivas
+                self._update_excluded_set()
+                self._rebuild_effective_views()
+                _refresh_excl_list()
+                try:
+                    self.aplicar_filtro_stock()
+                except Exception:
+                    pass
+                try:
+                    self.aplicar_filtro_tra()
+                except Exception:
+                    pass
+
+        def _prefs_exclude_clear():
+            self.excluded_depts = set()
+            try:
+                self._save_global_settings()
+            except Exception:
+                pass
+            # Actualizar set y vistas efectivas
+            self._update_excluded_set()
+            self._rebuild_effective_views()
+            _refresh_excl_list()
+            try:
+                self.aplicar_filtro_stock()
+            except Exception:
+                pass
+            try:
+                self.aplicar_filtro_tra()
+            except Exception:
+                pass
+
+        ttk.Button(row1, text="➖ Excluir", command=_prefs_exclude_add).pack(side=tk.LEFT, padx=6)
+
+        # Listado actual
+        list_frame = ttk.Frame(prefs_excl)
+        list_frame.pack(fill=tk.BOTH, expand=True)
+        excl_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0,6))
+        sb = ttk.Scrollbar(list_frame, orient="vertical", command=excl_listbox.yview)
+        excl_listbox.configure(yscrollcommand=sb.set)
+        sb.pack(side=tk.LEFT, fill=tk.Y)
+
+        # Botonera
+        buttons = ttk.Frame(prefs_excl)
+        buttons.pack(fill=tk.X, pady=(6,0))
+        ttk.Button(buttons, text="🗑️ Quitar seleccionado", command=_prefs_exclude_remove).pack(side=tk.LEFT)
+        ttk.Button(buttons, text="♻️ Limpiar todos", command=_prefs_exclude_clear).pack(side=tk.LEFT, padx=6)
+
+        _refresh_excl_list()
 
 if __name__ == "__main__":
     root = tk.Tk() 

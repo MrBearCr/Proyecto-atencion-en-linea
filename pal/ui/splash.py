@@ -97,10 +97,24 @@ class SplashScreen(tk.Toplevel):
         self.app_initialized = Event()
         self.login_success = Event()
         self.progress_value = 0
+        self.real_progress = False  # Flag to indicate real progress reporting
         self._login_handler = None
         
         # Asegurar buen layout del panel de login dentro del contenedor
         # (se mostrará con enable_login)
+
+    def set_progress(self, value: float):
+        """
+        Actualiza la barra de progreso con un valor específico (0.0 a 1.0).
+        Esto detiene la animación de progreso simulada.
+        """
+        self.real_progress = True  # Marcar que estamos usando progreso real
+        self.progress_value = int(value * 100)
+        self.progress["value"] = self.progress_value
+        # Si la descarga se completa, asegurarse de que la barra llegue al 100%
+        if self.progress_value >= 100:
+            self.progress_value = 100
+            self.progress["value"] = 100
 
     def start_animation(self):
         # Temporizador mínimo de 3 segundos
@@ -120,7 +134,11 @@ class SplashScreen(tk.Toplevel):
             pass
 
     def _update_progress(self):
-        if self.progress_value < 100:
+        # No animar si estamos recibiendo progreso real
+        if self.real_progress:
+            return
+            
+        if self.progress_value < 90: # Simular hasta el 90%
             self.progress_value += 1
             self.progress["value"] = self.progress_value
             self.after(30, self._update_progress)

@@ -1,7 +1,7 @@
 
 
 #define MyAppName "Casapro Nexus"
-#define MyAppVersion "1.1.2"
+#define MyAppVersion "1.2.1"
 #define MyAppPublisher "rafael3gn@gmail.com"
 #define MyAppURL "http://www.example.com/"
 #define MyAppExeName "Casapro Nexus.exe"

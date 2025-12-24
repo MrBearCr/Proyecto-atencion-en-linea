@@ -308,60 +308,52 @@ class UpdateManager:
                 # Es un archivo .exe directamente
                 installer_path = downloaded_file
             
-            # Ejecutar el instalador con permisos de administrador
-            self.logger.info(f"Ejecutando instalador: {installer_path}")
+            # Ejecutar el instalador a través de un script de lanzamiento separado
+            self.logger.info(f"Lanzando el instalador a través del script: {installer_path}")
             
-            # Usar ShellExecute para ejecutar con permisos de administrador
             try:
-                import ctypes
-                from ctypes import wintypes
+                # Obtener la ruta del ejecutable de Python
+                python_executable = sys.executable
                 
-                # ShellExecuteW para ejecutar con UAC
-                shell32 = ctypes.windll.shell32
-                result = shell32.ShellExecuteW(
-                    None,
-                    "runas",  # Solicitar permisos de administrador
-                    installer_path,
-                    "/SILENT /CLOSEAPPLICATIONS",  # Modo silencioso y cerrar aplicaciones abiertas
-                    None,
-                    1  # SW_SHOWNORMAL
+                # Obtener la ruta del script de lanzamiento
+                # Se asume que está en el directorio raíz del proyecto
+                base_dir = os.path.dirname(self.app_dir)
+                launcher_script = os.path.join(base_dir, 'updater_launcher.py')
+
+                if not os.path.exists(launcher_script):
+                    # Fallback si no lo encuentra, buscar en el directorio actual
+                    launcher_script = os.path.join(os.getcwd(), 'updater_launcher.py')
+                    if not os.path.exists(launcher_script):
+                        raise FileNotFoundError("El script de lanzamiento 'updater_launcher.py' no se encontró.")
+
+                command = [python_executable, launcher_script, installer_path]
+                
+                # Ejecutar el script de forma desacoplada
+                subprocess.Popen(command, creationflags=subprocess.DETACHED_PROCESS, close_fds=True)
+                
+                self.logger.info("Script de actualización iniciado. La aplicación se cerrará.")
+                
+                messagebox.showinfo(
+                    "Actualización en curso",
+                    "La actualización se ha iniciado. La aplicación se cerrará ahora para completar el proceso."
                 )
-                
-                if result > 32:  # Éxito
-                    self.logger.info("Instalador ejecutado exitosamente")
-                    messagebox.showinfo(
-                        "Actualización iniciada",
-                        "El instalador se está ejecutando.\n\n"
-                        "La aplicación se cerrará para completar la actualización.\n"
-                        "Se reiniciará automáticamente después de la instalación."
-                    )
-                    
-                    # Cerrar la aplicación actual
-                    if restart_callback:
-                        restart_callback()
-                    else:
-                        # Cerrar después de un breve delay
-                        import time
-                        time.sleep(2)
-                        os._exit(0)
-                    
-                    return True
+
+                # Cerrar la aplicación actual para permitir que el instalador proceda
+                if restart_callback:
+                    restart_callback()
                 else:
-                    raise Exception(f"Error al ejecutar instalador: código {result}")
-                    
+                    # Forzar salida si no hay callback
+                    os._exit(0)
+                
+                return True
+
             except Exception as e:
-                self.logger.error(f"Error al ejecutar instalador: {str(e)}")
-                # Fallback: abrir el instalador normalmente
-                try:
-                    subprocess.Popen([installer_path], shell=True)
-                    messagebox.showinfo(
-                        "Instalador iniciado",
-                        "El instalador se ha abierto.\n\n"
-                        "Por favor, completa la instalación manualmente."
-                    )
-                    return True
-                except Exception as e2:
-                    raise Exception(f"No se pudo ejecutar el instalador: {str(e2)}")
+                self.logger.error(f"Error al lanzar el script de actualización: {str(e)}")
+                messagebox.showerror(
+                    "Error de actualización",
+                    f"No se pudo iniciar el proceso de actualización: {str(e)}"
+                )
+                return False
                 
         except Exception as e:
             self.logger.error(f"Error al instalar actualización: {str(e)}")

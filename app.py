@@ -42,7 +42,7 @@ from win10toast import ToastNotifier
 CONFIG_FILE = 'db_config.ini'
 LICENSE_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTdAdOg6pI7tOF-9UdFDzw0P5aSpNRc-jGIYHwOHmXb7qqOtag9QTYAi4JU0U2VoIZLd_TjvK_7cxX9/pub?output=csv"
 LICENSE_CLIENT_NAME = "PALPY"
-APP_VERSION = "1.2.1"# Versión actual de la aplicación
+APP_VERSION = "1.2.2"# Versión actual de la aplicación
 UPDATE_URL_DEFAULT = "https://raw.githubusercontent.com/MrBearCr/nexus/main/updates"  # URL base por defecto para actualizaciones (formato raw)
 
 def load_update_url():
@@ -298,6 +298,37 @@ class DatabaseApp:
                 pass
         except Exception as e:
             print(f"[ERROR] No se pudo mostrar diálogo de configuración: {e}")
+
+    def shutdown(self):
+        """Cierra la aplicación de forma ordenada para permitir la actualización."""
+        try:
+            self.log("Iniciando cierre ordenado para actualización...", "INFO")
+
+            # Detener hilos y procesos en segundo plano
+            if hasattr(self, 'update_manager') and self.update_manager:
+                self.update_manager.stop_periodic_check()
+
+            if hasattr(self, 'programador') and hasattr(self.programador, 'detener'):
+                self.programador.detener()
+
+            # The monitor_thread is a daemon, but let's try to be explicit if we can.
+            # There is no explicit stop method, so we rely on daemon=True.
+
+            self.log("Hilos de fondo detenidos. Cerrando ventana principal...", "INFO")
+
+            # Cerrar la ventana principal de Tkinter
+            self.root.quit()
+            self.root.destroy()
+            
+            self.log("Cierre de UI completado. Forzando salida final del proceso.", "INFO")
+
+        except Exception as e:
+            self.log(f"Error durante el cierre ordenado: {e}", "ERROR")
+        
+        finally:
+            # Forzar la salida del proceso como último recurso
+            import os
+            os._exit(0)
 
     def _initialize_app(self):
         try:
@@ -7771,7 +7802,7 @@ class DatabaseApp:
                     self.settings_window.update()
                 
                 # Instalar (esto reiniciará la aplicación)
-                if self.update_manager.install_update():
+                if self.update_manager.install_update(restart_callback=self.shutdown):
                     messagebox.showinfo("Éxito", "La actualización se instalará al reiniciar la aplicación.")
                     # El gestor de actualizaciones manejará el reinicio automáticamente
                 else:

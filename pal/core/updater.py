@@ -9,6 +9,9 @@ import tkinter.messagebox as messagebox
 from typing import Optional, Callable
 import logging
 import re
+import subprocess
+import zipfile
+import shutil
 
 # pyautoupdate no es compatible con Python 3.13+
 # Implementamos una solución personalizada usando requests
@@ -204,8 +207,6 @@ class UpdateManager:
         """
         try:
             import requests
-            import zipfile
-            import shutil
             
             self.logger.info("Iniciando descarga de actualización...")
             
@@ -263,9 +264,6 @@ class UpdateManager:
             True si la instalación fue exitosa, False en caso contrario
         """
         try:
-            import subprocess
-            import zipfile
-            import shutil
             
             if not hasattr(self, '_downloaded_zip') or not os.path.exists(self._downloaded_zip):
                 self.logger.error("No hay archivo de actualización descargado")
@@ -292,9 +290,21 @@ class UpdateManager:
                             installer_files.append(os.path.join(root, file))
                 
                 if installer_files:
-                    # Usar el primer instalador encontrado
-                    installer_path = installer_files[0]
-                    self.logger.info(f"Instalador encontrado: {installer_path}")
+                    from packaging import version
+                    
+                    def get_version_from_filename(filename):
+                        # Extraer versión de nombres como 'app-1.2.3-setup.exe'
+                        match = re.search(r'(\d+(\.\d+)+)', os.path.basename(filename))
+                        if match:
+                            return version.parse(match.group(0))
+                        return version.parse('0.0.0') # Versión por defecto si no se encuentra
+
+                    # Ordenar instaladores por versión
+                    installer_files.sort(key=get_version_from_filename)
+                    
+                    # Usar el instalador con la versión más alta
+                    installer_path = installer_files[-1]
+                    self.logger.info(f"Instalador más reciente encontrado: {installer_path}")
                 else:
                     # Si no hay instalador, asumir que es una actualización portable
                     self.logger.info("No se encontró instalador, asumiendo actualización portable")
@@ -317,11 +327,17 @@ class UpdateManager:
                 
                 # Obtener la ruta del script de lanzamiento
                 # Se asume que está en el directorio raíz del proyecto
-                base_dir = os.path.dirname(self.app_dir)
+                if getattr(sys, 'frozen', False):
+                    # Si es un ejecutable, el launcher debería estar al lado del ejecutable
+                    base_dir = os.path.dirname(sys.executable)
+                else:
+                    # Si se ejecuta desde el código fuente, buscar en el directorio raíz del proyecto
+                    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+
                 launcher_script = os.path.join(base_dir, 'updater_launcher.py')
 
                 if not os.path.exists(launcher_script):
-                    # Fallback si no lo encuentra, buscar en el directorio actual
+                    # Fallback al directorio de trabajo actual
                     launcher_script = os.path.join(os.getcwd(), 'updater_launcher.py')
                     if not os.path.exists(launcher_script):
                         raise FileNotFoundError("El script de lanzamiento 'updater_launcher.py' no se encontró.")

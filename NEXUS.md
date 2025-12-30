@@ -1,6 +1,6 @@
 
 
-Este archivo proporciona orientación a WARP al trabajar con código en este repositorio.
+Este archivo proporciona orientación  al trabajar con código en este repositorio.
 
 ## Resumen del Proyecto
 

@@ -281,6 +281,19 @@ class UpdateManager:
             True si la instalación fue exitosa, False en caso contrario
         """
         self.logger.debug("Entering install_update.")
+        
+        log_file = os.path.join(self.update_dir, 'update.log')
+        # Limpiar el archivo de log anterior si existe
+        if os.path.exists(log_file):
+            os.remove(log_file)
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+        # Evitar duplicar handlers si la función se llama varias veces
+        if not any(isinstance(h, logging.FileHandler) and h.baseFilename == log_file for h in self.logger.handlers):
+            self.logger.addHandler(file_handler)
+            self.logger.setLevel(logging.INFO)
+            self.logger.info("checkpass: log file created")
+        
         try:
             if not hasattr(self, '_downloaded_zip') or not os.path.exists(self._downloaded_zip):
                 self.logger.error("No hay archivo de actualización descargado (_downloaded_zip no existe o archivo no encontrado)")
@@ -375,18 +388,16 @@ class UpdateManager:
                 # Ejecutar el script de forma desacoplada
                 subprocess.Popen(command, creationflags=subprocess.DETACHED_PROCESS, close_fds=True)
                 self.logger.info("subprocess.Popen llamado. Script de actualización iniciado.")
-                
-                messagebox.showinfo(
-                    "Actualización en curso",
-                    "La actualización se ha iniciado. La aplicación se cerrará ahora para completar el proceso."
-                )
+                self.logger.info("checkpass: installer launched")
     
                 # Cerrar la aplicación actual para permitir que el instalador proceda
                 if restart_callback:
                     self.logger.info("Llamando a restart_callback para cerrar la aplicación.")
+                    self.logger.info("checkpass: application closing")
                     restart_callback()
                 else:
                     self.logger.info("restart_callback no proporcionado. Forzando salida con os._exit(0).")
+                    self.logger.info("checkpass: application closing")
                     os._exit(0)
                 
                 self.logger.info("install_update completado exitosamente.")

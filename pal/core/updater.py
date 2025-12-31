@@ -121,6 +121,7 @@ class UpdateManager:
         self.logger = logging.getLogger(__name__)
         self._check_thread: Optional[threading.Thread] = None
         self._stop_checking = threading.Event()
+        self.logger.debug(f"UpdateManager initialized: App='{app_name}', CurrentVersion='{current_version}', UpdateURL='{update_url}'")
         
     def check_for_updates(self, show_no_update_message: bool = False) -> bool:
         """
@@ -132,6 +133,7 @@ class UpdateManager:
         Returns:
             True si hay actualizaciones disponibles, False en caso contrario
         """
+        self.logger.debug(f"Entering check_for_updates. Current version: {self.current_version}")
         try:
             import requests
             from packaging import version
@@ -149,13 +151,14 @@ class UpdateManager:
             else:
                 version_url = f"{base_url}/version.json"
             
-            self.logger.info(f"URL completa de versión: {version_url}")
+            self.logger.debug(f"Fetching version info from: {version_url}")
             
             response = requests.get(version_url, timeout=10)
             response.raise_for_status()
             
             # Verificar que la respuesta es JSON válido
             if not response.text.strip():
+                self.logger.warning("Server response is empty when checking for updates.")
                 raise ValueError("La respuesta del servidor está vacía")
             
             # Intentar parsear JSON con mejor manejo de errores
@@ -164,17 +167,25 @@ class UpdateManager:
             except ValueError as json_error:
                 # Mostrar los primeros caracteres de la respuesta para debugging
                 preview = response.text[:200] if len(response.text) > 200 else response.text
+                self.logger.error(
+                    f"Error al parsear JSON de la respuesta. "
+                    f"Status: {response.status_code}, "
+                    f"Content-Type: {response.headers.get('Content-Type', 'unknown')}, "
+                    f"Preview: {preview}"
+                )
                 raise ValueError(
                     f"Error al parsear JSON de la respuesta. "
                     f"Status: {response.status_code}, "
                     f"Content-Type: {response.headers.get('Content-Type', 'unknown')}, "
                     f"Preview: {preview}"
                 ) from json_error
+            
             latest_version = version_data.get('version', '')
+            self.logger.debug(f"Latest version from server: {latest_version}")
             
             # Comparar versiones
             if latest_version and version.parse(latest_version) > version.parse(self.current_version):
-                self.logger.info(f"Actualización disponible: {latest_version}")
+                self.logger.info(f"Actualización disponible: {latest_version} (actual: {self.current_version})")
                 self._latest_version_info = version_data  # Guardar para uso posterior
                 return True
             else:
@@ -183,7 +194,7 @@ class UpdateManager:
                         "Actualizaciones",
                         f"Ya tienes la versión más reciente ({self.current_version})"
                     )
-                self.logger.info("No hay actualizaciones disponibles")
+                self.logger.info(f"No hay actualizaciones disponibles. Versión actual ({self.current_version}) es la más reciente o posterior a la del servidor ({latest_version}).")
                 return False
                 
         except Exception as e:
@@ -205,20 +216,25 @@ class UpdateManager:
         Returns:
             True si la descarga fue exitosa, False en caso contrario
         """
+        self.logger.debug("Entering download_update.")
         try:
             import requests
             
             self.logger.info("Iniciando descarga de actualización...")
             
             # Obtener URL de descarga desde version.json
-            if not hasattr(self, '_latest_version_info'):
+            if not hasattr(self, '_latest_version_info') or self._latest_version_info is None:
+                self.logger.warning("No _latest_version_info found, attempting to check for updates.")
                 if not self.check_for_updates():
+                    self.logger.error("No update information available after re-check.")
                     return False
             
             download_url = self._latest_version_info.get('url', '')
             if not download_url:
                 self.logger.error("No se encontró URL de descarga en version.json")
                 return False
+            
+            self.logger.debug(f"Download URL: {download_url}")
             
             # Descargar archivo
             response = requests.get(download_url, stream=True, timeout=30)
@@ -229,6 +245,7 @@ class UpdateManager:
             total_size = int(response.headers.get('content-length', 0))
             downloaded = 0
             
+            self.logger.debug(f"Saving downloaded update to: {zip_path}")
             with open(zip_path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=8192):
                     if chunk:
@@ -238,7 +255,7 @@ class UpdateManager:
                             progress = downloaded / total_size
                             progress_callback(progress)
             
-            self.logger.info("Actualización descargada exitosamente")
+            self.logger.info(f"Actualización descargada exitosamente. Guardado en {zip_path}")
             self._downloaded_zip = zip_path
             return True
                 
@@ -263,13 +280,14 @@ class UpdateManager:
         Returns:
             True si la instalación fue exitosa, False en caso contrario
         """
+        self.logger.debug("Entering install_update.")
         try:
-            
             if not hasattr(self, '_downloaded_zip') or not os.path.exists(self._downloaded_zip):
-                self.logger.error("No hay archivo de actualización descargado")
+                self.logger.error("No hay archivo de actualización descargado (_downloaded_zip no existe o archivo no encontrado)")
                 return False
             
             self.logger.info("Instalando actualización...")
+            self.logger.debug(f"Downloaded ZIP file: {self._downloaded_zip}")
             
             # Verificar si es un instalador .exe o un ZIP
             downloaded_file = self._downloaded_zip
@@ -278,6 +296,7 @@ class UpdateManager:
             if downloaded_file.endswith('.zip'):
                 extract_dir = os.path.join(self.update_dir, 'extracted')
                 os.makedirs(extract_dir, exist_ok=True)
+                self.logger.debug(f"Extracting ZIP to: {extract_dir}")
                 
                 with zipfile.ZipFile(downloaded_file, 'r') as zip_ref:
                     zip_ref.extractall(extract_dir)
@@ -318,51 +337,60 @@ class UpdateManager:
                 # Es un archivo .exe directamente
                 installer_path = downloaded_file
             
-            # Ejecutar el instalador a través de un script de lanzamiento separado
+            self.logger.debug(f"Determined installer path: {installer_path}")
             self.logger.info(f"Lanzando el instalador a través del script: {installer_path}")
             
             try:
                 # Obtener la ruta del ejecutable de Python
                 python_executable = sys.executable
+                self.logger.debug(f"Python executable: {python_executable}")
                 
                 # Obtener la ruta del script de lanzamiento
                 # Se asume que está en el directorio raíz del proyecto
                 if getattr(sys, 'frozen', False):
                     # Si es un ejecutable, el launcher debería estar al lado del ejecutable
                     base_dir = os.path.dirname(sys.executable)
+                    self.logger.debug(f"Running as frozen app. Base dir: {base_dir}")
                 else:
                     # Si se ejecuta desde el código fuente, buscar en el directorio raíz del proyecto
                     base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-
+                    self.logger.debug(f"Running from source. Base dir: {base_dir}")
+    
                 launcher_script = os.path.join(base_dir, 'updater_launcher.py')
-
+                self.logger.debug(f"Calculated launcher_script path: {launcher_script}")
+    
                 if not os.path.exists(launcher_script):
                     # Fallback al directorio de trabajo actual
+                    self.logger.warning(f"Launcher script not found at {launcher_script}. Trying current working directory.")
                     launcher_script = os.path.join(os.getcwd(), 'updater_launcher.py')
                     if not os.path.exists(launcher_script):
+                        self.logger.critical(f"Launcher script 'updater_launcher.py' not found in any expected location.")
                         raise FileNotFoundError("El script de lanzamiento 'updater_launcher.py' no se encontró.")
-
-                command = [python_executable, launcher_script, installer_path]
+                
+                self.logger.debug(f"Final launcher_script path: {launcher_script}")
+                pid = os.getpid()
+                command = [python_executable, launcher_script, installer_path, str(pid)]
+                self.logger.debug(f"Executing command: {command}")
                 
                 # Ejecutar el script de forma desacoplada
                 subprocess.Popen(command, creationflags=subprocess.DETACHED_PROCESS, close_fds=True)
-                
-                self.logger.info("Script de actualización iniciado. La aplicación se cerrará.")
+                self.logger.info("subprocess.Popen llamado. Script de actualización iniciado.")
                 
                 messagebox.showinfo(
                     "Actualización en curso",
                     "La actualización se ha iniciado. La aplicación se cerrará ahora para completar el proceso."
                 )
-
+    
                 # Cerrar la aplicación actual para permitir que el instalador proceda
                 if restart_callback:
+                    self.logger.info("Llamando a restart_callback para cerrar la aplicación.")
                     restart_callback()
                 else:
-                    # Forzar salida si no hay callback
+                    self.logger.info("restart_callback no proporcionado. Forzando salida con os._exit(0).")
                     os._exit(0)
                 
+                self.logger.info("install_update completado exitosamente.")
                 return True
-
             except Exception as e:
                 self.logger.error(f"Error al lanzar el script de actualización: {str(e)}")
                 messagebox.showerror(
@@ -379,8 +407,7 @@ class UpdateManager:
                 "Por favor, descarga e instala manualmente desde:\n"
                 f"{self._latest_version_info.get('url', '') if hasattr(self, '_latest_version_info') else 'URL no disponible'}"
             )
-            return False
-    
+            return False    
     def update_with_prompt(self) -> bool:
         """
         Verifica actualizaciones y muestra un diálogo al usuario si hay una disponible.

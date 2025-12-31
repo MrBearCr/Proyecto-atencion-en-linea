@@ -300,35 +300,29 @@ class DatabaseApp:
             print(f"[ERROR] No se pudo mostrar diálogo de configuración: {e}")
 
     def shutdown(self):
-        """Cierra la aplicación de forma ordenada para permitir la actualización."""
+        """Cierra la aplicación de forma ordenada."""
+        self.log("Iniciando cierre ordenado...", "INFO")
         try:
-            self.log("Iniciando cierre ordenado para actualización...", "INFO")
-
             # Detener hilos y procesos en segundo plano
             if hasattr(self, 'update_manager') and self.update_manager:
                 self.update_manager.stop_periodic_check()
 
             if hasattr(self, 'programador') and hasattr(self.programador, 'detener'):
                 self.programador.detener()
+            
+            # Close database connections from the pool
+            if hasattr(self, 'db_manager') and hasattr(self.db_manager, 'close_thread_connections'):
+                self.db_manager.close_thread_connections()
 
-            # The monitor_thread is a daemon, but let's try to be explicit if we can.
-            # There is no explicit stop method, so we rely on daemon=True.
-
-            self.log("Hilos de fondo detenidos. Cerrando ventana principal...", "INFO")
-
-            # Cerrar la ventana principal de Tkinter
+            self.log("Hilos de fondo y conexiones de BD detenidos. Cerrando ventana principal...", "INFO")
+            
             self.root.quit()
             self.root.destroy()
-            
-            self.log("Cierre de UI completado. Forzando salida final del proceso.", "INFO")
-
+            self.log("Cierre de UI completado.", "INFO")
         except Exception as e:
             self.log(f"Error durante el cierre ordenado: {e}", "ERROR")
-        
-        finally:
-            # Forzar la salida del proceso como último recurso
-            import os
-            os._exit(0)
+            # Fallback to a hard exit in case of error during shutdown
+            os._exit(1)
 
     def _initialize_app(self):
         try:
@@ -370,6 +364,7 @@ class DatabaseApp:
             
             # Configuración de UI y bindings
             self.buttons = {}    
+            self.root.protocol("WM_DELETE_WINDOW", self.shutdown)
             ui_setup_styles(self)
             self.setup_modern_ui()
             # Deshabilitar UI dependiente de BD hasta conectar

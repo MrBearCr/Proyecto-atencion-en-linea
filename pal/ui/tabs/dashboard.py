@@ -100,6 +100,12 @@ def setup_dashboard_tab(app):
             'tab_text': 'Mensajería',  # Tab exacto
             'tab_attr': 'messaging_tab',
         },
+        'clientes': {
+            'icon': '👥',
+            'name': 'Clientes',
+            'tab_text': '👥 Clientes',
+            'tab_attr': 'clientes_tab',
+        },
         'stock': {
             'icon': '📎',
             'name': 'Stock',
@@ -132,7 +138,7 @@ def setup_dashboard_tab(app):
         },
         'admin': {
             'icon': '🔓',
-            'name': 'Usuarios',
+            'name': 'Configuracion',
             'tab_text': '🔓 Administración',  # Tab exacto con emoji
             'tab_attr': 'admin_tab',
         }

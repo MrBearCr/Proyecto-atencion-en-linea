@@ -6,9 +6,10 @@ import configparser
 import time
 import threading
 from ..core.errors import ErrorCode
+from ..core.credentials import SecureCredentialsManager
 
 class DatabaseManager:
-    def __init__(self):
+    def __init__(self, credentials_manager=None):
         self.conn = None
         self.cursor = None
         self.connected_server = ""
@@ -17,6 +18,7 @@ class DatabaseManager:
         self.database = None
         self.user = None
         self.password = None
+        self.credentials_manager = credentials_manager
         # Pool de conexiones para hilos paralelos
         self._connection_pool = {}
         # Lock para acceso thread-safe al pool
@@ -1410,3 +1412,169 @@ GROUP BY i.c_Codarticulo
         except Exception as e:
             print(f"Error obteniendo alertas stock múltiples: {str(e)}")
             return []
+
+    def get_sedes_config(self):
+        """
+        Recupera la configuración de todas las sedes activas desde la tabla pal_sedes_configuracion.
+        Retorna una lista de diccionarios con los detalles de conexión de cada sede.
+        """
+        query = """
+            SELECT id, nombre_sede, ip_servidor, nombre_bd, usuario_bd, password_bd_enc, activa
+            FROM pal_sedes_configuracion
+            WHERE activa = 1
+            ORDER BY nombre_sede ASC
+        """
+        try:
+            rows = self.fetch_data(query)
+            self._log(f"Se encontraron {len(rows)} sedes activas.", "INFO")
+            sedes = []
+            for row in rows:
+                sedes.append({
+                    'id': row[0],
+                    'nombre_sede': row[1],
+                    'ip_servidor': row[2],
+                    'nombre_bd': row[3],
+                    'usuario_bd': row[4],
+                    'password_bd_enc': row[5],
+                    'activa': row[6]
+                })
+            return sedes
+        except Exception as e:
+            self._log(f"Error crítico al obtener la configuración de sedes: {e}", "ERROR")
+            # Relanzar la excepción para que la UI pueda manejarla
+            raise Exception("No se pudieron obtener las configuraciones de sedes activas desde la base de datos.") from e
+
+
+    def connect_to_vad20_sede(self, sede_config):
+        """
+        Establece una conexión pyodbc temporal a la base de datos VAD20 de una sede específica.
+        Requiere un diccionario de configuración de sede obtenido de get_sedes_config().
+        La contraseña se desencripta usando SecureCredentialsManager.
+        """
+        server = sede_config['ip_servidor']
+        database = sede_config['nombre_bd']
+        user = sede_config['usuario_bd']
+        encrypted_password = sede_config['password_bd_enc']
+
+        password = None
+        if encrypted_password and self.credentials_manager:
+            try:
+                # La contraseña se desencripta aquí
+                password = self.credentials_manager.decrypt(encrypted_password)
+            except Exception as e:
+                self._log(f"Error desencriptando contraseña para {sede_config['nombre_sede']}: {e}", "ERROR")
+                raise Exception(f"Fallo al desencriptar contraseña VAD20 para {sede_config['nombre_sede']}")
+
+        # Cadena de conexión para la sede VAD20
+        conn_str = (
+            f"DRIVER={{SQL Server}};"
+            f"SERVER={server};"
+            f"DATABASE={database};"
+            "Encrypt=no;"
+            "TrustServerCertificate=yes;"
+            "Connection Timeout=15;" # Timeout más corto para conexiones secundarias
+        )
+
+        if user:
+            conn_str += f"UID={user};PWD={password or ''};"
+        else:
+            conn_str += "Trusted_Connection=yes;"
+        
+        try:
+            temp_conn = pyodbc.connect(conn_str)
+            self._log(f"Conectado exitosamente a VAD20 para sede: {sede_config['nombre_sede']}", "INFO")
+            return temp_conn
+        except Exception as e:
+            self._log(f"Fallo al conectar a VAD20 para sede {sede_config['nombre_sede']}: {e}", "ERROR")
+            raise Exception(f"Fallo al conectar a VAD20 para {sede_config['nombre_sede']}")
+
+    def add_sede(self, sede_data):
+        """Agrega una nueva sede a la tabla pal_sedes_configuracion."""
+        query = """
+            INSERT INTO pal_sedes_configuracion 
+            (nombre_sede, ip_servidor, nombre_bd, usuario_bd, password_bd_enc, activa)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """
+        params = (
+            sede_data['nombre_sede'],
+            sede_data['ip_servidor'],
+            sede_data['nombre_bd'],
+            sede_data['usuario_bd'],
+            sede_data.get('password_bd_enc'), # Usar .get por si es None
+            sede_data['activa']
+        )
+        return self.execute_query(query, params)
+
+    def update_sede(self, sede_id, sede_data):
+        """Actualiza una sede existente en la tabla pal_sedes_configuracion."""
+        query = """
+            UPDATE pal_sedes_configuracion SET
+            nombre_sede = ?,
+            ip_servidor = ?,
+            nombre_bd = ?,
+            usuario_bd = ?,
+            password_bd_enc = ?,
+            activa = ?,
+            fecha_modificacion = GETDATE()
+            WHERE id = ?
+        """
+        params = (
+            sede_data['nombre_sede'],
+            sede_data['ip_servidor'],
+            sede_data['nombre_bd'],
+            sede_data['usuario_bd'],
+            sede_data.get('password_bd_enc'),
+            sede_data['activa'],
+            sede_id
+        )
+        return self.execute_query(query, params)
+
+    def delete_sede(self, sede_id):
+        """Elimina una sede de la tabla pal_sedes_configuracion."""
+        query = "DELETE FROM pal_sedes_configuracion WHERE id = ?"
+        return self.execute_query(query, (sede_id,))
+
+    def get_reporte_compras_por_cliente(self, connection, fecha_inicio, fecha_fin):
+        """
+        Obtiene un reporte de compras de clientes desde una base de datos VAD20.
+        
+        Args:
+            connection: Un objeto de conexión pyodbc a la base de datos VAD20.
+            fecha_inicio (datetime): Fecha de inicio del reporte.
+            fecha_fin (datetime): Fecha de fin del reporte.
+
+        Returns:
+            list: Una lista de tuplas con los datos del reporte.
+        """
+        query = """
+            SELECT
+                p.C_RIF,
+                p.C_DESC_CLIENTE,
+                p.C_NUMERO,
+                p.F_Fecha,
+                t.COD_PRINCIPAL
+            FROM
+                MA_PAGOS p
+            JOIN
+                MA_TRANSACCION t ON p.C_NUMERO = t.C_numero
+            WHERE
+                p.F_Fecha BETWEEN CONVERT(DATETIME, ?, 120) AND CONVERT(DATETIME, ?, 120)
+            ORDER BY
+                p.C_DESC_CLIENTE, p.F_Fecha, p.C_NUMERO, t.COD_PRINCIPAL;
+        """
+        try:
+            cursor = connection.cursor()
+            
+            # Convertir datetimes a strings para evitar problemas de binding con el driver ODBC
+            fecha_inicio_str = fecha_inicio.strftime('%Y-%m-%d 00:00:00')
+            fecha_fin_str = fecha_fin.strftime('%Y-%m-%d 23:59:59')
+
+            cursor.execute(query, (fecha_inicio_str, fecha_fin_str))
+            rows = cursor.fetchall()
+            cursor.close()
+            return rows
+        except Exception as e:
+            self._log(f"Error generando reporte de compras por cliente: {e}", "ERROR")
+            # Relanzar para que la UI pueda mostrar un mensaje de error.
+            raise
+

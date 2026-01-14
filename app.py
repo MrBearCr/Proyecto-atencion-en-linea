@@ -35,6 +35,7 @@ from pal.services.envios import EnvioProgramado, ProgramadorEnvios
 from pal.ui.debug_console import DebugConsole
 from pal.ui.header import create_header, setup_styles as ui_setup_styles
 from pal.ui.splash import SplashScreen
+from pal.ui.clientes_menu import ClientesMenu
 from tkcalendar import Calendar, DateEntry
 from win10toast import ToastNotifier
 
@@ -82,6 +83,7 @@ DB_MODULE_TO_FLAG = {
     'ESTADISTICAS': 'estadisticas',
     'CALENDARIO': 'calendario',
     'ADMIN': 'admin',
+    'CLIENTES': 'clientes',
 }
 FLAG_TO_DB_MODULE = {v: k for k, v in DB_MODULE_TO_FLAG.items()}
 
@@ -338,7 +340,7 @@ class DatabaseApp:
             
             self.modules_enabled = load_modules_config()
             self.audit_log = AuditLogger()
-            self.db_manager = DatabaseManager()
+            self.db_manager = DatabaseManager(self.cred_manager)
             self.auth = None
             self.permissions = None
             self.current_user = None
@@ -3741,6 +3743,18 @@ class DatabaseApp:
             self.root.after(500, self._update_hierarchy_combos)
             self.root.after(500, self._update_hierarchy_combos)
 
+        # Pestaña de Clientes (Menú de Submódulos)
+        if self.modules_enabled.get("clientes", True):
+            self.clientes_tab = ttk.Frame(self.main_notebook)
+            self.main_notebook.add(self.clientes_tab, text="👥 Clientes")
+            
+            # Crear instancias de las subvistas
+            self.clientes_menu_view = ClientesMenu(self.clientes_tab, controller=self)
+            self.clientes_reportes_view = None # Se creará bajo demanda
+
+            # Mostrar el menú inicial por defecto
+            self.show_clientes_sub_view('menu')
+
         # Alerta de stock Supervisores
         if self.modules_enabled.get("stock", False):
             self.stock_tab = ttk.Frame(self.main_notebook)
@@ -3795,6 +3809,13 @@ class DatabaseApp:
                 exclusions_frame = ttk.Frame(admin_nb)
                 admin_nb.add(exclusions_frame, text="Exclusiones")
                 self._create_admin_exclusions_tab(exclusions_frame)
+
+            # Tab: Sedes (visible si es admin)
+            show_sedes = self.current_user and self.current_user.get('username', '').lower() == 'admin'
+            if show_sedes:
+                sedes_frame = ttk.Frame(admin_nb)
+                admin_nb.add(sedes_frame, text="Sedes")
+                self._create_admin_sedes_tab(sedes_frame)
 
             # Tab: Auditoría (visible si admin o permiso admin.auditoria)
             show_audit = False
@@ -7311,6 +7332,214 @@ class DatabaseApp:
             except Exception:
                 pass
 
+    def show_clientes_sub_view(self, view_name):
+        """Gestiona la navegación entre subvistas dentro de la pestaña Clientes."""
+        # Ocultar todas las subvistas de clientes
+        if hasattr(self, 'clientes_menu_view') and self.clientes_menu_view.winfo_exists():
+            self.clientes_menu_view.pack_forget()
+        
+        # La vista de reportes ahora se maneja dentro de esta función
+        if hasattr(self, 'clientes_reportes_view') and self.clientes_reportes_view and self.clientes_reportes_view.winfo_exists():
+            self.clientes_reportes_view.pack_forget()
+        
+        # Mostrar la vista solicitada
+        if view_name == 'menu':
+            if hasattr(self, 'clientes_menu_view'):
+                self.clientes_menu_view.pack(fill=tk.BOTH, expand=True)
+        elif view_name == 'reportes':
+            # Crear la vista de reportes si no existe
+            if not hasattr(self, 'clientes_reportes_view') or not self.clientes_reportes_view or not self.clientes_reportes_view.winfo_exists():
+                from pal.ui.tabs.clientes_reportes import ClientesReportesTab
+                self.clientes_reportes_view = ClientesReportesTab(self.clientes_tab, self)
+            self.clientes_reportes_view.pack(fill=tk.BOTH, expand=True)
+
+
+    def _create_admin_sedes_tab(self, parent):
+        # --- Variables ---
+        self.admin_sedes_vars = {
+            'id': tk.StringVar(),
+            'nombre_sede': tk.StringVar(),
+            'ip_servidor': tk.StringVar(),
+            'nombre_bd': tk.StringVar(value='VAD20'),
+            'usuario_bd': tk.StringVar(),
+            'password_bd': tk.StringVar(),
+            'activa': tk.BooleanVar(value=True)
+        }
+
+        # --- Layout ---
+        main_frame = ttk.Frame(parent, padding=10)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        main_frame.rowconfigure(0, weight=1)
+        main_frame.columnconfigure(0, weight=3) # Treeview más grande
+        main_frame.columnconfigure(1, weight=2) # Formulario más pequeño
+
+        # --- Treeview para listar sedes ---
+        tree_frame = ttk.Frame(main_frame)
+        tree_frame.grid(row=0, column=0, sticky='nsew', padx=(0, 10))
+        tree_frame.rowconfigure(0, weight=1)
+        tree_frame.columnconfigure(0, weight=1)
+        
+        self.sedes_tree = ttk.Treeview(tree_frame, columns=('nombre', 'ip', 'db', 'user', 'activa'), show='headings')
+        self.sedes_tree.heading('nombre', text='Nombre Sede')
+        self.sedes_tree.heading('ip', text='IP Servidor')
+        self.sedes_tree.heading('db', text='Base de Datos')
+        self.sedes_tree.heading('user', text='Usuario')
+        self.sedes_tree.heading('activa', text='Activa')
+        self.sedes_tree.grid(row=0, column=0, sticky='nsew')
+        
+        scrollbar = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.sedes_tree.yview)
+        scrollbar.grid(row=0, column=1, sticky='ns')
+        self.sedes_tree.configure(yscrollcommand=scrollbar.set)
+        
+        self.sedes_tree.bind('<<TreeviewSelect>>', self._on_sede_select)
+
+        # --- Formulario para editar/crear ---
+        form_frame = ttk.LabelFrame(main_frame, text='Detalles de la Sede', padding=10)
+        form_frame.grid(row=0, column=1, sticky='nsew')
+        form_frame.columnconfigure(1, weight=1)
+
+        fields = [
+            ('Nombre Sede:', 'nombre_sede'), ('IP Servidor:', 'ip_servidor'), 
+            ('Nombre BD:', 'nombre_bd'), ('Usuario BD:', 'usuario_bd'),
+            ('Contraseña:', 'password_bd')
+        ]
+        
+        for i, (text, var_name) in enumerate(fields):
+            ttk.Label(form_frame, text=text).grid(row=i, column=0, sticky='w', pady=5, padx=5)
+            show_opt = "*" if var_name == 'password_bd' else None
+            ttk.Entry(form_frame, textvariable=self.admin_sedes_vars[var_name], show=show_opt).grid(row=i, column=1, sticky='ew', pady=5)
+        
+        ttk.Checkbutton(form_frame, text='Sede Activa', variable=self.admin_sedes_vars['activa']).grid(row=len(fields), column=0, columnspan=2, pady=10)
+
+        # --- Botones ---
+        btn_frame = ttk.Frame(form_frame)
+        btn_frame.grid(row=len(fields) + 1, column=0, columnspan=2, pady=10)
+        
+        ttk.Button(btn_frame, text="Guardar", command=self._save_sede).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Nuevo", command=self._clear_sede_form).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Eliminar", command=self._delete_sede).pack(side=tk.LEFT, padx=5)
+
+        # Carga inicial
+        self._load_sedes_to_treeview()
+
+    def _load_sedes_to_treeview(self):
+        """Carga o recarga las sedes desde la BD al Treeview."""
+        for i in self.sedes_tree.get_children():
+            self.sedes_tree.delete(i)
+        
+        try:
+            sedes = self.db_manager.get_sedes_config()
+            for sede in sedes:
+                self.sedes_tree.insert('', tk.END, iid=sede['id'], values=(
+                    sede['nombre_sede'], sede['ip_servidor'], sede['nombre_bd'],
+                    sede['usuario_bd'], 'Sí' if sede['activa'] else 'No'
+                ))
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudieron cargar las sedes: {e}", parent=self.root)
+
+    def _on_sede_select(self, event):
+        """Puebla el formulario cuando se selecciona una sede en el Treeview."""
+        selected_items = self.sedes_tree.selection()
+        if not selected_items:
+            return
+        
+        item_id = selected_items[0]
+        try:
+            # Re-fetch data for the selected item to get encrypted pass
+            sedes = self.db_manager.get_sedes_config()
+            sede_data = next((s for s in sedes if s['id'] == int(item_id)), None)
+
+            if sede_data:
+                self.admin_sedes_vars['id'].set(sede_data['id'])
+                self.admin_sedes_vars['nombre_sede'].set(sede_data['nombre_sede'])
+                self.admin_sedes_vars['ip_servidor'].set(sede_data['ip_servidor'])
+                self.admin_sedes_vars['nombre_bd'].set(sede_data['nombre_bd'])
+                self.admin_sedes_vars['usuario_bd'].set(sede_data['usuario_bd'])
+                self.admin_sedes_vars['password_bd'].set('') # No mostrar la contraseña
+                self.admin_sedes_vars['activa'].set(sede_data['activa'])
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo cargar el detalle de la sede: {e}", parent=self.root)
+            self._clear_sede_form()
+
+    def _save_sede(self):
+        """Guarda una sede (nueva o existente)."""
+        sede_id = self.admin_sedes_vars['id'].get()
+        nombre_sede = self.admin_sedes_vars['nombre_sede'].get().strip()
+
+        if not nombre_sede:
+            messagebox.showwarning("Campo Requerido", "El nombre de la sede no puede estar vacío.", parent=self.root)
+            return
+
+        sede_data = {
+            'nombre_sede': nombre_sede,
+            'ip_servidor': self.admin_sedes_vars['ip_servidor'].get().strip(),
+            'nombre_bd': self.admin_sedes_vars['nombre_bd'].get().strip(),
+            'usuario_bd': self.admin_sedes_vars['usuario_bd'].get().strip(),
+            'activa': self.admin_sedes_vars['activa'].get()
+        }
+
+        password = self.admin_sedes_vars['password_bd'].get()
+        if password: # Si se ingresó una nueva contraseña, encriptarla
+            try:
+                sede_data['password_bd_enc'] = self.cred_manager.encrypt(password)
+            except Exception as e:
+                messagebox.showerror("Error de Encriptación", f"No se pudo encriptar la contraseña: {e}", parent=self.root)
+                return
+        else: # Si se deja en blanco, se mantiene la existente (en caso de edición)
+            sede_data['password_bd_enc'] = None
+            if sede_id:
+                try:
+                    sedes = self.db_manager.get_sedes_config()
+                    existing_sede = next((s for s in sedes if s['id'] == int(sede_id)), None)
+                    if existing_sede:
+                        sede_data['password_bd_enc'] = existing_sede['password_bd_enc']
+                except Exception:
+                    pass
+
+        try:
+            if sede_id: # Actualizar
+                self.db_manager.update_sede(int(sede_id), sede_data)
+                messagebox.showinfo("Éxito", "Sede actualizada correctamente.", parent=self.root)
+            else: # Crear
+                self.db_manager.add_sede(sede_data)
+                messagebox.showinfo("Éxito", "Sede creada correctamente.", parent=self.root)
+            
+            self._clear_sede_form()
+            self._load_sedes_to_treeview()
+        except Exception as e:
+            messagebox.showerror("Error al Guardar", f"No se pudo guardar la sede: {e}", parent=self.root)
+
+    def _clear_sede_form(self):
+        """Limpia el formulario."""
+        for var in self.admin_sedes_vars.values():
+            if isinstance(var, tk.BooleanVar):
+                var.set(True)
+            else:
+                var.set('')
+        self.admin_sedes_vars['nombre_bd'].set('VAD20') # Valor por defecto
+        self.sedes_tree.selection_remove(self.sedes_tree.selection())
+
+    def _delete_sede(self):
+        """Elimina la sede seleccionada."""
+        selected_items = self.sedes_tree.selection()
+        if not selected_items:
+            messagebox.showwarning("Sin Selección", "Por favor, seleccione una sede de la lista para eliminar.", parent=self.root)
+            return
+
+        sede_id = selected_items[0]
+        nombre_sede = self.sedes_tree.item(sede_id, 'values')[0]
+        
+        if not messagebox.askyesno("Confirmar Eliminación", f"¿Está seguro de que desea eliminar la sede '{nombre_sede}'?", parent=self.root):
+            return
+            
+        try:
+            self.db_manager.delete_sede(int(sede_id))
+            messagebox.showinfo("Éxito", "Sede eliminada correctamente.", parent=self.root)
+            self._clear_sede_form()
+            self._load_sedes_to_treeview()
+        except Exception as e:
+            messagebox.showerror("Error al Eliminar", f"No se pudo eliminar la sede: {e}", parent=self.root)
+
     def _save_debug_config(self):
         try:
             flags = {k: v.get() for k, v in self.debug_vars.items()}
@@ -10602,3 +10831,192 @@ if __name__ == "__main__":
     root.withdraw()
     app = DatabaseApp(root)
     root.mainloop() 
+
+
+    def _create_admin_sedes_tab(self, parent):
+        # --- Variables ---
+        self.admin_sedes_vars = {
+            'id': tk.StringVar(),
+            'nombre_sede': tk.StringVar(),
+            'ip_servidor': tk.StringVar(),
+            'nombre_bd': tk.StringVar(value='VAD20'),
+            'usuario_bd': tk.StringVar(),
+            'password_bd': tk.StringVar(),
+            'activa': tk.BooleanVar(value=True)
+        }
+
+        # --- Layout ---
+        main_frame = ttk.Frame(parent, padding=10)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        main_frame.rowconfigure(0, weight=1)
+        main_frame.columnconfigure(0, weight=3) # Treeview más grande
+        main_frame.columnconfigure(1, weight=2) # Formulario más pequeño
+
+        # --- Treeview para listar sedes ---
+        tree_frame = ttk.Frame(main_frame)
+        tree_frame.grid(row=0, column=0, sticky='nsew', padx=(0, 10))
+        tree_frame.rowconfigure(0, weight=1)
+        tree_frame.columnconfigure(0, weight=1)
+        
+        self.sedes_tree = ttk.Treeview(tree_frame, columns=('nombre', 'ip', 'db', 'user', 'activa'), show='headings')
+        self.sedes_tree.heading('nombre', text='Nombre Sede')
+        self.sedes_tree.heading('ip', text='IP Servidor')
+        self.sedes_tree.heading('db', text='Base de Datos')
+        self.sedes_tree.heading('user', text='Usuario')
+        self.sedes_tree.heading('activa', text='Activa')
+        self.sedes_tree.grid(row=0, column=0, sticky='nsew')
+        
+        scrollbar = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.sedes_tree.yview)
+        scrollbar.grid(row=0, column=1, sticky='ns')
+        self.sedes_tree.configure(yscrollcommand=scrollbar.set)
+        
+        self.sedes_tree.bind('<<TreeviewSelect>>', self._on_sede_select)
+
+        # --- Formulario para editar/crear ---
+        form_frame = ttk.LabelFrame(main_frame, text='Detalles de la Sede', padding=10)
+        form_frame.grid(row=0, column=1, sticky='nsew')
+        form_frame.columnconfigure(1, weight=1)
+
+        fields = [
+            ('Nombre Sede:', 'nombre_sede'), ('IP Servidor:', 'ip_servidor'), 
+            ('Nombre BD:', 'nombre_bd'), ('Usuario BD:', 'usuario_bd'),
+            ('Contraseña:', 'password_bd')
+        ]
+        
+        for i, (text, var_name) in enumerate(fields):
+            ttk.Label(form_frame, text=text).grid(row=i, column=0, sticky='w', pady=5, padx=5)
+            show_opt = "*" if var_name == 'password_bd' else None
+            ttk.Entry(form_frame, textvariable=self.admin_sedes_vars[var_name], show=show_opt).grid(row=i, column=1, sticky='ew', pady=5)
+        
+        ttk.Checkbutton(form_frame, text='Sede Activa', variable=self.admin_sedes_vars['activa']).grid(row=len(fields), column=0, columnspan=2, pady=10)
+
+        # --- Botones ---
+        btn_frame = ttk.Frame(form_frame)
+        btn_frame.grid(row=len(fields) + 1, column=0, columnspan=2, pady=10)
+        
+        ttk.Button(btn_frame, text="Guardar", command=self._save_sede).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Nuevo", command=self._clear_sede_form).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Eliminar", command=self._delete_sede).pack(side=tk.LEFT, padx=5)
+
+        # Carga inicial
+        self._load_sedes_to_treeview()
+
+    def _load_sedes_to_treeview(self):
+        """Carga o recarga las sedes desde la BD al Treeview."""
+        for i in self.sedes_tree.get_children():
+            self.sedes_tree.delete(i)
+        
+        try:
+            sedes = self.db_manager.get_sedes_config()
+            for sede in sedes:
+                self.sedes_tree.insert('', tk.END, iid=sede['id'], values=(
+                    sede['nombre_sede'], sede['ip_servidor'], sede['nombre_bd'],
+                    sede['usuario_bd'], 'Sí' if sede['activa'] else 'No'
+                ))
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudieron cargar las sedes: {e}", parent=self.root)
+
+    def _on_sede_select(self, event):
+        """Puebla el formulario cuando se selecciona una sede en el Treeview."""
+        selected_items = self.sedes_tree.selection()
+        if not selected_items:
+            return
+        
+        item_id = selected_items[0]
+        try:
+            # Re-fetch data for the selected item to get encrypted pass
+            sedes = self.db_manager.get_sedes_config()
+            sede_data = next((s for s in sedes if s['id'] == int(item_id)), None)
+
+            if sede_data:
+                self.admin_sedes_vars['id'].set(sede_data['id'])
+                self.admin_sedes_vars['nombre_sede'].set(sede_data['nombre_sede'])
+                self.admin_sedes_vars['ip_servidor'].set(sede_data['ip_servidor'])
+                self.admin_sedes_vars['nombre_bd'].set(sede_data['nombre_bd'])
+                self.admin_sedes_vars['usuario_bd'].set(sede_data['usuario_bd'])
+                self.admin_sedes_vars['password_bd'].set('') # No mostrar la contraseña
+                self.admin_sedes_vars['activa'].set(sede_data['activa'])
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo cargar el detalle de la sede: {e}", parent=self.root)
+            self._clear_sede_form()
+
+    def _save_sede(self):
+        """Guarda una sede (nueva o existente)."""
+        sede_id = self.admin_sedes_vars['id'].get()
+        nombre_sede = self.admin_sedes_vars['nombre_sede'].get().strip()
+
+        if not nombre_sede:
+            messagebox.showwarning("Campo Requerido", "El nombre de la sede no puede estar vacío.", parent=self.root)
+            return
+
+        sede_data = {
+            'nombre_sede': nombre_sede,
+            'ip_servidor': self.admin_sedes_vars['ip_servidor'].get().strip(),
+            'nombre_bd': self.admin_sedes_vars['nombre_bd'].get().strip(),
+            'usuario_bd': self.admin_sedes_vars['usuario_bd'].get().strip(),
+            'activa': self.admin_sedes_vars['activa'].get()
+        }
+
+        password = self.admin_sedes_vars['password_bd'].get()
+        if password: # Si se ingresó una nueva contraseña, encriptarla
+            try:
+                sede_data['password_bd_enc'] = self.cred_manager.encrypt(password)
+            except Exception as e:
+                messagebox.showerror("Error de Encriptación", f"No se pudo encriptar la contraseña: {e}", parent=self.root)
+                return
+        else: # Si se deja en blanco, se mantiene la existente (en caso de edición)
+            sede_data['password_bd_enc'] = None
+            if sede_id:
+                try:
+                    sedes = self.db_manager.get_sedes_config()
+                    existing_sede = next((s for s in sedes if s['id'] == int(sede_id)), None)
+                    if existing_sede:
+                        sede_data['password_bd_enc'] = existing_sede['password_bd_enc']
+                except Exception:
+                    pass
+
+        try:
+            if sede_id: # Actualizar
+                self.db_manager.update_sede(int(sede_id), sede_data)
+                messagebox.showinfo("Éxito", "Sede actualizada correctamente.", parent=self.root)
+            else: # Crear
+                self.db_manager.add_sede(sede_data)
+                messagebox.showinfo("Éxito", "Sede creada correctamente.", parent=self.root)
+            
+            self._clear_sede_form()
+            self._load_sedes_to_treeview()
+        except Exception as e:
+            messagebox.showerror("Error al Guardar", f"No se pudo guardar la sede: {e}", parent=self.root)
+
+    def _clear_sede_form(self):
+        """Limpia el formulario."""
+        for var in self.admin_sedes_vars.values():
+            if isinstance(var, tk.BooleanVar):
+                var.set(True)
+            else:
+                var.set('')
+        self.admin_sedes_vars['nombre_bd'].set('VAD20') # Valor por defecto
+        self.sedes_tree.selection_remove(self.sedes_tree.selection())
+
+    def _delete_sede(self):
+        """Elimina la sede seleccionada."""
+        selected_items = self.sedes_tree.selection()
+        if not selected_items:
+            messagebox.showwarning("Sin Selección", "Por favor, seleccione una sede de la lista para eliminar.", parent=self.root)
+            return
+
+        sede_id = selected_items[0]
+        nombre_sede = self.sedes_tree.item(sede_id, 'values')[0]
+        
+        if not messagebox.askyesno("Confirmar Eliminación", f"¿Está seguro de que desea eliminar la sede '{nombre_sede}'?", parent=self.root):
+            return
+            
+        try:
+            self.db_manager.delete_sede(int(sede_id))
+            messagebox.showinfo("Éxito", "Sede eliminada correctamente.", parent=self.root)
+            self._clear_sede_form()
+            self._load_sedes_to_treeview()
+        except Exception as e:
+            messagebox.showerror("Error al Eliminar", f"No se pudo eliminar la sede: {e}", parent=self.root)
+
+

@@ -719,7 +719,8 @@ def export_stock_excel(filename: str, datos_exportar: List, seleccionadas: List[
 
 def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_cb: Optional[Callable[[int, int], None]] = None, 
                      permissions_manager=None, current_user_id: int = None,
-                     provider_label: Optional[str] = None) -> int:
+                     provider_label: Optional[str] = None,
+                     sede_codigo: Optional[str] = None) -> int:
     """Exporta datos de RI (Rotación de Inventario) a un archivo Excel con formato profesional y múltiples hojas de análisis.
     
     Args:
@@ -742,6 +743,9 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
         total_registros = len(datos_tra)
         logger.info(f"Iniciando exportación RI Excel de {total_registros} registros a {filename}")
 
+        # Determinar si el filtro de sede es global (modo ICH)
+        ich_mode = sede_codigo in (None, '%', '00', 'ICH', 'ALL')
+        
         # Calcular total de ventas una sola vez usando helper robusto
         try:
             total_ventas = sum(_get_tra_neto(f) for f in datos_tra if f)
@@ -831,16 +835,132 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
             except Exception as e:
                 logger.warning(f"Error verificando permiso ver_costo_utilidad: {e}")
         
-        # Ajustar merge según si incluye columnas de costo/utilidad
-        # Base: 8 columnas; con precio/costo/utilidad: 11 columnas (A-K)
-        merge_range = 'A1:K1' if mostrar_costo_utilidad else 'A1:H1'
-        ws_main.merge_cells(merge_range)
+        # Helper para obtener stock actual por producto
+        def _get_stock_actual_bulk_tra(codigos: List[str], deposito: Optional[str]) -> Dict[str, int]:
+            """Obtiene el stock actual por código para TRA (optimizado)."""
+            resultados: Dict[str, int] = {}
+            if not db_manager or not db_manager.ensure_connection() or not codigos:
+                return resultados
+            try:
+                MAX_IN = 2000
+                global_query = deposito in (None, '%', '00', 'ICH', 'ALL')
+                
+                for cod in codigos:
+                    resultados[str(cod)] = 0
+                
+                for i in range(0, len(codigos), MAX_IN):
+                    chunk = codigos[i:i + MAX_IN]
+                    placeholders = ','.join(['?'] * len(chunk))
+                    if global_query:
+                        sql = (
+                            f"SELECT c_codarticulo, SUM(n_cantidad) "
+                            f"FROM MA_DEPOPROD WITH (NOLOCK) "
+                            f"WHERE c_codarticulo IN ({placeholders}) "
+                            f"GROUP BY c_codarticulo"
+                        )
+                        params = chunk
+                    else:
+                        sql = (
+                            f"SELECT c_codarticulo, SUM(n_cantidad) "
+                            f"FROM MA_DEPOPROD WITH (NOLOCK) "
+                            f"WHERE c_coddeposito = ? AND c_codarticulo IN ({placeholders}) "
+                            f"GROUP BY c_codarticulo"
+                        )
+                        params = [deposito] + chunk
+                    rows = db_manager.fetch_data(sql, params)
+                    for cod, sum_qty in (rows or []):
+                        try:
+                            resultados[str(cod)] = int(sum_qty or 0)
+                        except Exception:
+                            pass
+                return resultados
+            except Exception as e:
+                logger.error(f"[EXPORT TRA] Error obteniendo stock actual: {e}")
+                return resultados
         
-        # Headers de la tabla (fila 7)
-        headers = ['Código', 'Descripción', 'Departamento', 'Grupo', 'Subgrupo', 'Ventas Netas', 'Rotación', 'Representación %']
+        def _map_deposito_to_sede_tra(dep: str) -> str:
+            """Mapea un código de depósito a una sede legible."""
+            try:
+                c = (dep or "").strip()
+                if c.startswith('03'):
+                    return 'Cabudare'
+                if c.startswith('01'):
+                    return 'Barinas'
+                if c.startswith('04'):
+                    return 'Guanare'
+                return 'Otra'
+            except Exception:
+                return 'Otra'
+        
+        def _get_stock_por_sede_tra(codigos: List[str]) -> Dict[str, Dict[str, int]]:
+            """Obtiene distribución de stock por sede para cada código (solo modo ICH, optimizado)."""
+            resultados: Dict[str, Dict[str, int]] = {}
+            if not db_manager or not db_manager.ensure_connection() or not codigos:
+                return resultados
+            try:
+                MAX_IN = 2000
+                for i in range(0, len(codigos), MAX_IN):
+                    chunk = codigos[i:i + MAX_IN]
+                    placeholders = ','.join(['?'] * len(chunk))
+                    sql = (
+                        f"SELECT c_codarticulo, c_coddeposito, SUM(n_cantidad) "
+                        f"FROM MA_DEPOPROD WITH (NOLOCK) "
+                        f"WHERE c_codarticulo IN ({placeholders}) "
+                        f"GROUP BY c_codarticulo, c_coddeposito"
+                    )
+                    rows = db_manager.fetch_data(sql, chunk) or []
+                    for cod, dep, qty in rows:
+                        try:
+                            cod_str = str(cod).strip()
+                            dep_str = str(dep).strip()
+                            sede_nombre = _map_deposito_to_sede_tra(dep_str)
+                            q = int(qty or 0)
+                        except Exception:
+                            continue
+                        if cod_str not in resultados:
+                            resultados[cod_str] = {}
+                        resultados[cod_str][sede_nombre] = resultados[cod_str].get(sede_nombre, 0) + q
+                return resultados
+            except Exception as e:
+                logger.error(f"[EXPORT TRA] Error obteniendo stock por sede: {e}")
+                return resultados
+        
+        # Obtener códigos únicos para consultar stock
+        codigos_unicos_tra = sorted({
+            str(f[0]).strip() for f in datos_tra
+            if f and len(f) > 0 and f[0] is not None
+        })
+        
+        # Cargar stock según modo ICH o sede específica
+        stock_map_tra: Dict[str, int] = {}
+        stock_por_sede_map_tra: Dict[str, Dict[str, int]] = {}
+        if codigos_unicos_tra and db_manager:
+            sede_stock = sede_codigo or '0301'
+            stock_map_tra = _get_stock_actual_bulk_tra(codigos_unicos_tra, sede_stock)
+            if ich_mode:
+                stock_por_sede_map_tra = _get_stock_por_sede_tra(codigos_unicos_tra)
+        
+        # Headers de la tabla (fila 7) - Orden: Ventas Netas, Stock/Stocks, Rotación
+        headers = ['Código', 'Descripción', 'Departamento', 'Grupo', 'Subgrupo', 'Ventas Netas']
+        
+        # Agregar columnas de stock según modo ICH
+        if ich_mode:
+            headers.extend(['Stock Cabudare', 'Stock Barinas', 'Stock Guanare', 'Stock Total'])
+        else:
+            headers.append('Stock')
+        
+        # Agregar Rotación y Representación %
+        headers.extend(['Rotación', 'Representación %'])
+        
         if mostrar_costo_utilidad:
             # Mostrar precio con IVA incluido (sin exponer la columna % IVA)
             headers.extend(['Precio + IVA', 'Costo', 'Utilidad %'])
+        
+        # Ajustar merge del título según cantidad total de columnas
+        from openpyxl.utils import get_column_letter as _col_letter
+        last_col_letter = _col_letter(len(headers))
+        merge_range = f'A1:{last_col_letter}1'
+        ws_main.merge_cells(merge_range)
         
         start_row = 7
         for col, header in enumerate(headers, 1):
@@ -919,12 +1039,47 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
                 # Aplicar el mismo formateo que en la interfaz: enteros sin decimales
                 neto_formateado = int(neto_valor) if neto_valor == int(neto_valor) else round(neto_valor, 2)
                 
+                # Columna 6: Ventas Netas
                 ws_main.cell(row=row, column=6, value=neto_formateado)
-                ws_main.cell(row=row, column=7, value=clean_for_excel(str(rotacion).upper()))
                 
-                # Calcular porcentaje si hay datos suficientes (usar total_ventas ya calculado)
+                # Obtener código para consultar stock
+                try:
+                    codigo_str = str(codigo).strip() if codigo is not None else ''
+                except Exception:
+                    codigo_str = ''
+                
+                current_col = 7
+                
+                # Columnas de stock según modo ICH
+                if ich_mode:
+                    # Stock por sede (3 columnas) + Stock Total
+                    dist = stock_por_sede_map_tra.get(codigo_str, {})
+                    stock_cabudare = dist.get('Cabudare', 0)
+                    stock_barinas = dist.get('Barinas', 0)
+                    stock_guanare = dist.get('Guanare', 0)
+                    stock_total = stock_cabudare + stock_barinas + stock_guanare
+                    ws_main.cell(row=row, column=current_col, value=stock_cabudare)
+                    current_col += 1
+                    ws_main.cell(row=row, column=current_col, value=stock_barinas)
+                    current_col += 1
+                    ws_main.cell(row=row, column=current_col, value=stock_guanare)
+                    current_col += 1
+                    ws_main.cell(row=row, column=current_col, value=stock_total)
+                    current_col += 1
+                else:
+                    # Stock actual (1 columna)
+                    stock_actual = int(stock_map_tra.get(codigo_str, 0) or 0)
+                    ws_main.cell(row=row, column=current_col, value=stock_actual)
+                    current_col += 1
+                
+                # Columna siguiente: Rotación
+                ws_main.cell(row=row, column=current_col, value=clean_for_excel(str(rotacion).upper()))
+                current_col += 1
+                
+                # Columna siguiente: Representación %
                 porcentaje = (neto_valor / total_ventas * 100) if total_ventas > 0 else 0
-                ws_main.cell(row=row, column=8, value=round(porcentaje, 2))
+                ws_main.cell(row=row, column=current_col, value=round(porcentaje, 2))
+                current_col += 1
                 
                 # Agregar costo, precio (con IVA) y utilidad si el usuario tiene permiso
                 if mostrar_costo_utilidad:
@@ -938,27 +1093,25 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
                         costo_val = 0.0
                     
                     # IVA % desde MA_PRODUCTOS.n_impuesto1 (solo para cálculo interno)
-                    try:
-                        codigo_str = str(codigo).strip() if codigo is not None else ''
-                    except Exception:
-                        codigo_str = ''
                     iva_pct = float(impuestos_map.get(codigo_str, 0.0)) if impuestos_map else 0.0
                     
                     # Precio con IVA incluido (si n_impuesto1 es porcentaje, por ejemplo 16 para 16%)
                     precio_con_iva = precio_base * (1.0 + (iva_pct / 100.0)) if precio_base > 0 else 0.0
                     
-                    # Columna 9: Precio + IVA
-                    ws_main.cell(row=row, column=9, value=round(precio_con_iva, 2))
-                    # Columna 10: Costo
-                    ws_main.cell(row=row, column=10, value=round(costo_val, 2))
+                    # Precio + IVA
+                    ws_main.cell(row=row, column=current_col, value=round(precio_con_iva, 2))
+                    current_col += 1
+                    # Costo
+                    ws_main.cell(row=row, column=current_col, value=round(costo_val, 2))
+                    current_col += 1
                     
                     # Calcular utilidad porcentual usando precio base (sin IVA) para no distorsionar el margen
                     if precio_base > 0:
                         utilidad_raw = (costo_val / precio_base) * 100 - 100
                         utilidad_pct = abs(utilidad_raw)
-                        ws_main.cell(row=row, column=11, value=round(utilidad_pct, 2))
+                        ws_main.cell(row=row, column=current_col, value=round(utilidad_pct, 2))
                     else:
-                        ws_main.cell(row=row, column=11, value=0)
+                        ws_main.cell(row=row, column=current_col, value=0)
                 
                 if progress_cb:
                     progress_cb(i + 1, total_registros)
@@ -977,8 +1130,11 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
         )
         ws_main.add_table(table)
         
-        # Formato condicional para rotación
-        rotacion_range = f"G{data_start_row}:G{data_start_row + total_registros - 1}"
+        # Formato condicional para rotación (columna después de stock)
+        # Sin ICH: columna 8, Con ICH: columna 11 (Stock Cabudare, Barinas, Guanare, Total)
+        rotacion_col = 8 if not ich_mode else 11
+        rotacion_col_letter = get_column_letter(rotacion_col)
+        rotacion_range = f"{rotacion_col_letter}{data_start_row}:{rotacion_col_letter}{data_start_row + total_registros - 1}"
         
         # Alta = Verde
         ws_main.conditional_formatting.add(rotacion_range, 
@@ -1001,14 +1157,29 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
         ws_main.column_dimensions['C'].width = 20  # Departamento
         ws_main.column_dimensions['D'].width = 20  # Grupo
         ws_main.column_dimensions['E'].width = 20  # Subgrupo
-        ws_main.column_dimensions['F'].width = 15  # Neto
-        ws_main.column_dimensions['G'].width = 12  # Rotación
-        ws_main.column_dimensions['H'].width = 15  # Porcentaje
+        ws_main.column_dimensions['F'].width = 15  # Ventas Netas
         
-        if mostrar_costo_utilidad:
-            ws_main.column_dimensions['I'].width = 15  # Precio + IVA
-            ws_main.column_dimensions['J'].width = 15  # Costo
-            ws_main.column_dimensions['K'].width = 15  # Utilidad %
+        if ich_mode:
+            ws_main.column_dimensions['G'].width = 15  # Stock Cabudare
+            ws_main.column_dimensions['H'].width = 15  # Stock Barinas
+            ws_main.column_dimensions['I'].width = 15  # Stock Guanare
+            ws_main.column_dimensions['J'].width = 15  # Stock Total
+            ws_main.column_dimensions['K'].width = 12  # Rotación
+            ws_main.column_dimensions['L'].width = 15  # Representación %
+            
+            if mostrar_costo_utilidad:
+                ws_main.column_dimensions['M'].width = 15  # Precio + IVA
+                ws_main.column_dimensions['N'].width = 15  # Costo
+                ws_main.column_dimensions['O'].width = 15  # Utilidad %
+        else:
+            ws_main.column_dimensions['G'].width = 15  # Stock
+            ws_main.column_dimensions['H'].width = 12  # Rotación
+            ws_main.column_dimensions['I'].width = 15  # Representación %
+            
+            if mostrar_costo_utilidad:
+                ws_main.column_dimensions['J'].width = 15  # Precio + IVA
+                ws_main.column_dimensions['K'].width = 15  # Costo
+                ws_main.column_dimensions['L'].width = 15  # Utilidad %
         
         # === HOJA 2: RESUMEN POR ROTACIÓN ===
         ws_summary = wb.create_sheet("Resumen por Rotación")

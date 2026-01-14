@@ -1704,6 +1704,9 @@ class DatabaseApp:
                     if prov_cod:
                         prov_label = prov_desc or prov_cod
                     
+                    # Obtener código de sede
+                    tra_sede_cod = getattr(self, 'tra_sede_codigo', None)
+                    
                     total_registros = export_tra_excel(
                         filename=filename,
                         datos_tra=datos_exportar,
@@ -1712,6 +1715,7 @@ class DatabaseApp:
                         permissions_manager=permissions_mgr,
                         current_user_id=user_id,
                         provider_label=prov_label,
+                        sede_codigo=tra_sede_cod,
                     )
                     
                     # Notificar éxito en el hilo principal

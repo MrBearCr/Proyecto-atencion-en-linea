@@ -471,6 +471,13 @@ class DatabaseApp:
                 self.update_manager = None
             
             self.attempt_auto_connect()
+            
+            # Cargar configuraciones globales (exclusiones)
+            try:
+                self._load_global_settings()
+            except Exception as e:
+                print(f"[WARNING] No se pudieron cargar configuraciones globales: {e}")
+
             self.programar_actualizaciones_stock()
             
             # Verificar hilos activos en segundo plano

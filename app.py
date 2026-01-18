@@ -10499,10 +10499,17 @@ class DatabaseApp:
 
             # 5) Construir lista de códigos únicos del conjunto YA filtrado
             codigos = []
+            cols_dept = set()
+            cols_group = set()
+            cols_sub = set()
+            
             for item in datos_filtrados:
                 try:
                     if item and len(item) > 0 and item[0] is not None:
                         codigos.append(str(item[0]))
+                        if len(item) > 2 and item[2]: cols_dept.add(str(item[2]))
+                        if len(item) > 3 and item[3]: cols_group.add(str(item[3]))
+                        if len(item) > 4 and item[4]: cols_sub.add(str(item[4]))
                 except Exception:
                     continue
             codigos_unicos = sorted(set(codigos))
@@ -10514,12 +10521,50 @@ class DatabaseApp:
                 )
                 return
 
-            # 6) Consultar últimas ventas; sólo regresan productos que ALGUNA vez se vendieron
+            # Pre-cargar descripciones de Dept/Grupo/Subgrupo para el reporte
+            mapa_dept = {}
+            mapa_grupo = {}
+            mapa_sub = {}
+            
+            try:
+                # Cargar Departamentos
+                if cols_dept:
+                    placeholders = ','.join(['?' for _ in cols_dept])
+                    rows = self.db_manager.fetch_data(f"SELECT C_CODIGO, C_DESCRIPCIO FROM MA_DEPARTAMENTOS WHERE C_CODIGO IN ({placeholders})", list(cols_dept))
+                    if rows: mapa_dept = {r[0].strip(): r[1].strip() for r in rows if r[0]}
+                
+                # Cargar Grupos
+                if cols_group:
+                    placeholders = ','.join(['?' for _ in cols_group])
+                    rows = self.db_manager.fetch_data(f"SELECT C_CODIGO, C_DESCRIPCIO FROM MA_GRUPOS WHERE C_CODIGO IN ({placeholders})", list(cols_group))
+                    if rows: mapa_grupo = {r[0].strip(): r[1].strip() for r in rows if r[0]}
+
+                # Cargar Subgrupos
+                if cols_sub:
+                    placeholders = ','.join(['?' for _ in cols_sub])
+                    rows = self.db_manager.fetch_data(f"SELECT C_CODIGO, C_DESCRIPCIO FROM MA_SUBGRUPOS WHERE C_CODIGO IN ({placeholders})", list(cols_sub))
+                    if rows: mapa_sub = {r[0].strip(): r[1].strip() for r in rows if r[0]}
+                    
+            except Exception as e:
+                self.log(f"Error cargando descripciones para reporte: {e}", "WARNING")
+
+            # 6) Consultar últimas ventas y STOCK ACTUAL
             from datetime import datetime
             start_time = datetime.now()
             ultimas_ventas = obtener_ultimas_ventas_bulk(self.db_manager, codigos_unicos, sede)
+            
+            # Consultar Stock Actual usando el método existente en la app
+            stock_actual_map = {}
+            try:
+                if hasattr(self, 'obtener_stock_actual_bulk'):
+                    stock_actual_map = self.obtener_stock_actual_bulk(codigos_unicos, sede)
+                else:
+                    self.log("[MBRP] obtener_stock_actual_bulk no encontrado en self", "ERROR")
+            except Exception as e:
+                self.log(f"[MBRP] Error obteniendo stock bulk: {e}", "ERROR")
+
             query_time = (datetime.now() - start_time).total_seconds()
-            self.log(f"Reporte 0: Consulta de últimas ventas completada en {query_time:.2f}s", "INFO")
+            self.log(f"Reporte 0: Consultas (ventas+stock) completadas en {query_time:.2f}s", "INFO")
 
             # 7) Calcular días del período seleccionado en el módulo MBRP
             dias_criterio = -1  # Default: nunca vendidos
@@ -10567,18 +10612,27 @@ class DatabaseApp:
                 
                 # Estructura MBRP: (codigo, desc, dept, group, sub, neto, rotacion, ...)
                 desc = str(item[1]) if len(item) > 1 and item[1] is not None else codigo
-                dept = item[2] if len(item) > 2 else None
-                grupo = item[3] if len(item) > 3 else None
-                sub = item[4] if len(item) > 4 else None
+                
+                # Resolver descripciones usando los mapas
+                c_dept = str(item[2]).strip() if len(item) > 2 and item[2] else ''
+                c_grupo = str(item[3]).strip() if len(item) > 3 and item[3] else ''
+                c_sub = str(item[4]).strip() if len(item) > 4 and item[4] else ''
+                
+                dept_desc = mapa_dept.get(c_dept, c_dept)
+                grupo_desc = mapa_grupo.get(c_grupo, c_grupo)
+                sub_desc = mapa_sub.get(c_sub, c_sub)
+                
                 rotacion = item[6] if len(item) > 6 else 'SIN_MOVIMIENTO'
+                current_stock = stock_actual_map.get(codigo, 0.0)
                 
                 productos_filtrados.append({
                     'codigo': codigo,
                     'descripcion': desc,
-                    'dept': dept,
-                    'grupo': grupo,
-                    'sub': sub,
+                    'dept': dept_desc,
+                    'grupo': grupo_desc,
+                    'sub': sub_desc,
                     'rotacion': rotacion,
+                    'stock': current_stock,
                     'dias_sin_venta': dias_sin_venta,
                     'fecha_ultima': fecha_ultima,
                 })
@@ -10642,40 +10696,34 @@ class DatabaseApp:
                 ws['A5'] = f"Total productos filtrados en MBRP: {len(datos_filtrados)}"
                 ws['A6'] = f"Productos {criterio_texto.lower()}: {len(productos_filtrados)}"
                 
-                # Encabezados de la tabla
-                headers = ['Código', 'Descripción', 'Departamento', 'Grupo', 'Subgrupo', 'Rotación', 'Días sin venta', 'Última venta']
+                # Encabezados actualizados
+                headers = ['Código', 'Descripción', 'Departamento', 'Grupo', 'Subgrupo', 'Rotación', 'Stock Actual', 'Días sin venta', 'Última venta']
                 for col, header in enumerate(headers, 1):
                     cell = ws.cell(row=8, column=col, value=header)
                     cell.font = Font(bold=True, color="FFFFFF")
                     cell.fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
                     cell.alignment = Alignment(horizontal='center', vertical='center')
-                
-                # Datos de productos
-                for i, producto in enumerate(productos_filtrados, 1):
-                    row = 8 + i
-                    ws.cell(row=row, column=1, value=producto['codigo'])
-                    ws.cell(row=row, column=2, value=producto['descripcion'][:60])
-                    ws.cell(row=row, column=3, value=producto['dept'] or '')
-                    ws.cell(row=row, column=4, value=producto['grupo'] or '')
-                    ws.cell(row=row, column=5, value=producto['sub'] or '')
-                    ws.cell(row=row, column=6, value=producto['rotacion'])
-                    
-                    # Días sin venta
-                    if producto['dias_sin_venta'] == -1 or producto['dias_sin_venta'] == 9999:
-                        ws.cell(row=row, column=7, value="NUNCA")
-                    else:
-                        ws.cell(row=row, column=7, value=producto['dias_sin_venta'])
-                    
-                    # Última venta
-                    if producto['fecha_ultima']:
-                        ws.cell(row=row, column=8, value=producto['fecha_ultima'].strftime('%d/%m/%Y'))
-                    else:
-                        ws.cell(row=row, column=8, value="NUNCA")
-                
-                # Ajustar ancho de columnas
-                column_widths = [12, 50, 15, 15, 15, 12, 15, 15]
+
+                for i, prod in enumerate(productos_filtrados, 9):
+                    # Formatear fecha
+                    fecha_str = "NUNCA"
+                    if prod['fecha_ultima']:
+                        fecha_str = prod['fecha_ultima'].strftime('%d-%m-%Y')
+                        
+                    ws.cell(row=i, column=1, value=prod['codigo'])
+                    ws.cell(row=i, column=2, value=prod['descripcion'])
+                    ws.cell(row=i, column=3, value=prod['dept'])
+                    ws.cell(row=i, column=4, value=prod['grupo'])
+                    ws.cell(row=i, column=5, value=prod['sub'])
+                    ws.cell(row=i, column=6, value=prod['rotacion']).alignment = Alignment(horizontal='center')
+                    ws.cell(row=i, column=7, value=prod['stock']).alignment = Alignment(horizontal='center')
+                    ws.cell(row=i, column=8, value=prod['dias_sin_venta']).alignment = Alignment(horizontal='center')
+                    ws.cell(row=i, column=9, value=fecha_str).alignment = Alignment(horizontal='center')
+
+                # Ajustar columnas
+                column_widths = [15, 60, 25, 25, 25, 12, 12, 15, 12]
                 for i, width in enumerate(column_widths, 1):
-                    ws.column_dimensions[chr(64 + i)].width = width
+                    ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = width
                 
                 # Guardar archivo
                 wb.save(filename)

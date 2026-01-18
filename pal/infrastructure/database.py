@@ -1552,7 +1552,8 @@ GROUP BY i.c_Codarticulo
                 p.C_DESC_CLIENTE,
                 p.C_NUMERO,
                 p.F_Fecha,
-                t.COD_PRINCIPAL
+                t.COD_PRINCIPAL,
+                p.N_Total
             FROM
                 MA_PAGOS p
             JOIN
@@ -1577,4 +1578,28 @@ GROUP BY i.c_Codarticulo
             self._log(f"Error generando reporte de compras por cliente: {e}", "ERROR")
             # Relanzar para que la UI pueda mostrar un mensaje de error.
             raise
+
+    def get_dolar_factor(self, connection):
+        """
+        Obtiene el factor de cambio para el dólar (código 101) desde MA_MONEDAS.
+        
+        Args:
+            connection: Conexión activa a la BD.
+            
+        Returns:
+             float: El factor de cambio, o 1.0 si no se encuentra.
+        """
+        try:
+            cursor = connection.cursor()
+            # Usamos NOLOCK para evitar bloqueos
+            cursor.execute("SELECT TOP 1 n_factor FROM MA_MONEDAS WITH (NOLOCK) WHERE C_CODMONEDA = '101'")
+            row = cursor.fetchone()
+            cursor.close()
+            
+            if row and row[0]:
+                return float(row[0])
+            return 1.0
+        except Exception as e:
+            self._log(f"Error obteniendo factor dolar: {e}", "WARNING")
+            return 1.0
 

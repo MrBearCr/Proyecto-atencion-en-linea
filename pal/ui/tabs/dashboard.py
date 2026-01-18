@@ -57,9 +57,14 @@ def setup_dashboard_tab(app):
     header_frame = ttk.Frame(main_frame)
     header_frame.pack(fill=tk.X, pady=(0, 15))
     
+    # Obtener nombre del usuario actual
+    username = "Usuario"
+    if app.current_user and app.current_user.get('username'):
+        username = app.current_user.get('username')
+    
     ttk.Label(
         header_frame, 
-        text="🏠 Centro de Control", 
+        text=f"👋 Bienvenido, {username}", 
         font=("Segoe UI", 20, "bold"),
         foreground="#004C97"
     ).pack(side=tk.LEFT)

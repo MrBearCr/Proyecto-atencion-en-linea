@@ -117,8 +117,8 @@ class SplashScreen(tk.Toplevel):
             self.progress["value"] = 100
 
     def start_animation(self):
-        # Temporizador mínimo de 3 segundos
-        self.after(3000, self.minimum_time_elapsed.set)
+        # Temporizador mínimo de 1 segundo (reducido de 3s para inicio más rápido)
+        self.after(1000, self.minimum_time_elapsed.set)
         # Animación de progreso
         self._update_progress()
         # Verificación periódica

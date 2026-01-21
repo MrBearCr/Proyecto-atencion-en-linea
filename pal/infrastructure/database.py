@@ -1603,3 +1603,50 @@ GROUP BY i.c_Codarticulo
             self._log(f"Error obteniendo factor dolar: {e}", "WARNING")
             return 1.0
 
+    def get_client_purchase_history(self, connection, client_ids: list, fecha_inicio, fecha_fin):
+        """
+        Obtiene el historial de compras de uno o más clientes agrupado por mes.
+        
+        Args:
+            connection: Conexión a VAD20
+            client_ids: Lista de IDs de clientes (C_RIF)
+            fecha_inicio: Fecha de inicio
+            fecha_fin: Fecha de fin
+            
+        Returns:
+            list: [(client_id, client_name, year_month, total), ...]
+        """
+        try:
+            if not client_ids:
+                return []
+            
+            # Crear placeholders para la consulta IN
+            placeholders = ','.join(['?' for _ in client_ids])
+            
+            query = f"""
+                SELECT 
+                    p.C_RIF,
+                    p.C_DESC_CLIENTE,
+                    FORMAT(p.F_Fecha, 'yyyy-MM') as YearMonth,
+                    SUM(p.N_Total) as TotalMes
+                FROM MA_PAGOS p WITH (NOLOCK)
+                WHERE p.C_RIF IN ({placeholders})
+                    AND p.F_Fecha BETWEEN CONVERT(DATETIME, ?, 120) AND CONVERT(DATETIME, ?, 120)
+                GROUP BY p.C_RIF, p.C_DESC_CLIENTE, FORMAT(p.F_Fecha, 'yyyy-MM')
+                ORDER BY p.C_RIF, FORMAT(p.F_Fecha, 'yyyy-MM')
+            """
+            
+            cursor = connection.cursor()
+            fecha_inicio_str = fecha_inicio.strftime('%Y-%m-%d 00:00:00')
+            fecha_fin_str = fecha_fin.strftime('%Y-%m-%d 23:59:59')
+            
+            # Parámetros: client_ids + fecha_inicio + fecha_fin
+            params = client_ids + [fecha_inicio_str, fecha_fin_str]
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+            cursor.close()
+            return rows
+        except Exception as e:
+            self._log(f"Error obteniendo historial de compras: {e}", "ERROR")
+            raise
+

@@ -9,7 +9,7 @@ This project is a desktop application for customer management, developed in Pyth
 *   **Language:** Python
 *   **GUI:** Tkinter
 *   **Database:** SQL Server (via `pyodbc`)
-*   **Dependencies:** `cryptography`, `keyring`, `tkcalendar`, `requests`, `matplotlib`, `win10toast`, `Pillow`, `bcrypt`, `packaging`
+*   **Dependencies:** `cryptography`, `keyring`, `tkcalendar`, `requests`, `matplotlib`, `win10toast`, `Pillow`, `bcrypt`, `packaging`, `pyodbc`
 
 ### Architecture
 
@@ -17,7 +17,7 @@ The application follows a modular architecture with the core logic separated int
 
 *   `core`: Contains the main business logic, including authentication, session management, and permissions.
 *   `infrastructure`: Manages the database connection and data access.
-*   `services`: Implements various services like caching, message sending, and data exports.
+*   `services`: Implements various services like caching, message sending, data exports, and business-specific modules for filtering and data processing (`filters`, `mbrp`, `stock`, `tra`).
 *   `ui`: Contains the user interface components.
 
 ## Building and Running

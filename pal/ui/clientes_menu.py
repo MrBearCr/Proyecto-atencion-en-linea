@@ -2,6 +2,7 @@
 import tkinter as tk
 from tkinter import ttk
 from pal.ui.tabs.clientes_reportes import ClientesReportesTab
+from pal.ui.tabs.clientes_estadisticas import ClientesEstadisticasTab
 
 class ClientesMenu(ttk.Frame):
     """
@@ -113,9 +114,9 @@ class ClientesMenu(ttk.Frame):
 
     def open_estadisticas(self):
         """
-        Placeholder para la acción de abrir el submódulo de estadísticas.
+        Abre el submódulo de estadísticas de clientes.
         """
-        print("Abriendo submódulo de Estadísticas de Clientes...")
-        # Lógica futura: self.controller.show_frame("ClientesEstadisticas")
+        self.controller.show_clientes_sub_view('estadisticas')
+        self.controller.log("Abriendo submódulo de Estadísticas de Clientes...", "INFO")
 
 

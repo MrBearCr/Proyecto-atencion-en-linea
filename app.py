@@ -331,12 +331,18 @@ class DatabaseApp:
             # Tu lógica de inicialización original
             self.ultimas_notificaciones = set()
             print("[DEBUG] Iniciando carga de la aplicación...", flush=True)
+            
+            # Reportar progreso: 10%
+            self.splash.set_progress(0.10)
 
             # Inicialización de componentes críticos
             self.cred_manager = SecureCredentialsManager()
             self.enviando = False
             self.session = SessionManager(self.root)
             self.session.start_session()
+            
+            # Reportar progreso: 20%
+            self.splash.set_progress(0.20)
             
             self.modules_enabled = load_modules_config()
             self.audit_log = AuditLogger()
@@ -367,8 +373,15 @@ class DatabaseApp:
             # Configuración de UI y bindings
             self.buttons = {}    
             self.root.protocol("WM_DELETE_WINDOW", self.shutdown)
+            
+            # Reportar progreso: 30%
+            self.splash.set_progress(0.30)
+            
             ui_setup_styles(self)
             self.setup_modern_ui()
+            
+            # Reportar progreso: 40%
+            self.splash.set_progress(0.40)
             # Deshabilitar UI dependiente de BD hasta conectar
             try:
                 self._set_ui_connected(False)
@@ -445,31 +458,21 @@ class DatabaseApp:
                 self.mbrp_sede_codigo = None
             
             # Sistema de Paginacion ya inicializado arriba
-            # Sistema de notificaciones y ayuda (inicializar antes de auto-connect)
+            # Sistema de notificaciones (inicializar antes de auto-connect)
             self.notification_manager = self.NotificationManager(self.root)  
             self.help_tooltips = self.HelpTooltips(self.root)  
-            self.setup_tooltips()
+            # Tooltips y update manager se inicializarán después del login para acelerar inicio
+            self.update_manager = None
             
-            # Inicializar gestor de actualizaciones automáticas
-            try:
-                update_url = load_update_url()  # Cargar desde configuración
-                self.update_manager = UpdateManager(
-                    app_name="Casapro Nexus",
-                    current_version=APP_VERSION,
-                    update_url=update_url,
-                    update_check_interval=3600,  # Verificar cada hora
-                    auto_download=False,  # Pedir confirmación al usuario
-                    auto_install=False
-                )
-                # Iniciar verificación periódica en segundo plano
-                self.update_manager.start_periodic_check(
-                    callback=lambda has_update: self._on_update_available(has_update)
-                )
-                print(f"[DEBUG] Gestor de actualizaciones inicializado (versión {APP_VERSION})", flush=True)
-            except Exception as e:
-                print(f"[WARNING] Error al inicializar actualizaciones: {e}", flush=True)
-                self.update_manager = None
+            # Reportar progreso: 50%
+            self.splash.set_progress(0.50)
             
+            # NO habilitar login aquí - esperar a que BD conecte
+            # self.root.after(0, lambda: self._enable_early_login())
+            
+            # Conectar BD (esto habilitará el login cuando tenga éxito)
+            # Reportar progreso: 60% al iniciar conexión
+            self.splash.set_progress(0.60)
             self.attempt_auto_connect()
             
             # Cargar configuraciones globales (exclusiones)
@@ -6155,7 +6158,19 @@ class DatabaseApp:
 
             if server and database:
                 total_start = time.perf_counter()
+                # Reportar progreso: 70% - conectando a BD
+                try:
+                    self.splash.set_progress(0.70)
+                except:
+                    pass
+                
                 if self.db_manager.connect(server, database, user, password):
+                    # Reportar progreso: 85% - BD conectada
+                    try:
+                        self.splash.set_progress(0.85)
+                    except:
+                        pass
+                    
                     self.update_status('connected', server=server, api_token=api_token)
                     self.log("Conexión a BD exitosa", "SUCCESS")
                     # Inicializar servicios de seguridad y auth
@@ -6167,7 +6182,23 @@ class DatabaseApp:
                     self.auth = AuthManager(self.db_manager)
                     # Crear admin si no existe (password predeterminada '123')
                     self._ensure_admin_user()
-                    self.root.after(0, lambda: self.splash.enable_login(self._splash_login_submit))
+                    
+                    # Reportar progreso: 95% - habilitando login
+                    try:
+                        self.splash.set_progress(0.95)
+                    except:
+                        pass
+                    
+                    # AHORA SÍ habilitar login (después de que BD esté lista)
+                    try:
+                        if hasattr(self, 'splash') and self.splash:
+                            self.splash.enable_login(self._splash_login_submit)
+                            self.splash.login_status.config(
+                                text="Ingrese sus credenciales", 
+                                foreground="#004C97"
+                            )
+                    except Exception:
+                        pass
 
                     # (Opcional) Verificar/crear esquema de seguridad luego del login
                     # Se hará tras login exitoso para evitar prompts durante el splash
@@ -7353,6 +7384,10 @@ class DatabaseApp:
         if hasattr(self, 'clientes_reportes_view') and self.clientes_reportes_view and self.clientes_reportes_view.winfo_exists():
             self.clientes_reportes_view.pack_forget()
         
+        # Vista de estadísticas
+        if hasattr(self, 'clientes_estadisticas_view') and self.clientes_estadisticas_view and self.clientes_estadisticas_view.winfo_exists():
+            self.clientes_estadisticas_view.pack_forget()
+        
         # Mostrar la vista solicitada
         if view_name == 'menu':
             if hasattr(self, 'clientes_menu_view'):
@@ -7363,6 +7398,12 @@ class DatabaseApp:
                 from pal.ui.tabs.clientes_reportes import ClientesReportesTab
                 self.clientes_reportes_view = ClientesReportesTab(self.clientes_tab, self)
             self.clientes_reportes_view.pack(fill=tk.BOTH, expand=True)
+        elif view_name == 'estadisticas':
+            # Crear la vista de estadísticas si no existe
+            if not hasattr(self, 'clientes_estadisticas_view') or not self.clientes_estadisticas_view or not self.clientes_estadisticas_view.winfo_exists():
+                from pal.ui.tabs.clientes_estadisticas import ClientesEstadisticasTab
+                self.clientes_estadisticas_view = ClientesEstadisticasTab(self.clientes_tab, self)
+            self.clientes_estadisticas_view.pack(fill=tk.BOTH, expand=True)
 
 
     def _create_admin_sedes_tab(self, parent):
@@ -8051,6 +8092,37 @@ class DatabaseApp:
                 self.update_status_label.config(text=f"Error: {str(e)}", foreground="red")
             messagebox.showerror("Error", f"No se pudo completar la actualización: {str(e)}")
 
+    def _initialize_post_login_components(self):
+        """Inicializa componentes no críticos después del login para acelerar el inicio."""
+        try:
+            # Setup tooltips
+            self.setup_tooltips()
+            
+            # Inicializar gestor de actualizaciones (30s después del login)
+            def _init_updates():
+                try:
+                    update_url = load_update_url()
+                    self.update_manager = UpdateManager(
+                        app_name="Casapro Nexus",
+                        current_version=APP_VERSION,
+                        update_url=update_url,
+                        update_check_interval=3600,
+                        auto_download=False,
+                        auto_install=False
+                    )
+                    self.update_manager.start_periodic_check(
+                        callback=lambda has_update: self._on_update_available(has_update)
+                    )
+                    print(f"[DEBUG] Gestor de actualizaciones inicializado (versión {APP_VERSION})", flush=True)
+                except Exception as e:
+                    print(f"[WARNING] Error al inicializar actualizaciones: {e}", flush=True)
+                    self.update_manager = None
+            
+            # Diferir inicialización de updates 30 segundos
+            threading.Timer(30.0, _init_updates).start()
+        except Exception as e:
+            print(f"[WARNING] Error en inicialización post-login: {e}", flush=True)
+
     def _splash_login_submit(self, username: str, password: str) -> tuple[bool, str]:
         """
         Validar credenciales desde el splash screen.
@@ -8088,45 +8160,55 @@ class DatabaseApp:
                 # Programar en hilo principal después de que la UI esté lista
                 self.root.after(500, self._prompt_change_admin_password)
             
-            # Verificar y crear esquema si es necesario
-            try:
-                missing = self.db_manager.check_security_schema()
-                if missing:
-                    self.db_manager.ensure_security_tables()
-            except Exception as e:
-                self.log(f"Nota: {e}", "INFO")
             
-            # Cargar permisos del usuario y configurar UI
-            from pal.core.permissions import PermissionsManager
-            self.permissions = PermissionsManager(self.db_manager)
-            user_id = self.current_user['id']
-            db_mods = self.permissions.obtener_modulos_disponibles(user_id) or []
-            
-            # Mapear nombres de BD a flags de app
-            flags_enabled = {DB_MODULE_TO_FLAG[m] for m in db_mods if m in DB_MODULE_TO_FLAG}
-            
-            # Actualizar módulos habilitados según permisos del usuario
-            for flag in ['stock', 'tra', 'mbrp', 'envio_mensajes', 'calendario', 'estadisticas', 'admin']:
-                self.modules_enabled[flag] = flag in flags_enabled
-            
-            self.log(f"Módulos disponibles: {', '.join(db_mods) or 'ninguno'}", "INFO")
-            
-            # Recrear workspace con módulos actualizados (importante para que aparezcan nuevas tabs)
-            try:
-                if hasattr(self, 'main_notebook') and self.main_notebook.winfo_exists():
-                    self.main_notebook.destroy()
-                self.create_main_workspace()
-                # Cargar lista de registros al iniciar si la pestaña existe
+            # Diferir operaciones pesadas para después del cierre del splash
+            # Esto acelera la respuesta de "Verificando..."
+            def _post_login_setup():
                 try:
-                    if hasattr(self, 'search_records'):
-                        self.search_records()
-                except Exception:
-                    pass
-            except Exception as e:
-                self.log(f"Error recreando workspace: {e}", "WARNING")
+                    # Verificar y crear esquema si es necesario
+                    try:
+                        missing = self.db_manager.check_security_schema()
+                        if missing:
+                            self.db_manager.ensure_security_tables()
+                    except Exception as e:
+                        self.log(f"Nota: {e}", "INFO")
+                    
+                    # Cargar permisos del usuario y configurar UI
+                    from pal.core.permissions import PermissionsManager
+                    self.permissions = PermissionsManager(self.db_manager)
+                    user_id = self.current_user['id']
+                    db_mods = self.permissions.obtener_modulos_disponibles(user_id) or []
+                    
+                    # Mapear nombres de BD a flags de app
+                    flags_enabled = {DB_MODULE_TO_FLAG[m] for m in db_mods if m in DB_MODULE_TO_FLAG}
+                    
+                    # Actualizar módulos habilitados según permisos del usuario
+                    for flag in ['stock', 'tra', 'mbrp', 'envio_mensajes', 'calendario', 'estadisticas', 'admin']:
+                        self.modules_enabled[flag] = flag in flags_enabled
+                    
+                    self.log(f"Módulos disponibles: {', '.join(db_mods) or 'ninguno'}", "INFO")
+                    
+                    # Recrear workspace con módulos actualizados
+                    try:
+                        if hasattr(self, 'main_notebook') and self.main_notebook.winfo_exists():
+                            self.main_notebook.destroy()
+                        self.create_main_workspace()
+                        # Cargar lista de registros al iniciar si la pestaña existe
+                        try:
+                            if hasattr(self, 'search_records'):
+                                self.search_records()
+                        except Exception:
+                            pass
+                    except Exception as e:
+                        self.log(f"Error recreando workspace: {e}", "WARNING")
+                    
+                    # Inicializar módulos en segundo plano
+                    threading.Thread(target=self._inicializar_modulos_paralelo, daemon=True).start()
+                except Exception as e:
+                    self.log(f"Error en setup post-login: {e}", "ERROR")
             
-            # Inicializar módulos en segundo plano
-            threading.Thread(target=self._inicializar_modulos_paralelo, daemon=True).start()
+            # Ejecutar setup después de 100ms (después de que el splash se cierre)
+            self.root.after(100, _post_login_setup)
             
             return True, "Login exitoso"
             
@@ -8267,6 +8349,8 @@ class DatabaseApp:
         def _handle_login(username, password):
             success, message = self._splash_login_submit(username, password)
             if success:
+                # Inicializar componentes diferidos después del login exitoso
+                self._initialize_post_login_components()
                 # Marcar login exitoso y cerrar
                 login_splash.login_success.set()
                 login_splash.after(100, lambda: [

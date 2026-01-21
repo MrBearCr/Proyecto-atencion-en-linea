@@ -893,25 +893,42 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
                 return 'Otra'
         
         def _get_stock_por_sede_tra(codigos: List[str]) -> Dict[str, Dict[str, int]]:
-            """Obtiene distribución de stock por sede para cada código (solo depósitos principales)."""
+            """
+            Obtiene distribución de stock por sede/grupo para cada código,
+            agrupando múltiples depósitos según reglas específicas.
+            """
             resultados: Dict[str, Dict[str, int]] = {}
             if not db_manager or not db_manager.ensure_connection() or not codigos:
                 return resultados
             try:
-                # Definir depósitos principales explícitamente
-                DEPOSITOS_VALIDOS = {
-                    '0301': 'Cabudare',
-                    '0101': 'Barinas',
-                    '0401': 'Guanare'
+                # Definir grupos de depósitos
+                # Barinas: 0101, 0102, 0108
+                # Cabudare: 0301, 0302
+                # Guanare: 0401, 0402
+                # CDT: 0106
+                # Transito SEDES: 0104, 0110, 0112
+                GRUPOS_DEPOSITOS = {
+                    'Barinas':  ['0101', '0102', '0108'],
+                    'Cabudare': ['0301', '0302'],
+                    'Guanare':  ['0401', '0402'],
+                    'CDT':      ['0106'],
+                    'Transito': ['0104', '0110', '0112']
                 }
+
+                # Crear un mapa inverso: deposito -> nombre_grupo
+                DEPOSITO_A_GRUPO = {}
+                for grupo, lista_deps in GRUPOS_DEPOSITOS.items():
+                    for d in lista_deps:
+                        DEPOSITO_A_GRUPO[d] = grupo
                 
                 MAX_IN = 2000
                 for i in range(0, len(codigos), MAX_IN):
                     chunk = codigos[i:i + MAX_IN]
                     placeholders = ','.join(['?'] * len(chunk))
                     
-                    # Filtrar solo por depósitos válidos
-                    depos_placeholders = "'" + "','".join(DEPOSITOS_VALIDOS.keys()) + "'"
+                    # Filtrar solo por depósitos que nos interesan
+                    todos_deps = list(DEPOSITO_A_GRUPO.keys())
+                    depos_placeholders = "'" + "','".join(todos_deps) + "'"
                     
                     sql = (
                         f"SELECT c_codarticulo, c_coddeposito, SUM(n_cantidad) "
@@ -925,16 +942,22 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
                         try:
                             cod_str = str(cod).strip()
                             dep_str = str(dep).strip()
-                            if dep_str not in DEPOSITOS_VALIDOS:
+                            
+                            # Identificar grupo
+                            grupo_nombre = DEPOSITO_A_GRUPO.get(dep_str)
+                            if not grupo_nombre:
                                 continue
                             
-                            sede_nombre = DEPOSITOS_VALIDOS[dep_str]
                             q = int(qty or 0)
                         except Exception:
                             continue
+                        
                         if cod_str not in resultados:
                             resultados[cod_str] = {}
-                        resultados[cod_str][sede_nombre] = resultados[cod_str].get(sede_nombre, 0) + q
+                        
+                        # Sumar al acumulador del grupo
+                        resultados[cod_str][grupo_nombre] = resultados[cod_str].get(grupo_nombre, 0) + q
+                
                 return resultados
             except Exception as e:
                 logger.error(f"[EXPORT TRA] Error obteniendo stock por sede: {e}")
@@ -960,7 +983,7 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
         
         # Agregar columnas de stock según modo ICH
         if ich_mode:
-            headers.extend(['Stock Cabudare', 'Stock Barinas', 'Stock Guanare', 'Stock Total'])
+                headers.extend(['Stock Cabudare', 'Stock Barinas', 'Stock Guanare', 'CDT', 'Transito SEDES', 'Stock Total'])
         else:
             headers.append('Stock')
         
@@ -1067,20 +1090,28 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
                 
                 # Columnas de stock según modo ICH
                 if ich_mode:
-                    # Stock por sede (3 columnas) + Stock Total
+                    # Stock por sede (5 columnas) + Stock Total
                     dist = stock_por_sede_map_tra.get(codigo_str, {})
                     stock_cabudare = dist.get('Cabudare', 0)
                     stock_barinas = dist.get('Barinas', 0)
                     stock_guanare = dist.get('Guanare', 0)
+                    stock_cdt = dist.get('CDT', 0)
+                    stock_transito = dist.get('Transito', 0)
+
                     # CORRECCION: El stock total debe ser la suma de TODOS los almacenes (global),
                     # mientras que las columnas individuales son restringidas (solo principales).
                     # stock_map_tra ya contiene la suma global porque se llamó con sede_codigo='00'
                     stock_total = int(stock_map_tra.get(codigo_str, 0) or 0)
+                    
                     ws_main.cell(row=row, column=current_col, value=stock_cabudare)
                     current_col += 1
                     ws_main.cell(row=row, column=current_col, value=stock_barinas)
                     current_col += 1
                     ws_main.cell(row=row, column=current_col, value=stock_guanare)
+                    current_col += 1
+                    ws_main.cell(row=row, column=current_col, value=stock_cdt)
+                    current_col += 1
+                    ws_main.cell(row=row, column=current_col, value=stock_transito)
                     current_col += 1
                     ws_main.cell(row=row, column=current_col, value=stock_total)
                     current_col += 1

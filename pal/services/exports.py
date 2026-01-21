@@ -1072,7 +1072,10 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
                     stock_cabudare = dist.get('Cabudare', 0)
                     stock_barinas = dist.get('Barinas', 0)
                     stock_guanare = dist.get('Guanare', 0)
-                    stock_total = stock_cabudare + stock_barinas + stock_guanare
+                    # CORRECCION: El stock total debe ser la suma de TODOS los almacenes (global),
+                    # mientras que las columnas individuales son restringidas (solo principales).
+                    # stock_map_tra ya contiene la suma global porque se llamó con sede_codigo='00'
+                    stock_total = int(stock_map_tra.get(codigo_str, 0) or 0)
                     ws_main.cell(row=row, column=current_col, value=stock_cabudare)
                     current_col += 1
                     ws_main.cell(row=row, column=current_col, value=stock_barinas)

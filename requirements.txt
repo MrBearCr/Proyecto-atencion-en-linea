@@ -8,3 +8,5 @@ win10toast
 Pillow
 bcrypt
 packaging
+pytest
+pytest-cov

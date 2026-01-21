@@ -893,19 +893,31 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
                 return 'Otra'
         
         def _get_stock_por_sede_tra(codigos: List[str]) -> Dict[str, Dict[str, int]]:
-            """Obtiene distribución de stock por sede para cada código (solo modo ICH, optimizado)."""
+            """Obtiene distribución de stock por sede para cada código (solo depósitos principales)."""
             resultados: Dict[str, Dict[str, int]] = {}
             if not db_manager or not db_manager.ensure_connection() or not codigos:
                 return resultados
             try:
+                # Definir depósitos principales explícitamente
+                DEPOSITOS_VALIDOS = {
+                    '0301': 'Cabudare',
+                    '0101': 'Barinas',
+                    '0401': 'Guanare'
+                }
+                
                 MAX_IN = 2000
                 for i in range(0, len(codigos), MAX_IN):
                     chunk = codigos[i:i + MAX_IN]
                     placeholders = ','.join(['?'] * len(chunk))
+                    
+                    # Filtrar solo por depósitos válidos
+                    depos_placeholders = "'" + "','".join(DEPOSITOS_VALIDOS.keys()) + "'"
+                    
                     sql = (
                         f"SELECT c_codarticulo, c_coddeposito, SUM(n_cantidad) "
                         f"FROM MA_DEPOPROD WITH (NOLOCK) "
                         f"WHERE c_codarticulo IN ({placeholders}) "
+                        f"AND c_coddeposito IN ({depos_placeholders}) "
                         f"GROUP BY c_codarticulo, c_coddeposito"
                     )
                     rows = db_manager.fetch_data(sql, chunk) or []
@@ -913,7 +925,10 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
                         try:
                             cod_str = str(cod).strip()
                             dep_str = str(dep).strip()
-                            sede_nombre = _map_deposito_to_sede_tra(dep_str)
+                            if dep_str not in DEPOSITOS_VALIDOS:
+                                continue
+                            
+                            sede_nombre = DEPOSITOS_VALIDOS[dep_str]
                             q = int(qty or 0)
                         except Exception:
                             continue

@@ -5664,6 +5664,11 @@ class DatabaseApp:
             self.tra_fecha_fin = fecha_fin
             self.tra_sede_codigo = sede
             
+            # Capturar estado del reporte masivo (con fallback seguro)
+            self.tra_include_zero_sales = False
+            if hasattr(self, 'tra_masivo_var'):
+                self.tra_include_zero_sales = self.tra_masivo_var.get()
+            
             # Mostrar estado de carga inmediatamente
             try:
                 self.api_status.config(text="TRA: Iniciando carga...", foreground="#004C97")
@@ -9033,7 +9038,8 @@ class DatabaseApp:
                     fecha_fin=self.tra_fecha_fin,
                     sede_codigo=self.tra_sede_codigo,
                     start_row=start,
-                    fetch_size=int(chunk_size)
+                    fetch_size=int(chunk_size),
+                    include_zero_sales=getattr(self, 'tra_include_zero_sales', False)
                 )
                 dt_ms = (time.perf_counter() - t0) * 1000.0
 

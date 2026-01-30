@@ -100,6 +100,24 @@ def setup_tra_tab(app):
     except Exception:
         can_view_dollars_tra = False
     
+    # Checkbox para Reporte Masivo (incluir ventas 0)
+    app.tra_masivo_var = tk.BooleanVar(value=False)
+    
+    can_view_massive = False
+    try:
+        if hasattr(app, 'permissions') and app.current_user:
+            can_view_massive = app.permissions.tiene_permiso(app.current_user['id'], 'TRA', 'masivo')
+    except Exception:
+        can_view_massive = False
+
+    if can_view_massive:
+        tra_masivo_check = ttk.Checkbutton(
+            top_controls,
+            text="Reporte Masivo",
+            variable=app.tra_masivo_var
+        )
+        tra_masivo_check.pack(side=tk.RIGHT, padx=5)
+    
     tra_dolares_check = ttk.Checkbutton(
         top_controls, 
         text="Ventas en $", 

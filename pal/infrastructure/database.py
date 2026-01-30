@@ -1127,7 +1127,7 @@ class DatabaseManager:
             return []
     
     def obtener_ventas_por_producto_chunk(self, fecha_inicio, fecha_fin, sede_codigo, 
-                                         start_row=1, fetch_size=1000):
+                                         start_row=1, fetch_size=1000, include_zero_sales=False):
         """Obtiene ventas TRA en chunks para carga paralela - OPTIMIZADO (soporta consulta global ICH)
         
         Args:
@@ -1136,6 +1136,7 @@ class DatabaseManager:
             sede_codigo: Código de sede/depósito
             start_row: Fila inicial (1-indexed)
             fetch_size: Cantidad de filas a obtener
+            include_zero_sales: Si True, incluye productos con neto <= 0 (devoluciones/sin venta)
             
         Returns:
             list: Lista de ventas en el chunk especificado
@@ -1144,67 +1145,70 @@ class DatabaseManager:
         - WITH (NOLOCK): Evita bloqueos de lectura (4x-10x más rápido)
         - Usa = en lugar de LIKE: Permite uso de índices
         - CTE pre-agregada: Reduce datos antes del JOIN costoso
-        - Filtra neto > 0: Solo productos con ventas reales
+        - Filtra neto > 0: Solo productos con ventas reales (si include_zero_sales=False)
         """
         try:
             # OPTIMIZACIÓN CRÍTICA: CTE + NOLOCK + filtro dinámico por depósito
             global_query = (sede_codigo in (None, '%', '00', 'ICH', 'ALL'))
-            if global_query:
-                query = """
-                    WITH VentasAgregadas AS (
-                        SELECT 
-                            RTRIM(LTRIM(i.c_Codarticulo)) AS codigo,
-                            SUM(CASE 
-                                WHEN i.c_Concepto = 'VEN' THEN i.n_Cantidad
-                                WHEN i.c_Concepto = 'DEV' THEN -i.n_Cantidad 
-                                ELSE 0 
-                            END) AS neto
-                        FROM TR_INVENTARIO i WITH (NOLOCK)
-                        WHERE i.f_fecha BETWEEN CONVERT(DATE, ?, 105) AND CONVERT(DATE, ?, 105)
-                            AND i.c_Concepto IN ('VEN', 'DEV')
-GROUP BY i.c_Codarticulo
-                        HAVING SUM(CASE 
+            
+            # Construir cláusula HAVING dinámicamente
+            having_clause = ""
+            if not include_zero_sales:
+                having_clause = """HAVING SUM(CASE 
                             WHEN i.c_Concepto = 'VEN' THEN i.n_Cantidad
                             WHEN i.c_Concepto = 'DEV' THEN -i.n_Cantidad 
                             ELSE 0 
-                        END) > 0
-                    )
+                        END) > 0"""
+            
+            # Parametros para la query
+            params = [fecha_inicio.strftime("%d-%m-%Y"), fecha_fin.strftime("%d-%m-%Y")]
+            
+            # CTE común - calcula ventas por producto
+            cte_part = f"""
+                WITH VentasAgregadas AS (
                     SELECT 
-                        RTRIM(LTRIM(v.codigo)) AS codigo,
+                        RTRIM(LTRIM(i.c_Codarticulo)) AS codigo,
+                        SUM(CASE 
+                            WHEN i.c_Concepto = 'VEN' THEN i.n_Cantidad
+                            WHEN i.c_Concepto = 'DEV' THEN -i.n_Cantidad 
+                            ELSE 0 
+                        END) AS neto
+                    FROM TR_INVENTARIO i WITH (NOLOCK)
+                    WHERE i.f_fecha BETWEEN CONVERT(DATE, ?, 105) AND CONVERT(DATE, ?, 105)
+                        AND i.c_Concepto IN ('VEN', 'DEV') 
+                        {'AND i.c_Deposito = ?' if not global_query else ''}
+                    GROUP BY i.c_Codarticulo
+                    {having_clause}
+                )
+            """
+            
+            if not global_query:
+                params.append(sede_codigo)
+
+            # Query principal
+            if include_zero_sales:
+                # MODO MASIVO: FROM MA_PRODUCTOS LEFT JOIN Ventas
+                # AGREGADO: p.C_CODIGO al ORDER BY para evitar duplicados/saltos en paginación de ceros
+                main_part = """
+                    SELECT 
+                        RTRIM(LTRIM(p.C_CODIGO)) AS codigo,
                         COALESCE(p.cu_descripcion_corta, 'SIN DESCRIPCIÓN') AS descripcion,
                         COALESCE(p.C_DEPARTAMENTO, '') AS departamento,
                         COALESCE(p.C_GRUPO, '') AS grupo,
                         COALESCE(p.C_SUBGRUPO, '') AS subgrupo,
-                        v.neto,
+                        COALESCE(v.neto, 0) AS neto,
                         COALESCE(p.n_precio1, 0) AS precio,
                         COALESCE(p.n_impuesto1, 0) AS impuesto1,
                         COALESCE(p.n_costoact, 0) AS costo
-                    FROM VentasAgregadas v
-                    LEFT JOIN MA_PRODUCTOS p WITH (NOLOCK) ON v.codigo = p.C_CODIGO
-                    ORDER BY v.neto DESC
+                    FROM MA_PRODUCTOS p WITH (NOLOCK)
+                    LEFT JOIN VentasAgregadas v ON p.C_CODIGO = v.codigo
+                    ORDER BY COALESCE(v.neto, 0) DESC, p.C_CODIGO ASC
                     OFFSET ? ROWS FETCH NEXT ? ROWS ONLY
                 """
             else:
-                query = """
-                    WITH VentasAgregadas AS (
-                        SELECT 
-                            RTRIM(LTRIM(i.c_Codarticulo)) AS codigo,
-                            SUM(CASE 
-                                WHEN i.c_Concepto = 'VEN' THEN i.n_Cantidad
-                                WHEN i.c_Concepto = 'DEV' THEN -i.n_Cantidad 
-                                ELSE 0 
-                            END) AS neto
-                        FROM TR_INVENTARIO i WITH (NOLOCK)
-                        WHERE i.f_fecha BETWEEN CONVERT(DATE, ?, 105) AND CONVERT(DATE, ?, 105)
-                            AND i.c_Concepto IN ('VEN', 'DEV')
-                            AND i.c_Deposito = ?
-                        GROUP BY i.c_Codarticulo
-                        HAVING SUM(CASE 
-                            WHEN i.c_Concepto = 'VEN' THEN i.n_Cantidad
-                            WHEN i.c_Concepto = 'DEV' THEN -i.n_Cantidad 
-                            ELSE 0 
-                        END) > 0
-                    )
+                # MODO NORMAL: FROM Ventas LEFT JOIN MA_PRODUCTOS (Optimizado)
+                # AGREGADO: v.codigo al ORDER BY para garantizar orden determinístico
+                main_part = """
                     SELECT 
                         RTRIM(LTRIM(v.codigo)) AS codigo,
                         COALESCE(p.cu_descripcion_corta, 'SIN DESCRIPCIÓN') AS descripcion,
@@ -1217,23 +1221,21 @@ GROUP BY i.c_Codarticulo
                         COALESCE(p.n_costoact, 0) AS costo
                     FROM VentasAgregadas v
                     LEFT JOIN MA_PRODUCTOS p WITH (NOLOCK) ON v.codigo = p.C_CODIGO
-                    ORDER BY v.neto DESC
+                    ORDER BY v.neto DESC, v.codigo ASC
                     OFFSET ? ROWS FETCH NEXT ? ROWS ONLY
                 """
             
-            fecha_inicio_str = fecha_inicio.strftime("%d-%m-%Y")
-            fecha_fin_str = fecha_fin.strftime("%d-%m-%Y")
-            offset = start_row - 1  # Convert to 0-indexed
+            query = cte_part + main_part
             
-            # Ejecutar usando conexión específica del hilo para evitar colisiones
+            offset = start_row - 1
+            params.extend([offset, fetch_size])
+            
+            # Ejecutar usando conexión específica del hilo
             thread_conn = self.get_thread_connection("tra_chunk")
             if not thread_conn:
                 return []
             cursor = thread_conn.cursor()
-            if global_query:
-                cursor.execute(query, (fecha_inicio_str, fecha_fin_str, offset, fetch_size))
-            else:
-                cursor.execute(query, (fecha_inicio_str, fecha_fin_str, sede_codigo, offset, fetch_size))
+            cursor.execute(query, params)
             rows = cursor.fetchall()
             cursor.close()
             return rows

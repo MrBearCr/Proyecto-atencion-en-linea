@@ -1,0 +1,96 @@
+    def connect(self, server, database, user, password, retry_attempts=2):
+        """
+        Connect to the database with retry logic and modern driver detection
+        """
+        self._log(f"Attempting to connect to server: {server}, database: {database}", "INFO")
+        
+        # Detect best driver
+        best_driver = "{SQL Server}"
+        try:
+            available_drivers = pyodbc.drivers()
+            for d in ["ODBC Driver 18 for SQL Server", "ODBC Driver 17 for SQL Server"]:
+                if d in available_drivers:
+                    best_driver = f"{{{d}}}"
+                    break
+            self._log(f"Using driver: {best_driver}", "INFO")
+        except Exception: pass
+
+        base_conn_str = f"DRIVER={best_driver};SERVER={server};Encrypt=no;TrustServerCertificate=yes;Connection Timeout=30;MARS_Connection=yes;"
+        if user: base_conn_str += f"UID={user};PWD={password or ''};"
+        else: base_conn_str += "Trusted_Connection=yes;"
+
+        for attempt in range(retry_attempts + 1):
+            try:
+                temp_conn = pyodbc.connect(base_conn_str)
+                temp_cursor = temp_conn.cursor()
+                temp_cursor.execute(f"IF NOT EXISTS (SELECT name FROM sys.databases WHERE name = '{database}') CREATE DATABASE {database}")
+                temp_conn.commit()
+                temp_conn.close()
+                break
+            except pyodbc.Error as e:
+                if attempt == retry_attempts: raise
+                time.sleep(1)
+
+        final_conn_str = base_conn_str + f"DATABASE={database};"
+        try:
+            with self._connect_lock:
+                self.server, self.database, self.user, self.password, self.driver = server, database, user, password, best_driver
+                self.conn = pyodbc.connect(final_conn_str)
+                self.cursor = self.conn.cursor()
+                if not self._schema_initialized:
+                    self.create_table()
+                    self._schema_initialized = True
+                return True
+        except pyodbc.Error as e:
+            raise Exception(f"{ErrorCode.DB_CONNECTION_FAILED}: {str(e)}") from e
+
+    def get_thread_connection(self, thread_name="default", force_new=False):
+        """Obtiene conexión segura para hilos con recuperación de errores"""
+        import threading
+        current_thread = threading.current_thread().name
+        thread_key = f"{thread_name}_{current_thread}"
+        
+        with self._pool_lock:
+            if force_new and thread_key in self._connection_pool:
+                try: self._connection_pool[thread_key].close()
+                except: pass
+                del self._connection_pool[thread_key]
+
+            if thread_key in self._connection_pool:
+                conn = self._connection_pool[thread_key]
+                try:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT 1")
+                    cursor.close()
+                    return conn
+                except Exception:
+                    del self._connection_pool[thread_key]
+            
+            try:
+                if not self.server: return None
+                conn_str = f"DRIVER={getattr(self, 'driver', '{SQL Server}')};SERVER={self.server};DATABASE={self.database};Encrypt=no;TrustServerCertificate=yes;Connection Timeout=30;MARS_Connection=yes;"
+                if self.user: conn_str += f"UID={self.user};PWD={self.password or ''};"
+                else: conn_str += "Trusted_Connection=yes;"
+                new_conn = pyodbc.connect(conn_str)
+                self._connection_pool[thread_key] = new_conn
+                return new_conn
+            except Exception: return None
+
+    def fetch_data(self, query, params=None):
+        """SELECT con reintentos y recuperación de conexión"""
+        for attempt in range(3):
+            cursor = None
+            try:
+                conn = self.get_thread_connection("fetch", force_new=(attempt > 0))
+                if not conn: continue
+                cursor = conn.cursor()
+                cursor.execute(query, params or ())
+                return cursor.fetchall()
+            except pyodbc.Error:
+                if attempt == 2: raise
+                time.sleep(0.5)
+            finally:
+                if cursor:
+                    try: cursor.close()
+                    except: pass
+        return []

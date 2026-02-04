@@ -9,6 +9,19 @@ y este proyecto adhiere al [Versionado Semántico](https://semver.org/lang/es/).
 
 ## [Sin publicar] - En desarrollo
 
+### 🐛 Corregido
+
+#### Error de Conexión a Base de Datos con Contraseña Vacía (SA)
+- **Archivos modificados**: 
+  - `pal/infrastructure/database.py`
+  - `posmigra/nexus-example/server/api.py`
+- **Problema**: El sistema fallaba al conectar a SQL Server cuando el usuario (ej. SA) no tiene contraseña, insertando el literal "None" en la cadena de conexión o enviando un atributo inválido.
+- **Solución**: 
+  - Asegurar que la contraseña sea siempre un string (aunque sea vacío) en `DatabaseManager`.
+  - Inicializar la contraseña como string vacío en el backend de migración si no se encuentra en la configuración.
+  - Permitir el guardado y encriptación de contraseñas vacías en la configuración.
+- **Impacto**: Permite la conexión exitosa a instancias de base de datos con autenticación SQL sin contraseña, corrigiendo el error "Invalid connection string attribute (0)".
+
 ### 🆕 Añadido
 
 #### Filtro de Proveedor en Estadísticas TRA/RI

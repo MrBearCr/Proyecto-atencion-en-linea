@@ -152,6 +152,47 @@ class SedeConfiguracionDB(Base):
     fecha_creacion = Column(DateTime, default=datetime.utcnow)
     fecha_modificacion = Column(DateTime, default=datetime.utcnow)
 
+
+# --- Legacy DB Models (Mapped to existing tables) ---
+
+class MaProductosDB(Base):
+    __tablename__ = "MA_PRODUCTOS"
+    C_CODIGO = Column(String(15), primary_key=True)
+    C_DESCRI = Column(String(255))
+    cu_descripcion_corta = Column(String(255))
+    C_DEPARTAMENTO = Column(String(50))
+    C_GRUPO = Column(String(50))
+    C_SUBGRUPO = Column(String(50))
+    n_precio1 = Column(Float)
+    n_impuesto1 = Column(Float)
+    n_costoact = Column(Float)
+    
+class MaDepoProdDB(Base):
+    __tablename__ = "MA_DEPOPROD"
+    c_codarticulo = Column(String(15), ForeignKey("MA_PRODUCTOS.C_CODIGO"), primary_key=True)
+    c_coddeposito = Column(String(10), primary_key=True)
+    n_cantidad = Column(Float)
+
+    producto = relationship("MaProductosDB")
+
+class TrInventarioDB(Base):
+    __tablename__ = "TR_INVENTARIO"
+    # Assuming a composite PK or unique ID exists, otherwise mapping might be tricky for pure ORM
+    # However, for reading, we can map minimal fields. rowid/identity usually exists but not specified in legacy code.
+    # We'll map what we use. If no PK, SQLAlchemy needs a workaround, usually mapping a candidate key.
+    # Legacy schema is often messy. We'll assume composite PK for now or just generic mapping for read-only.
+    # Given the usage in legacy app is raw SQL, we might primarily use raw SQL in CRUD too, but models help for type hints and potential ORM usage.
+    # For now, let's define it but be aware we might rely on Core for complex queries.
+    
+    # We'll use a dummy PK for mapping purposes if real one isn't known, or use known columns.
+    # Valid guess: c_uniq (often used in mixed schemas) or composite.
+    c_Documento = Column(String(20), primary_key=True) # Guessing a PK part
+    c_Concepto = Column(String(10), primary_key=True)
+    c_Codarticulo = Column(String(15), ForeignKey("MA_PRODUCTOS.C_CODIGO"))
+    n_Cantidad = Column(Float)
+    f_fecha = Column(DateTime)
+    c_Deposito = Column(String(10))
+
 # --- New Stock DB Model ---
 class StockDB(Base):
     __tablename__ = "pal_stock_alerts" # Example table name

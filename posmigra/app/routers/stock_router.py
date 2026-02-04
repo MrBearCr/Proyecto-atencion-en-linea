@@ -17,18 +17,16 @@ router = APIRouter(
 
 @router.get(
     "/alerts",
-    response_model=List[StockAlert], # Using StockAlert as response_model
+    response_model=List[StockAlert],
     summary="Get Stock Alerts"
 )
-async def get_stock_alerts_endpoint(db: Session = Depends(get_db)):
+async def get_stock_alerts_endpoint(
+    db: Session = Depends(get_db),
+    sede_codigo: str = Query("0301", alias="sede")
+):
     """
-    Retrieves a list of stock alerts.
+    Retrieves a list of live stock alerts for a specific branch.
     """
-    alerts = get_stock_alerts(db) # Call the actual CRUD function
-    
-    if not alerts:
-        return [] # Return empty list if no alerts, rather than 404
-        
-    return alerts
+    return get_stock_alerts(db, sede_codigo=sede_codigo)
 
 # You can add more endpoints here for specific stock items, inventory levels, etc.

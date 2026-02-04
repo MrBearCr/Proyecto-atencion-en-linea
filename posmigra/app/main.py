@@ -20,7 +20,7 @@ from app.models import (
     StockAlert, StockAlertDetail, JerarquiaProducto, ProductoVentas, ProductoMBRP, MBRPReportSummary,
     db_to_pydantic
 )
-from app.routers import auth, config as config_router
+from app.routers import auth, config as config_router, tra_router, mbrp_router, stock_router
 from app.crud import (
     get_user, get_user_by_username, get_users, create_user, update_user, delete_user,
     get_role, get_role_by_name, get_roles, create_role, update_role, delete_role,
@@ -144,6 +144,9 @@ async def read_root():
 # Include the auth router
 app.include_router(auth.router)
 app.include_router(config_router.router)
+app.include_router(tra_router.router)
+app.include_router(mbrp_router.router)
+app.include_router(stock_router.router)
 
 # --- User Management Endpoints ---
 # Define permission codes for user management
@@ -591,198 +594,7 @@ async def get_stock_alerts(
     )
     return paginated_data
 
-# --- TRA Endpoints ---
-TRA_SALES_READ = "TRA_SALES_READ"
-@app.get("/tra/sales/", response_model=List[ProductoVentas], tags=["TRA"])
-async def get_tra_sales_data(
-    db: Session = Depends(get_db),
-    dept_code: Optional[str] = Query(None, alias="department"),
-    group_code: Optional[str] = Query(None, alias="group"),
-    sub_code: Optional[str] = Query(None, alias="subgroup"),
-    search_text: Optional[str] = Query(None, alias="search"),
-    filter_rotacion: str = Query("TODAS", alias="rotation"),
-    page: int = 1,
-    page_size: int = 20,
-    # Requires authentication and TRA_SALES_READ permission
-    user: UserDB = Depends(lambda p_code=TRA_SALES_READ: require_permission(p_code))
-):
-    """Retrieves TRA sales data. Requires TRA_SALES_READ permission."""
-    logger.warning("Using mock data for TRA sales. Implement actual DB query.")
-    raw_tra_data = [
-        ('PROD001', 'Producto Uno', 'DEP1', 'GRP1', 'SUB1', 1500.50, 'ALTA', 10.0, 'CRITICO', 'ALTA'),
-        ('PROD002', 'Producto Dos', 'DEP1', 'GRP1', 'SUB1', 800.00, 'MEDIA', 8.0, 'BAJO', 'MEDIA'),
-        ('PROD003', 'Producto Tres', 'DEP1', 'GRP2', 'SUB2', 300.75, 'BAJA', 5.0, 'MEDIO', 'BAJA'),
-        ('PROD004', 'Producto Cuatro', 'DEP2', 'GRP3', 'SUB3', 1200.00, 'ALTA', 15.0, 'NORMAL', 'ALTA'),
-        ('PROD005', 'Producto Cinco', 'DEP1', 'GRP1', 'SUB1', 50.25, 'BAJA', 2.5, 'BAJO', 'MEDIA'),
-        ('PROD006', 'Producto Seis', 'DEP3', 'GRP4', 'SUB4', 0.00, 'SIN MOVIMIENTO', 0.0, 'NULO', 'NULO'),
-        ('PROD007', 'Producto Siete', 'DEP1', 'GRP1', 'SUB1', 950.00, 'ALTA', 9.0, 'MEDIO', 'ALTA'),
-    ]
-
-    user_favorites = set()
-    stock_alerts_data = {
-        'PROD001': ('Producto Uno', 10.0, 'CRITICO'),
-        'PROD002': ('Producto Dos', 8.0, 'BAJO'),
-        'PROD003': ('Producto Tres', 5.0, 'MEDIO'),
-        'PROD004': ('Producto Cuatro', 15.0, 'NORMAL'),
-        'PROD005': ('Producto Cinco', 2.5, 'BAJO'),
-        'PROD006': ('Producto Seis', 0.0, 'NULO'),
-        'PROD007': ('Producto Siete', 9.0, 'MEDIO'),
-    }
-
-    try:
-        filtered_tra_data = filter_ventas_tra(
-            raw_tra_data,
-            dept_code=dept_code,
-            group_code=group_code,
-            sub_code=sub_code,
-            search_text=search_text,
-            filter_rotacion=filter_rotacion,
-            favoritos=user_favorites,
-            alertas_stock=stock_alerts_data
-        )
-
-        paginated_data, total_pages, current_page = paginate_tra(
-            filtered_tra_data, page, page_size
-        )
-
-        response_data = []
-        for item in paginated_data:
-            try:
-                pv = ProductoVentas(
-                    codigo=item[0],
-                    descripcion=item[1],
-                    departamento=item[2],
-                    grupo=item[3],
-                    subgrupo=item[4],
-                    ventas_netas=_get_tra_neto(item),
-                    rotacion=item[6] if len(item) > 6 else "SIN CLASIFICAR"
-                )
-                response_data.append(pv)
-            except (IndexError, TypeError, ValueError) as e:
-                logger.warning(f"Skipping TRA item due to mapping error: {item} - {e}")
-                continue
-
-        return response_data
-    except Exception as e:
-        logger.error(f"Error fetching or processing TRA sales data: {e}")
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error al obtener y procesar datos de ventas TRA.")
-
-# --- MBRP Endpoints ---
-MBRP_REPORT_READ = "MBRP_REPORT_READ"
-@app.get("/mbrp/report/", response_model=List[ProductoMBRP], tags=["MBRP"])
-async def get_mbrp_report(
-    db: Session = Depends(get_db),
-    dept_code: Optional[str] = Query(None, alias="department"),
-    group_code: Optional[str] = Query(None, alias="group"),
-    sub_code: Optional[str] = Query(None, alias="subgroup"),
-    search_text: Optional[str] = Query(None, alias="search"),
-    im_threshold: float = Query(20.0, alias="im_threshold"),
-    sede_codigo: Optional[str] = Query(None, alias="sede"),
-    fecha_inicio_str: Optional[str] = Query(None, alias="start_date"),
-    fecha_fin_str: Optional[str] = Query(None, alias="end_date"),
-    page: int = 1,
-    page_size: int = 100,
-    # Requires authentication and MBRP_REPORT_READ permission
-    user: UserDB = Depends(lambda p_code=MBRP_REPORT_READ: require_permission(p_code))
-):
-    """Generates an MBRP report. Requires MBRP_REPORT_READ permission."""
-    fecha_inicio = None
-    fecha_fin = None
-    if fecha_inicio_str:
-        try:
-            fecha_inicio = datetime.strptime(fecha_inicio_str, "%Y-%m-%d")
-        except ValueError:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Formato de fecha inválido para start_date. Use YYYY-MM-DD.")
-    if fecha_fin_str:
-        try:
-            fecha_fin = datetime.strptime(fecha_fin_str, "%Y-%m-%d")
-        except ValueError:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Formato de fecha inválido para end_date. Use YYYY-MM-DD.")
-
-    if fecha_inicio and fecha_fin and fecha_fin < fecha_inicio:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="La fecha de fin no puede ser anterior a la fecha de inicio.")
-
-    logger.warning("Using mock data for MBRP analysis. Implement actual DB query.")
-    raw_tra_data_for_mbrp = [
-        ('PROD001', 'Producto Uno', 'DEP1', 'GRP1', 'SUB1', 1500.50, 'ALTA', 10.0, 1.6, 5.0, 10.0),
-        ('PROD002', 'Producto Dos', 'DEP1', 'GRP1', 'SUB1', 800.00, 'MEDIA', 8.0, 1.28, 4.0, 8.0),
-        ('PROD003', 'Producto Tres', 'DEP1', 'GRP2', 'SUB2', 300.75, 'BAJA', 5.0, 0.8, 2.5, 5.0),
-        ('PROD004', 'Producto Cuatro', 'DEP2', 'GRP3', 'SUB3', 1200.00, 'ALTA', 15.0, 2.4, 7.0, 15.0),
-        ('PROD005', 'Producto Cinco', 'DEP1', 'GRP1', 'SUB1', 50.25, 'BAJA', 2.5, 0.4, 1.0, 2.5),
-        ('PROD006', 'Producto Seis', 'DEP3', 'GRP4', 'SUB4', 0.00, 'SIN MOVIMIENTO', 0.0, 0.0, 0.0, 0.0),
-        ('PROD007', 'Producto Siete', 'DEP1', 'GRP1', 'SUB1', 950.00, 'ALTA', 9.0, 1.44, 4.5, 9.0),
-        ('PROD008', 'Producto Ocho', 'DEP1', 'GRP1', 'SUB1', 5.50, 'BAJA', 1.0, 0.16, 0.5, 1.0),
-        ('PROD009', 'Producto Nueve', 'DEP1', 'GRP1', 'SUB1', 10.00, 'BAJA', 2.0, 0.32, 0.6, 2.0),
-    ]
-
-    try:
-        filtered_tra_data = filter_by_hierarchy(
-            raw_tra_data_for_mbrp,
-            dept_code=dept_code,
-            group_code=group_code,
-            sub_code=sub_code,
-            get_dept=lambda r: r[2] if len(r) > 2 else None,
-            get_group=lambda r: r[3] if len(r) > 3 else None,
-            get_sub=lambda r: r[4] if len(r) > 4 else None,
-            missing_strategy="exclude",
-        )
-
-        if search_text:
-            text = search_text.strip().lower()
-            filtered_tra_data = [
-                r for r in filtered_tra_data if len(r) >= 2 and (
-                    text in str(r[0]).lower() or text in str(r[1]).lower()
-                )
-            ]
-
-        if sede_codigo:
-            logger.warning("Sede filtering is a placeholder. Implement actual logic for sede filtering.")
-
-        indices_movilidad = calcular_indice_movilidad(filtered_tra_data)
-
-        classified_data = []
-        for item in filtered_tra_data:
-            if len(item) >= 11:
-                codigo, descripcion, departamento, grupo, subgrupo, neto_ventas, _, precio, impuesto1, costo, stock_actual = item[:11]
-                neto = neto_ventas if neto_ventas is not None else 0.0
-                im = indices_movilidad.get(codigo, 0.0)
-
-                rotacion_mbrp_class = "SIN_MOVIMIENTO"
-                if neto > 0:
-                    if im <= 10.0: rotacion_mbrp_class = "BAJA"
-                    elif im <= 30.0: rotacion_mbrp_class = "MEDIA"
-                    else: rotacion_mbrp_class = "ALTA"
-
-                monto_vendido = neto
-                monto_comprado = costo * (stock_actual if stock_actual is not None else 0)
-                diferencia = monto_vendido - monto_comprado
-                margen_pct = (diferencia / monto_vendido * 100) if monto_vendido and monto_vendido > 0 else 0.0
-
-                mbrp_item = ProductoMBRP(
-                    codigo=codigo, descripcion=descripcion, departamento=departamento, grupo=grupo, subgrupo=subgrupo,
-                    ventas_netas=neto, rotacion=rotacion_mbrp_class, monto_vendido=monto_vendido,
-                    monto_comprado=monto_comprado, diferencia=diferencia, margen_pct=margen_pct,
-                    im_movilidad=im, stock_actual=stock_actual if stock_actual is not None else 0
-                )
-                classified_data.append(mbrp_item)
-            else:
-                logger.warning(f"Skipping MBRP item due to insufficient data: {item}")
-
-        if im_threshold is not None:
-            filtered_by_im = [item for item in classified_data if item.im_movilidad is not None and item.im_movilidad <= im_threshold]
-        else:
-            filtered_by_im = classified_data
-
-        paginated_data, total_pages, current_page = paginate(
-            filtered_by_im, page, page_size
-        )
-        return paginated_data
-
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        logger.error(f"Error generating MBRP report: {e}")
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error al generar el reporte MBRP.")
+# Redundant mocks removed. Integrated via routers.
 
 # --- Health Check ---
 @app.get("/health", tags=["General"])

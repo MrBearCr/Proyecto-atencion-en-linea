@@ -10340,7 +10340,8 @@ class DatabaseApp:
                     dias_stock = 0
                 
                 # Determinar tags de color por rotación e Índice de Movilidad con filas alternadas
-                tag_base_rotacion = str(rotacion).lower()
+                # Reemplazar espacios y guiones para que coincidan con los tags configurados en mbrp.py
+                tag_base_rotacion = str(rotacion).lower().replace(" ", "_")
                 
                 # Tag por Índice de Movilidad (prioridad sobre rotación)
                 if im_porcentaje < 5.0:

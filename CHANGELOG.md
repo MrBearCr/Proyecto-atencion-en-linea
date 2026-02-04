@@ -23,6 +23,10 @@ y este proyecto adhiere al [Versionado Semántico](https://semver.org/lang/es/).
   - Se implementó un menú contextual con clic derecho: "🔍 Ver proveedores".
   - Se agregó el campo `n_costo` (costo de compra) a la visualización.
   - Se implementó un sistema de permisos para controlar qué usuarios pueden usar la función.
+- **Mejoras en MBRP**:
+  - Sede predeterminada cambiada a **00 - ICH**.
+  - Etiquetas de rotación actualizadas: **Baja** (IM > 30), **Baja-moderada** (10 < IM <= 30), **Critico** (IM <= 10).
+  - Estilos visuales ajustados para las nuevas etiquetas.
 - **Beneficio**: 
   - Acceso instantáneo a la cadena de suministro y costos por producto.
   - Visibilidad de números de compra, fechas y costos directamente en la tabla de análisis.

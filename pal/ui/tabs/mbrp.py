@@ -47,7 +47,7 @@ def setup_mbrp_tab(app):
     app.mbrp_sede_var = tk.StringVar()
     app.mbrp_sede_combo = ttk.Combobox(fecha_frame, textvariable=app.mbrp_sede_var, state='readonly', width=18)
     app.mbrp_sede_combo['values'] = ["00 - ICH", "0301 - Cabudare", "0401 - Guanare", "0101 - Barinas"]
-    app.mbrp_sede_combo.current(1)
+    app.mbrp_sede_combo.current(0)
     app.mbrp_sede_combo.pack(side=tk.LEFT)
 
     # Aviso al seleccionar ICH (consulta global)
@@ -195,7 +195,7 @@ def setup_mbrp_tab(app):
         "Código": {"width": 80, "anchor": "center"},
         "Descripción": {"width": 250, "anchor": "w"},
         "Rotación": {"width": 80, "anchor": "center"},
-        "Ventas": {"width": 100, "anchor": "e"},
+        "Ventas": {"width": 100, "anchor": "center"},
         "Stock Actual": {"width": 90, "anchor": "center"},
         "Días de Stock": {"width": 90, "anchor": "center"},
         "IM %": {"width": 80, "anchor": "center"},
@@ -211,18 +211,16 @@ def setup_mbrp_tab(app):
         app.mbrp_tree.column(col, **column_config.get(col, {"width": 120, "anchor": "center"}))
 
     # Colores para MBRP - resaltar productos de BAJA movilidad con filas alternadas
-    app.mbrp_tree.tag_configure('alta', background='#607D8B', foreground='#FFFFFF', font=('', 11))  # Gris azulado vibrante (menos importante en MBRP)
-    app.mbrp_tree.tag_configure('media', background='#FF9800', foreground='#FFFFFF', font=('', 11))  # Naranja vibrante
-    app.mbrp_tree.tag_configure('baja', background='#E91E63', foreground='#FFFFFF', font=('', 11, 'bold'))  # Rosa vibrante + negrita
-    app.mbrp_tree.tag_configure('sin_movimiento', background='#D32F2F', foreground='#FFFFFF', font=('', 11, 'bold'))  # Rojo vibrante + texto blanco
+    app.mbrp_tree.tag_configure('baja', background='#607D8B', foreground='#FFFFFF', font=('', 11))  # Gris azulado (Anteriormente ALTA)
+    app.mbrp_tree.tag_configure('baja-moderada', background='#FF9800', foreground='#FFFFFF', font=('', 11))  # Naranja (Anteriormente MEDIA)
+    app.mbrp_tree.tag_configure('critico', background='#D32F2F', foreground='#FFFFFF', font=('', 11, 'bold'))  # Rojo (Anteriormente BAJA/SIN_MOVIMIENTO)
     app.mbrp_tree.tag_configure('sin_clasificar', background='#9C27B0', foreground='#FFFFFF', font=('', 11))  # Púrpura vibrante
     app.mbrp_tree.tag_configure('loading', background='#2196F3', foreground='#FFFFFF', font=('', 12, 'italic'))  # Azul vibrante
     
     # Estilos alternados para mejor distinción de filas
-    app.mbrp_tree.tag_configure('alta_alt', background='#546E7A', foreground='#FFFFFF', font=('', 11))  # Gris azulado más oscuro
-    app.mbrp_tree.tag_configure('media_alt', background='#F57C00', foreground='#FFFFFF', font=('', 11))  # Naranja más oscuro
-    app.mbrp_tree.tag_configure('baja_alt', background='#C2185B', foreground='#FFFFFF', font=('', 11, 'bold'))  # Rosa más oscuro
-    app.mbrp_tree.tag_configure('sin_movimiento_alt', background='#B71C1C', foreground='#FFFFFF', font=('', 11, 'bold'))  # Rojo más oscuro
+    app.mbrp_tree.tag_configure('baja_alt', background='#546E7A', foreground='#FFFFFF', font=('', 11))
+    app.mbrp_tree.tag_configure('baja-moderada_alt', background='#F57C00', foreground='#FFFFFF', font=('', 11))
+    app.mbrp_tree.tag_configure('critico_alt', background='#B71C1C', foreground='#FFFFFF', font=('', 11, 'bold'))
     app.mbrp_tree.tag_configure('sin_clasificar_alt', background='#7B1FA2', foreground='#FFFFFF', font=('', 11))  # Púrpura más oscuro
     
     # Colores adicionales por Índice de Movilidad

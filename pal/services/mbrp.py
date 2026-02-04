@@ -340,18 +340,17 @@ def clasificar_rotacion_mbrp(ventas_data: List) -> List:
             neto = float(item[5]) if item[5] is not None else 0.0
             
             # Clasificación específica para MBRP (enfoque en baja rotación)
-            # SIN_MOVIMIENTO: IM = 0% O neto <= 0
-            if im == 0.0 or neto <= 0:
-                rotacion = "SIN_MOVIMIENTO"
+            # CRITICO: IM <= 10% O neto <= 0 (incluye sin movimiento)
+            if im <= 10.0 or neto <= 0:
+                rotacion = "CRITICO"
                 clasificacion_stats['sin_movimiento'] += 1
-            elif im <= 10.0:
-                rotacion = "BAJA"
-                clasificacion_stats['baja'] += 1
+            # BAJA-MODERADA: 10 < IM <= 30%
             elif im <= 30.0:
-                rotacion = "MEDIA"
+                rotacion = "BAJA-MODERADA"
                 clasificacion_stats['media'] += 1
+            # BAJA: IM > 30% (anteriormente ALTA)
             else:
-                rotacion = "ALTA"  # Normalmente se filtraría en MBRP
+                rotacion = "BAJA"
                 clasificacion_stats['alta'] += 1
             
             # Convertir a lista mutable y añadir clasificación

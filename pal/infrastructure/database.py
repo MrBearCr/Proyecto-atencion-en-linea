@@ -1652,3 +1652,30 @@ class DatabaseManager:
             self._log(f"Error obteniendo historial de compras: {e}", "ERROR")
             raise
 
+    def obtener_proveedores_detalle_por_producto(self, cod_producto):
+        """
+        Obtiene detalles de proveedores asociados a un producto desde MA_PRODXPROV y MA_PROVEEDORES.
+        
+        Args:
+            cod_producto (str): Código del producto.
+            
+        Returns:
+            list: Lista de tuplas (c_codprovee, c_descripcio, c_numero_compra, d_fecha)
+        """
+        try:
+            query = """
+                SELECT 
+                    px.c_codprovee, 
+                    pr.c_descripcio, 
+                    px.c_numero_compra, 
+                    px.d_fecha,
+                    px.n_costo
+                FROM MA_PRODXPROV px WITH (NOLOCK)
+                LEFT JOIN MA_PROVEEDORES pr WITH (NOLOCK) ON px.c_codprovee = pr.c_codproveed
+                WHERE px.c_codigo = ?
+                ORDER BY px.d_fecha DESC
+            """
+            return self.fetch_data(query, (str(cod_producto).strip(),))
+        except Exception as e:
+            self._log(f"Error obteniendo detalles de proveedores para {cod_producto}: {e}", "ERROR")
+            return []

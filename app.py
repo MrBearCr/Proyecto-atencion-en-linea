@@ -11010,6 +11010,118 @@ class DatabaseApp:
 
         _refresh_excl_list()
 
+
+    def mostrar_context_menu_tra(self, event):
+        """Muestra menú contextual en la tabla TRA"""
+        # Verificar permiso
+        can_view = False
+        try:
+            if hasattr(self, 'permissions') and self.current_user:
+                can_view = self.permissions.tiene_permiso(self.current_user['id'], 'TRA', 'ver_proveedores')
+            if self.current_user and self.current_user.get('username','').lower() == 'admin':
+                can_view = True
+        except Exception:
+            can_view = False
+        
+        if not can_view:
+            return
+
+        item = self.tra_tree.identify_row(event.y)
+        if item:
+            self.tra_tree.selection_set(item)
+            menu = tk.Menu(self.root, tearoff=0)
+            menu.add_command(label="🔍 Ver proveedores", command=lambda: self.ver_proveedores(self.tra_tree, "tra"))
+            menu.post(event.x_root, event.y_root)
+
+    def mostrar_context_menu_mbrp(self, event):
+        """Muestra menú contextual en la tabla MBRP"""
+        # Verificar permiso
+        can_view = False
+        try:
+            if hasattr(self, 'permissions') and self.current_user:
+                can_view = self.permissions.tiene_permiso(self.current_user['id'], 'MBRP', 'ver_proveedores')
+            if self.current_user and self.current_user.get('username','').lower() == 'admin':
+                can_view = True
+        except Exception:
+            can_view = False
+        
+        if not can_view:
+            return
+
+        item = self.mbrp_tree.identify_row(event.y)
+        if item:
+            self.mbrp_tree.selection_set(item)
+            menu = tk.Menu(self.root, tearoff=0)
+            menu.add_command(label="🔍 Ver proveedores", command=lambda: self.ver_proveedores(self.mbrp_tree, "mbrp"))
+            menu.post(event.x_root, event.y_root)
+
+    def ver_proveedores(self, tree, module_type):
+        """Carga y muestra proveedores para el producto seleccionado en modo jerárquico"""
+        selected = tree.selection()
+        if not selected:
+            return
+        
+        parent_item = selected[0]
+        # Si ya tiene hijos, colapsar/expandir o no hacer nada si ya están cargados
+        if tree.get_children(parent_item):
+            # Si ya tiene hijos, simplemente alternar expansión
+            if tree.item(parent_item, "open"):
+                tree.item(parent_item, open=False)
+            else:
+                tree.item(parent_item, open=True)
+            return
+
+        values = tree.item(parent_item, "values")
+        if not values:
+            return
+            
+        cod_producto = values[0] # El código siempre es la primera columna
+        
+        try:
+            # Mostrar indicador de carga
+            temp_id = tree.insert(parent_item, tk.END, values=("Cargando proveedores...", "", "", "", "", "", "", "", ""))
+            tree.item(parent_item, open=True)
+            self.root.update_idletasks()
+
+            # Consultar base de datos
+            proveedores = self.db_manager.obtener_proveedores_detalle_por_producto(cod_producto)
+            
+            # Eliminar indicador de carga
+            tree.delete(temp_id)
+
+            if not proveedores:
+                tree.insert(parent_item, tk.END, values=("Sin proveedores registrados", "", "", "", "", "", "", "", ""))
+                return
+
+            # Insertar proveedores como hijos
+            # El formato debe ajustarse a las columnas de cada treeview para que se vea bien
+            # Columnas TRA: "Código", "Descripción", "Rotación", "Ventas", "Representación %", "Stock Actual", "Stock Ideal", "Días Restantes", "Estado Stock"
+            # Columnas MBRP: "Código", "Descripción", "Rotación", "Ventas", "Stock Actual", "Días de Stock", "IM %", "Última Venta"
+            
+            for prov in proveedores:
+                p_cod = prov[0]
+                p_nom = prov[1]
+                p_num = prov[2]
+                p_fec = prov[3].strftime('%Y-%m-%d') if prov[3] else "N/A"
+                p_cos = prov[4] if len(prov) > 4 else 0.0
+                
+                # Formatear valores para que quepan en las columnas existentes
+                if module_type == "tra":
+                    child_values = ("", f"PROV: {p_nom} ({p_cod})", f"COSTO: {p_cos:,.2f}", f"N° CP: {p_num}", f"FECHA: {p_fec}", "", "", "", "")
+                else: # mbrp
+                    child_values = ("", f"PROV: {p_nom} ({p_cod})", f"COSTO: {p_cos:,.2f}", f"N° CP: {p_num}", "", f"FECHA: {p_fec}", "", "")
+                
+                tree.insert(parent_item, tk.END, values=child_values, tags=('prov_child',))
+            
+            # Estilo para los hijos proveedores
+            tree.tag_configure('prov_child', background='#F0F0F0', foreground='#555555')
+            
+        except Exception as e:
+            self.log(f"Error al cargar proveedores: {e}", "ERROR")
+            try: tree.delete(temp_id)
+            except: pass
+            tree.insert(parent_item, tk.END, values=("Error al cargar datos", "", "", "", "", "", "", "", ""))
+
 if __name__ == "__main__":
     root = tk.Tk() 
     root.withdraw()

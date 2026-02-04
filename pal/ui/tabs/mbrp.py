@@ -177,7 +177,10 @@ def setup_mbrp_tab(app):
     tree_frame.pack(fill=tk.BOTH, expand=True)
 
     columns = ("Código", "Descripción", "Rotación", "Ventas", "Stock Actual", "Días de Stock", "IM %", "Última Venta")
-    app.mbrp_tree = ttk.Treeview(tree_frame, columns=columns, show='headings', height=10)
+    app.mbrp_tree = ttk.Treeview(tree_frame, columns=columns, show='tree headings', height=10)
+    
+    # Configurar columna ID (árbol) para expandir proveedores
+    app.mbrp_tree.column("#0", width=30, stretch=tk.NO)
     
     # Configurar tamaño de fuente y altura de filas más grandes
     style = ttk.Style()
@@ -275,6 +278,7 @@ def setup_mbrp_tab(app):
     
     # Bindings de eventos
     app.mbrp_tree.bind('<Button-1>', on_mbrp_click)
+    app.mbrp_tree.bind('<Button-3>', lambda e: getattr(app, 'mostrar_context_menu_mbrp', lambda ev: None)(e))
     app.mbrp_tree.bind('<<TreeviewSelect>>', on_mbrp_select)
     
     # Layout

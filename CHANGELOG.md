@@ -11,6 +11,27 @@ y este proyecto adhiere al [Versionado Semántico](https://semver.org/lang/es/).
 
 ### 🆕 Añadido
 
+#### Función "Ver proveedores" en RI y MBRP
+- **Archivos modificados**: 
+  - `pal/infrastructure/database.py` (nueva consulta SQL)
+  - `pal/ui/tabs/tra.py` (habilitar modo árbol y clic derecho)
+  - `pal/ui/tabs/mbrp.py` (habilitar modo árbol y clic derecho)
+  - `app.py` (lógica de menú contextual y carga de hijos)
+- **Razón**: Los usuarios necesitaban consultar rápidamente los proveedores asociados a un producto y sus últimas compras sin salir de los módulos de rotación.
+- **Solución**: 
+  - Se habilitó el modo jerárquico (árbol) en las tablas de RI (TRA) y MBRP.
+  - Se implementó un menú contextual con clic derecho: "🔍 Ver proveedores".
+  - Se agregó el campo `n_costo` (costo de compra) a la visualización.
+  - Se implementó un sistema de permisos para controlar qué usuarios pueden usar la función.
+- **Beneficio**: 
+  - Acceso instantáneo a la cadena de suministro y costos por producto.
+  - Visibilidad de números de compra, fechas y costos directamente en la tabla de análisis.
+  - Control de seguridad mediante permisos RBAC.
+- **Detalles técnicos**:
+  - **Consulta**: Join entre `MA_PRODXPROV` y `MA_PROVEEDORES` incluyendo `n_costo`.
+  - **Permisos**: Nuevos códigos `tra.ver_proveedores` y `mbrp.ver_proveedores`.
+  - **Migración**: Creada `docs/migrations/007_agregar_permiso_ver_proveedores.sql`.
+
 #### Filtro de Proveedor en Estadísticas TRA/RI
 - **Archivos modificados**: 
   - `pal/ui/tabs/stats.py` (lógica de filtrado y estado)

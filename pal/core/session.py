@@ -14,7 +14,7 @@ class SessionManager:
     def __init__(self, root: tk.Tk)-> None:
         self.root: tk.Tk= root
         self.last_activity = time.time()
-        self.timeout = 900 # 15 minutos
+        self.timeout = 18000 # 5 horas (18000 segundos)
         self.session_active: bool = False
         self.enviando = False
         self.progress = None

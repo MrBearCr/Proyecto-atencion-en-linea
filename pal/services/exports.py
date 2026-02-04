@@ -843,14 +843,16 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
         ws_main['A1'].font = header_font
         ws_main['A1'].fill = header_fill
         
-        # Verificar permiso para ver costo y utilidad
         mostrar_costo_utilidad = False
+        mostrar_proveedores = False
         if permissions_manager and current_user_id:
             try:
                 mostrar_costo_utilidad = permissions_manager.tiene_permiso(current_user_id, 'TRA', 'ver_costo_utilidad')
                 logger.info(f"Permiso ver_costo_utilidad para TRA: {mostrar_costo_utilidad}")
+                mostrar_proveedores = permissions_manager.tiene_permiso(current_user_id, 'TRA', 'ver_proveedores')
+                logger.info(f"Permiso ver_proveedores para TRA: {mostrar_proveedores}")
             except Exception as e:
-                logger.warning(f"Error verificando permiso ver_costo_utilidad: {e}")
+                logger.warning(f"Error verificando permisos TRA: {e}")
         
         # Helper para obtener stock actual por producto
         def _get_stock_actual_bulk_tra(codigos: List[str], deposito: Optional[str]) -> Dict[str, int]:
@@ -994,6 +996,15 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
             stock_map_tra = _get_stock_actual_bulk_tra(codigos_unicos_tra, sede_stock)
             if ich_mode:
                 stock_por_sede_map_tra = _get_stock_por_sede_tra(codigos_unicos_tra)
+            
+            # Cargar últimos proveedores si se tiene permiso
+            proveedores_map_tra = {}
+            if mostrar_proveedores:
+                try:
+                    proveedores_map_tra = db_manager.obtener_ultimas_compras_bulk(codigos_unicos_tra)
+                    logger.info(f"[EXPORT TRA] Cargados {len(proveedores_map_tra)} proveedores")
+                except Exception as e:
+                    logger.warning(f"Error cargando proveedores para export: {e}")
         
         # Headers de la tabla (fila 7) - Orden: Ventas Netas, Stock/Stocks, Estado Stock, Rotación
         headers = ['Código', 'Descripción', 'Departamento', 'Grupo', 'Subgrupo', 'Ventas Netas']
@@ -1013,6 +1024,9 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
         if mostrar_costo_utilidad:
             # Mostrar precio con IVA incluido (sin exponer la columna % IVA)
             headers.extend(['Precio + IVA', 'Costo', 'Utilidad %'])
+        
+        if mostrar_proveedores:
+            headers.append('Último Proveedor')
         
         # Ajustar merge del título según cantidad total de columnas
         from openpyxl.utils import get_column_letter as _col_letter
@@ -1175,8 +1189,16 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
                         utilidad_raw = (costo_val / precio_base) * 100 - 100
                         utilidad_pct = abs(utilidad_raw)
                         ws_main.cell(row=row, column=current_col, value=round(utilidad_pct, 2))
+                        current_col += 1
                     else:
                         ws_main.cell(row=row, column=current_col, value=0)
+                        current_col += 1
+                
+                # Columna Último Proveedor
+                if mostrar_proveedores:
+                    prov_nombre = proveedores_map_tra.get(codigo_str, 'Sin proveedor')
+                    ws_main.cell(row=row, column=current_col, value=clean_for_excel(prov_nombre))
+                    current_col += 1
                 
                 if progress_cb:
                     progress_cb(i + 1, total_registros)
@@ -1744,14 +1766,16 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
             ws_main['A3'] = f'Proveedor: {provider_label}'
         ws_main['A4'] = f'Total de productos analizados: {total_registros_entrada}'
         
-        # Verificar permiso para ver costo y utilidad
         mostrar_costo_utilidad = False
+        mostrar_proveedores = False
         if permissions_manager and current_user_id:
             try:
                 mostrar_costo_utilidad = permissions_manager.tiene_permiso(current_user_id, 'MBRP', 'ver_costo_utilidad')
                 logger.info(f"Permiso ver_costo_utilidad para MBRP: {mostrar_costo_utilidad}")
+                mostrar_proveedores = permissions_manager.tiene_permiso(current_user_id, 'MBRP', 'ver_proveedores')
+                logger.info(f"Permiso ver_proveedores para MBRP: {mostrar_proveedores}")
             except Exception as e:
-                logger.warning(f"Error verificando permiso ver_costo_utilidad: {e}")
+                logger.warning(f"Error verificando permisos MBRP: {e}")
         
         # Formato del encabezado
         header_font = Font(size=14, bold=True, color="FFFFFF")
@@ -1776,6 +1800,9 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
         # Columnas adicionales de análisis económico
         if mostrar_costo_utilidad:
             headers.extend(['Precio + IVA', 'Costo', 'Utilidad %'])
+        
+        if mostrar_proveedores:
+            headers.append('Último Proveedor')
         
         # Columna final de detalle ICH (solo última venta)
         if ich_mode:
@@ -2149,6 +2176,15 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
             if ich_mode:
                 stock_por_sede_map = _get_stock_por_sede_mbrp(codigos_unicos)
                 last_dep_map = _get_last_sale_deposito_bulk(codigos_unicos)
+            
+            # Cargar últimos proveedores si se tiene permiso
+            proveedores_map_mbrp = {}
+            if mostrar_proveedores:
+                try:
+                    proveedores_map_mbrp = db_manager.obtener_ultimas_compras_bulk(codigos_unicos)
+                    logger.info(f"[EXPORT MBRP] Cargados {len(proveedores_map_mbrp)} proveedores")
+                except Exception as e:
+                    logger.warning(f"Error cargando proveedores para export MBRP: {e}")
         
         load_time = (datetime.now() - start_time).total_seconds()
         logger.info(f"[EXPORT MBRP] Datos cargados en {load_time:.2f}s - Stock: {len(stock_map)}, Ventas: {len(ultimas_ventas)}")
@@ -2318,6 +2354,12 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
                     else:
                         utilidad_pct = 0.0
                     ws_main.cell(row=row, column=current_col, value=round(utilidad_pct, 2))
+                    current_col += 1
+                
+                # Columna Último Proveedor
+                if mostrar_proveedores:
+                    prov_nombre = proveedores_map_mbrp.get(fila_datos['codigo_str'], 'Sin proveedor')
+                    ws_main.cell(row=row, column=current_col, value=clean_for_excel(prov_nombre))
                     current_col += 1
 
                 # Columna final de detalle ICH (solo modo ICH) - Solo última venta

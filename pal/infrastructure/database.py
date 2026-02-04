@@ -1679,3 +1679,51 @@ class DatabaseManager:
         except Exception as e:
             self._log(f"Error obteniendo detalles de proveedores para {cod_producto}: {e}", "ERROR")
             return []
+
+    def obtener_ultimas_compras_bulk(self, codigos_productos: List[str]) -> Dict[str, str]:
+        """
+        Obtiene el proveedor de la última compra para una lista de productos de forma eficiente.
+        
+        Args:
+            codigos_productos: Lista de códigos de productos.
+            
+        Returns:
+            dict: Mapeo codigo_producto -> nombre_proveedor
+        """
+        if not codigos_productos:
+            return {}
+            
+        resultados = {}
+        try:
+            # Límite de parámetros SQL Server (2100)
+            BATCH_SIZE = 2000
+            for i in range(0, len(codigos_productos), BATCH_SIZE):
+                chunk = codigos_productos[i:i + BATCH_SIZE]
+                placeholders = ','.join(['?'] * len(chunk))
+                
+                query = f"""
+                WITH UltimaCompra AS (
+                    SELECT 
+                        pxp.c_codarticulo, 
+                        p.C_descripcio as proveedor_nombre,
+                        pxp.d_fecha,
+                        ROW_NUMBER() OVER (PARTITION BY pxp.c_codarticulo ORDER BY pxp.d_fecha DESC) as rn
+                    FROM MA_PRODXPROV pxp WITH (NOLOCK)
+                    JOIN MA_PROVEEDORES p WITH (NOLOCK) ON pxp.c_codprovee = p.c_codprovee
+                    WHERE pxp.c_codarticulo IN ({placeholders})
+                )
+                SELECT c_codarticulo, proveedor_nombre, d_fecha
+                FROM UltimaCompra
+                WHERE rn = 1
+                """
+                
+                rows = self.fetch_data(query, chunk)
+                if rows:
+                    for cod, prov, fecha in rows:
+                        fecha_str = f" ({fecha.strftime('%d/%m/%Y')})" if fecha else ""
+                        resultados[str(cod).strip()] = f"{str(prov).strip()}{fecha_str}"
+            
+            return resultados
+        except Exception as e:
+            self._log(f"Error en obtener_ultimas_compras_bulk: {e}", "ERROR")
+            return {}

@@ -720,7 +720,8 @@ def export_stock_excel(filename: str, datos_exportar: List, seleccionadas: List[
 def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_cb: Optional[Callable[[int, int], None]] = None, 
                      permissions_manager=None, current_user_id: int = None,
                      provider_label: Optional[str] = None,
-                     sede_codigo: Optional[str] = None) -> int:
+                     sede_codigo: Optional[str] = None,
+                     fecha_inicio=None, fecha_fin=None) -> int:
     """Exporta datos de RI (Rotación de Inventario) a un archivo Excel con formato profesional y múltiples hojas de análisis.
     
     Args:
@@ -730,6 +731,8 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
         progress_cb: Callback opcional para reportar progreso
         permissions_manager: Gestor de permisos (opcional, para verificar ver_costo_utilidad)
         current_user_id: ID del usuario actual (opcional, para verificar permisos)
+        fecha_inicio: Fecha inicio del periodo (datetime/date)
+        fecha_fin: Fecha fin del periodo (datetime/date)
         
     Returns:
         int: Número total de registros exportados
@@ -742,6 +745,20 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
     try:
         total_registros = len(datos_tra)
         logger.info(f"Iniciando exportación RI Excel de {total_registros} registros a {filename}")
+
+        # Calcular días del periodo para "Estado Stock"
+        dias_periodo = 1
+        if fecha_inicio and fecha_fin:
+            try:
+                # Asegurar compatibilidad si son strings o dates
+                fi = fecha_inicio if hasattr(fecha_inicio, 'year') else datetime.now() # Fallback simple
+                ff = fecha_fin if hasattr(fecha_fin, 'year') else datetime.now()
+                # Si son date, convertir a datetime o restar directo
+                diff = (ff - fi).days
+                dias_periodo = diff if diff > 0 else 1
+            except Exception as e:
+                logger.warning(f"Error calculando días de periodo: {e}")
+                dias_periodo = 1
 
         # Determinar si el filtro de sede es global (modo ICH)
         ich_mode = sede_codigo in (None, '%', '00', 'ICH', 'ALL')
@@ -978,7 +995,7 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
             if ich_mode:
                 stock_por_sede_map_tra = _get_stock_por_sede_tra(codigos_unicos_tra)
         
-        # Headers de la tabla (fila 7) - Orden: Ventas Netas, Stock/Stocks, Rotación
+        # Headers de la tabla (fila 7) - Orden: Ventas Netas, Stock/Stocks, Estado Stock, Rotación
         headers = ['Código', 'Descripción', 'Departamento', 'Grupo', 'Subgrupo', 'Ventas Netas']
         
         # Agregar columnas de stock según modo ICH
@@ -986,6 +1003,9 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
                 headers.extend(['Stock Cabudare', 'Stock Barinas', 'Stock Guanare', 'CDT', 'Transito SEDES', 'Stock Total'])
         else:
             headers.append('Stock')
+        
+        # NUEVA COLUMNA: Estado Stock
+        headers.append('Estado Stock')
         
         # Agregar Rotación y Representación %
         headers.extend(['Rotación', 'Representación %'])
@@ -1016,38 +1036,20 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
                 row = data_start_row + i
                 
                 # Manejar diferentes longitudes de fila según estructura real:
-                #   - Sin precio/costo (6 campos base + rotación):
-                #       [codigo, desc, dept, grupo, sub, neto, rotacion]
-                #   - Con precio/costo (8 campos base + rotación):
-                #       [codigo, desc, dept, grupo, sub, neto, rotacion, precio, costo]
-                #   - Con precio/IVA/costo (10 campos):
-                #       [codigo, desc, dept, grupo, sub, neto, rotacion, precio, impuesto1, costo]
-                #
-                # NOTA: Después de agregar n_impuesto1 desde BD, la estructura completa
-                #       tiene 10 columnas. La columna de COSTO real quedó en el índice 9
-                #       (última posición), mientras que impuesto1 está en el índice 8.
-                #       Aquí nos aseguramos de mapear "costo" siempre al costo real,
-                #       nunca al impuesto.
                 if len(fila) >= 10:
-                    # Estructura completa con IVA separado
                     codigo, desc, dept, grupo, sub, neto = fila[:6]
                     rotacion = fila[6]
                     precio = fila[7]
-                    # fila[8] = impuesto1 (IVA), solo para cálculos internos, no va directo a columnas
                     costo = fila[9]
                 elif len(fila) == 9:
-                    # Patrón clásico sin columna explícita de impuesto1
                     codigo, desc, dept, grupo, sub, neto, rotacion, precio, costo = fila[:9]
                 elif len(fila) == 8:
-                    # Caso mixto/legacy: asumir que los últimos dos son precio/costo pero sin rotación clara
                     codigo, desc, dept, grupo, sub, neto, precio, costo = fila[:8]
                     rotacion = "SIN CLASIFICAR"
                 elif len(fila) == 7:
-                    # Sin precio/costo, pero con rotación agregada
                     codigo, desc, dept, grupo, sub, neto, rotacion = fila[:7]
                     precio = costo = 0
                 elif len(fila) >= 6:
-                    # Solo datos base, sin rotación ni precio/costo
                     codigo, desc, dept, grupo, sub, neto = fila[:6]
                     rotacion = "SIN CLASIFICAR"
                     precio = costo = 0
@@ -1064,17 +1066,9 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
                 ws_main.cell(row=row, column=3, value=clean_for_excel(dept_desc))
                 ws_main.cell(row=row, column=4, value=clean_for_excel(grupo_desc))
                 ws_main.cell(row=row, column=5, value=clean_for_excel(sub_desc))
-                # DEBUG: Log del valor neto para los primeros 3 registros
-                if i < 3:
-                    logger.info(f"[EXPORT DEBUG] Fila {i}: codigo={codigo}, neto_raw={neto} (tipo={type(neto)})")
                 
-                # Usar helper robusto para obtener el neto sin lanzar errores por strings como 'ALTA'
+                # Usar helper robusto para obtener el neto
                 neto_valor = _get_tra_neto(fila)
-                # DEBUG: Log del valor convertido
-                if i < 3:
-                    logger.info(f"[EXPORT DEBUG] Fila {i}: neto_convertido={neto_valor}")
-                
-                # Aplicar el mismo formateo que en la interfaz: enteros sin decimales
                 neto_formateado = int(neto_valor) if neto_valor == int(neto_valor) else round(neto_valor, 2)
                 
                 # Columna 6: Ventas Netas
@@ -1087,20 +1081,16 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
                     codigo_str = ''
                 
                 current_col = 7
+                stock_para_calculo = 0
                 
                 # Columnas de stock según modo ICH
                 if ich_mode:
-                    # Stock por sede (5 columnas) + Stock Total
                     dist = stock_por_sede_map_tra.get(codigo_str, {})
                     stock_cabudare = dist.get('Cabudare', 0)
                     stock_barinas = dist.get('Barinas', 0)
                     stock_guanare = dist.get('Guanare', 0)
                     stock_cdt = dist.get('CDT', 0)
                     stock_transito = dist.get('Transito', 0)
-
-                    # CORRECCION: El stock total debe ser la suma de TODOS los almacenes (global),
-                    # mientras que las columnas individuales son restringidas (solo principales).
-                    # stock_map_tra ya contiene la suma global porque se llamó con sede_codigo='00'
                     stock_total = int(stock_map_tra.get(codigo_str, 0) or 0)
                     
                     ws_main.cell(row=row, column=current_col, value=stock_cabudare)
@@ -1115,12 +1105,39 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
                     current_col += 1
                     ws_main.cell(row=row, column=current_col, value=stock_total)
                     current_col += 1
+                    stock_para_calculo = stock_total
                 else:
-                    # Stock actual (1 columna)
                     stock_actual = int(stock_map_tra.get(codigo_str, 0) or 0)
                     ws_main.cell(row=row, column=current_col, value=stock_actual)
                     current_col += 1
+                    stock_para_calculo = stock_actual
                 
+                # CALCULO DE ESTADO STOCK
+                estado_stock_texto = "N/A"
+                if dias_periodo > 0:
+                    promedio_diario = neto_valor / dias_periodo
+                    if promedio_diario > 0:
+                        dias_restantes = stock_para_calculo / promedio_diario
+                        if dias_restantes < 25:
+                            estado_stock_texto = "Posible quiebre"
+                        elif 25 <= dias_restantes <= 59:
+                            estado_stock_texto = "Alerta Compra"
+                        elif 60 <= dias_restantes <= 90:
+                            estado_stock_texto = "Optimo"
+                        elif 91 <= dias_restantes <= 119:
+                            estado_stock_texto = "Critico"
+                        else:
+                            estado_stock_texto = "Muy Critico"
+                    else:
+                        if stock_para_calculo <= 0:
+                            estado_stock_texto = "Sin Stock/Ventas"
+                        else:
+                             estado_stock_texto = "Sin Ventas" # Stock > 0 pero ventas 0 = infinito
+                
+                # Escribir columna Estado Stock
+                ws_main.cell(row=row, column=current_col, value=estado_stock_texto)
+                current_col += 1
+
                 # Columna siguiente: Rotación
                 ws_main.cell(row=row, column=current_col, value=clean_for_excel(str(rotacion).upper()))
                 current_col += 1
@@ -1141,20 +1158,19 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
                     except (ValueError, TypeError):
                         costo_val = 0.0
                     
-                    # IVA % desde MA_PRODUCTOS.n_impuesto1 (solo para cálculo interno)
                     iva_pct = float(impuestos_map.get(codigo_str, 0.0)) if impuestos_map else 0.0
-                    
                     # Precio con IVA incluido (si n_impuesto1 es porcentaje, por ejemplo 16 para 16%)
                     precio_con_iva = precio_base * (1.0 + (iva_pct / 100.0)) if precio_base > 0 else 0.0
                     
                     # Precio + IVA
-                    ws_main.cell(row=row, column=current_col, value=round(precio_con_iva, 2))
+                    cell_precio = ws_main.cell(row=row, column=current_col, value=precio_con_iva)
+                    cell_precio.number_format = '0.00'
                     current_col += 1
                     # Costo
                     ws_main.cell(row=row, column=current_col, value=round(costo_val, 2))
                     current_col += 1
                     
-                    # Calcular utilidad porcentual usando precio base (sin IVA) para no distorsionar el margen
+                    # Calcular utilidad porcentual
                     if precio_base > 0:
                         utilidad_raw = (costo_val / precio_base) * 100 - 100
                         utilidad_pct = abs(utilidad_raw)
@@ -1179,9 +1195,10 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
         )
         ws_main.add_table(table)
         
-        # Formato condicional para rotación (columna después de stock)
-        # Sin ICH: columna 8, Con ICH: columna 11 (Stock Cabudare, Barinas, Guanare, Total)
-        rotacion_col = 8 if not ich_mode else 11
+        # Formato condicional para rotación (columna después de estado stock)
+        # Sin ICH: Stocks(1) + Estado(1) -> col 8 (Stock(7), Estado(8)) -> Rotacion es 9
+        # Con ICH: Stocks(6) + Estado(1) -> col 13 -> Rotacion 14
+        rotacion_col = (8 + 1) if not ich_mode else (12 + 1)
         rotacion_col_letter = get_column_letter(rotacion_col)
         rotacion_range = f"{rotacion_col_letter}{data_start_row}:{rotacion_col_letter}{data_start_row + total_registros - 1}"
         
@@ -1198,7 +1215,27 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
         # Baja = Rojo
         ws_main.conditional_formatting.add(rotacion_range,
             CellIsRule(operator='equal', formula=['"BAJA"'],
-                      fill=PatternFill(start_color="F44336", end_color="F44336")))
+                      fill=PatternFill(start_color="FF6B6B", end_color="FF6B6B")))
+                      
+        # Formato condicional para Estado Stock (columna anterior a Rotación)
+        estado_col = rotacion_col - 1
+        estado_col_letter = get_column_letter(estado_col)
+        estado_range = f"{estado_col_letter}{data_start_row}:{estado_col_letter}{data_start_row + total_registros - 1}"
+        
+        # Posible quiebre (<25) = Rojo
+        ws_main.conditional_formatting.add(estado_range,
+            CellIsRule(operator='equal', formula=['"Posible quiebre"'],
+                      fill=PatternFill(start_color="FF6B6B", end_color="FF6B6B")))
+        
+        # Alerta Compra (25-59) = Amarillo
+        ws_main.conditional_formatting.add(estado_range,
+            CellIsRule(operator='equal', formula=['"Alerta Compra"'],
+                      fill=PatternFill(start_color="FFD93D", end_color="FFD93D")))
+                      
+        # Optimo (60-90) = Verde
+        ws_main.conditional_formatting.add(estado_range,
+            CellIsRule(operator='equal', formula=['"Optimo"'],
+                      fill=PatternFill(start_color="6BCF7F", end_color="6BCF7F")))
         
         # Ajustar anchos de columna
         ws_main.column_dimensions['A'].width = 12  # Código

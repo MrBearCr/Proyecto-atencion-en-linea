@@ -49,7 +49,7 @@ def setup_tra_tab(app):
     app.sede_var = tk.StringVar()
     app.sede_combo = ttk.Combobox(fecha_frame, textvariable=app.sede_var, state='readonly', width=18)
     app.sede_combo['values'] = ["00 - ICH", "0301 - Cabudare", "0401 - Guanare", "0101 - Barinas"]
-    app.sede_combo.current(1)  # Por defecto 0301
+    app.sede_combo.current(0)  # Por defecto 00 - ICH
     app.sede_combo.pack(side=tk.LEFT)
 
     # Aviso al seleccionar ICH (consulta global)
@@ -264,7 +264,7 @@ def setup_tra_tab(app):
     tree_frame = ttk.Frame(app.tra_tab_frame)
     tree_frame.pack(fill=tk.BOTH, expand=True)
 
-    columns = ("Código", "Descripción", "Rotación", "Ventas", "Representación %", "Stock Actual", "Stock Ideal", "Días Restantes")
+    columns = ("Código", "Descripción", "Rotación", "Ventas", "Representación %", "Stock Actual", "Stock Ideal", "Días Restantes", "Estado Stock")
     app.tra_tree = ttk.Treeview(tree_frame, columns=columns, show='headings', height=10)
     
     # Configurar tamaño de fuente y altura de filas más grandes
@@ -282,11 +282,12 @@ def setup_tra_tab(app):
         "Código": {"width": 80, "anchor": "center"},
         "Descripción": {"width": 250, "anchor": "w"},
         "Rotación": {"width": 80, "anchor": "center"},
-        "Ventas": {"width": 100, "anchor": "e"},
+        "Ventas": {"width": 100, "anchor": "center"},
         "Representación %": {"width": 100, "anchor": "center"},
         "Stock Actual": {"width": 80, "anchor": "center"},
         "Stock Ideal": {"width": 80, "anchor": "center"},
-        "Días Restantes": {"width": 100, "anchor": "center"}
+        "Días Restantes": {"width": 100, "anchor": "center"},
+        "Estado Stock": {"width": 120, "anchor": "center"}
     }
     
     for col in columns:

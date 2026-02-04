@@ -1717,6 +1717,10 @@ class DatabaseApp:
                     # Obtener código de sede
                     tra_sede_cod = getattr(self, 'tra_sede_codigo', None)
                     
+                    # Obtener fechas para cálculo de estado
+                    fecha_ini = getattr(self, 'tra_fecha_inicio', None)
+                    fecha_fin = getattr(self, 'tra_fecha_fin', None)
+
                     total_registros = export_tra_excel(
                         filename=filename,
                         datos_tra=datos_exportar,
@@ -1726,6 +1730,8 @@ class DatabaseApp:
                         current_user_id=user_id,
                         provider_label=prov_label,
                         sede_codigo=tra_sede_cod,
+                        fecha_inicio=fecha_ini,
+                        fecha_fin=fecha_fin,
                     )
                     
                     # Notificar éxito en el hilo principal
@@ -4546,8 +4552,16 @@ class DatabaseApp:
         sede = self.tra_sede_codigo or '0301'
         
         # Cache de stock con TTL de 30 segundos
-        if not hasattr(self, '_stock_cache') or not hasattr(self, '_stock_cache_time'):
+        # Cache de stock con TTL de 30 segundos
+        if not hasattr(self, '_stock_cache') or not hasattr(self, '_stock_cache_time') or not hasattr(self, '_stock_cache_sede'):
             self._stock_cache = {}
+            self._stock_cache_time = 0
+            self._stock_cache_sede = None
+            
+        # Si la sede cambió desde la última vez, invalidar cache para evitar mostrar stock de otra sede
+        if self._stock_cache_sede != sede:
+            self._stock_cache = {}
+            self._stock_cache_sede = sede
             self._stock_cache_time = 0
         
         current_time = time.time()
@@ -4645,6 +4659,24 @@ class DatabaseApp:
                     self.tra_fecha_fin or datetime.now()
                 )
 
+                # Calcular Estado Stock basado en Días Restantes
+                estado_stock = "N/A"
+                if dias_restantes is not None:
+                    try:
+                        dr = float(dias_restantes)
+                        if dr < 25:
+                            estado_stock = "Posible quiebre"
+                        elif 25 <= dr <= 59:
+                            estado_stock = "Alerta Compra"
+                        elif 60 <= dr <= 90:
+                            estado_stock = "Optimo"
+                        elif 91 <= dr <= 119:
+                            estado_stock = "Critico"
+                        else: # >= 120
+                            estado_stock = "Muy Critico"
+                    except:
+                        pass
+
                 # Determinar tag de color según rotación con filas alternadas
                 tag_base = (str(rotacion).lower() if rotacion else "sin_clasificar")
                 if idx % 2 == 0:
@@ -4680,7 +4712,8 @@ class DatabaseApp:
                     porcentaje_display,
                     stock_actual,
                     stock_ideal,
-                    f"{dias_restantes:.0f}" if dias_restantes is not None else "N/A"
+                    f"{dias_restantes:.0f}" if dias_restantes is not None else "N/A",
+                    estado_stock
                 )
                 
                 # Insertar en el treeview
@@ -5738,13 +5771,15 @@ class DatabaseApp:
             except Exception:
                 neto = 0.0
             try:
-                stock_actual = int(vals[4])
+                stock_actual = int(vals[5])
             except Exception:
                 stock_actual = 0
             try:
-                stock_ideal = int(vals[5])
+                stock_ideal = int(vals[6])
             except Exception:
                 stock_ideal = 0
+            
+            estado_stock = str(vals[8]) if len(vals) > 8 else "N/A"
 
             # Intervalo de fechas desde el UI
             try:
@@ -5756,7 +5791,7 @@ class DatabaseApp:
 
             msg = (
                 f"Selección TRA -> Código: {codigo} | Desc: {desc} | Rotación: {rotacion}\n"
-                f"Intervalo: {fi} a {ff} | Ventas (neto): {neto} | Stock: {stock_actual} | Stock ideal: {stock_ideal}"
+                f"Stock: {stock_actual} | Ideal: {stock_ideal} | Estado: {estado_stock} | Ventas: {neto}"
             )
             self.tra_debug_log(msg)
         except Exception as e:

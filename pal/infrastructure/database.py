@@ -1665,15 +1665,15 @@ class DatabaseManager:
         try:
             query = """
                 SELECT 
-                    px.c_codprovee, 
-                    pr.c_descripcio, 
-                    px.c_numero_compra, 
-                    px.d_fecha,
-                    px.n_costo
-                FROM MA_PRODXPROV px WITH (NOLOCK)
-                LEFT JOIN MA_PROVEEDORES pr WITH (NOLOCK) ON px.c_codprovee = pr.c_codproveed
-                WHERE px.c_codigo = ?
-                ORDER BY px.d_fecha DESC
+                    pxp.c_codprovee,
+                    p.C_descripcio,
+                    pxp.c_numero_compra,
+                    pxp.d_fecha,
+                    pxp.n_costo
+                FROM MA_PRODXPROV pxp WITH (NOLOCK)
+                JOIN MA_PROVEEDORES p WITH (NOLOCK) ON pxp.c_codprovee = p.c_codproveed
+                WHERE pxp.c_codigo = ?
+                ORDER BY pxp.d_fecha DESC
             """
             return self.fetch_data(query, (str(cod_producto).strip(),))
         except Exception as e:
@@ -1704,15 +1704,15 @@ class DatabaseManager:
                 query = f"""
                 WITH UltimaCompra AS (
                     SELECT 
-                        pxp.c_codarticulo, 
+                        pxp.c_codigo, 
                         p.C_descripcio as proveedor_nombre,
                         pxp.d_fecha,
-                        ROW_NUMBER() OVER (PARTITION BY pxp.c_codarticulo ORDER BY pxp.d_fecha DESC) as rn
+                        ROW_NUMBER() OVER (PARTITION BY pxp.c_codigo ORDER BY pxp.d_fecha DESC) as rn
                     FROM MA_PRODXPROV pxp WITH (NOLOCK)
-                    JOIN MA_PROVEEDORES p WITH (NOLOCK) ON pxp.c_codprovee = p.c_codprovee
-                    WHERE pxp.c_codarticulo IN ({placeholders})
+                    JOIN MA_PROVEEDORES p WITH (NOLOCK) ON pxp.c_codprovee = p.c_codproveed
+                    WHERE pxp.c_codigo IN ({placeholders})
                 )
-                SELECT c_codarticulo, proveedor_nombre, d_fecha
+                SELECT c_codigo, proveedor_nombre, d_fecha
                 FROM UltimaCompra
                 WHERE rn = 1
                 """

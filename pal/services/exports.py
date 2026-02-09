@@ -1141,7 +1141,7 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
                         elif 91 <= dias_restantes <= 119:
                             estado_stock_texto = "Critico"
                         else:
-                            estado_stock_texto = "Muy Critico"
+                            estado_stock_texto = "Sobre Stock"
                     else:
                         if stock_para_calculo <= 0:
                             estado_stock_texto = "Sin Stock/Ventas"

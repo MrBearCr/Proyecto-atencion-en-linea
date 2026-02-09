@@ -318,9 +318,15 @@ class DatabaseApp:
 
             self.log("Hilos de fondo y conexiones de BD detenidos. Cerrando ventana principal...", "INFO")
             
-            self.root.quit()
-            self.root.destroy()
+            try:
+                self.root.quit()
+                self.root.destroy()
+            except Exception:
+                pass
+            
             self.log("Cierre de UI completado.", "INFO")
+            # Force exit to ensure all daemon/non-daemon threads are killed
+            os._exit(0)
         except Exception as e:
             self.log(f"Error durante el cierre ordenado: {e}", "ERROR")
             # Fallback to a hard exit in case of error during shutdown
@@ -4673,7 +4679,7 @@ class DatabaseApp:
                         elif 91 <= dr <= 119:
                             estado_stock = "Critico"
                         else: # >= 120
-                            estado_stock = "Muy Critico"
+                            estado_stock = "Sobre Stock"
                     except:
                         pass
 

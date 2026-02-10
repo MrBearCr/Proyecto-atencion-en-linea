@@ -116,17 +116,11 @@ La aplicación sigue una **arquitectura por capas** con clara separación de res
 
 ## Sistema de Módulos
 
-La aplicación utiliza un **sistema de módulos dinámico** controlado por el archivo `db_config.ini`. Los módulos se pueden habilitar/deshabilitar:
+La aplicación utiliza un **sistema de módulos dinámico** controlado centralmente desde la base de datos (tabla `pal_global_settings` para configuración global y `pal_usuarios_modulos` para permisos por usuario).
 
-- **stock**: Monitoreo de inventario con niveles de alerta (Crítica/Media/Leve)
-- **tra**: Análisis de rotación de productos (Tiempo de Reposición de Artículos) usando clasificación ABC/Pareto
-- **mbrp**: Detección de productos de baja rotación (Movimiento de Baja Rotación de Producto) usando Índice de Movilidad
-- **envio_mensajes**: Mensajería masiva por WhatsApp con programación
-- **estadisticas**: Estadísticas y analíticas (opcional)
-- **calendario**: Vista de calendario (opcional)
-- **admin**: Funciones administrativas y gestión de usuarios
+- **Módulos configurables**: `stock`, `tra`, `mbrp`, `envio_mensajes`, `estadisticas`, `calendario`, `admin`, `clientes`.
 
-Acceder a configuración de módulos vía interfaz: **Settings → Modules**
+La configuración se gestiona vía interfaz: **Settings → Gestión de Usuarios** (para habilitar/deshabilitar módulos a usuarios específicos).
 
 ## Lógica de Negocio Crítica
 
@@ -222,14 +216,13 @@ server = NOMBRE_SERVIDOR
 database = NOMBRE_BD
 user = USUARIO  ; vacío para autenticación Windows
 
-[Modules]
+[Debug]
 stock = True
 tra = True
 mbrp = True
-envio_mensajes = True
-; ...
+db = True
 
-[Debug]
+; La configuración de módulos ahora reside en la base de datos.
 tra = False
 stock = False
 mbrp = False

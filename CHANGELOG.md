@@ -7,6 +7,34 @@ y este proyecto adhiere al [Versionado Semántico](https://semver.org/lang/es/).
 
 ---
 
+## 1.5.0 - 10/02/2026
+
+### 🆕 Añadido
+
+#### Consolidación de Configuración de Módulos en BD
+- **Archivos modificados**: `app.py`, `db_config.ini`, `docs/migrations/008_seed_global_modules.sql`
+- **Razón**: Eliminar la redundancia entre el archivo `.ini` y la base de datos, centralizando la configuración.
+- **Cambios**:
+  - Eliminada la sección `[Modules]` de `db_config.ini`.
+  - Refactorizada la carga inicial para diferir el inicio de servicios hasta después del login.
+  - Implementada carga de configuración global de módulos desde `pal_global_settings`.
+  - `_post_login_setup` ahora cruza permisos de usuario con habilitación global.
+- **Beneficio**: Única fuente de verdad en la base de datos, facilidad de administración global y por usuario.
+
+---
+
+## 1.4.1 - 10/02/2026
+
+### 🐛 Corregido
+
+#### Visibilidad del Módulo 'Clientes'
+- **Archivos modificados**: `app.py`
+- **Problema**: El módulo 'clientes' permanecía visible incluso cuando se deshabilitaba para un usuario específico.
+- **Solución**: Se incluyó el flag 'clientes' en la lógica de actualización de permisos post-login y se agregó a la configuración inicial por defecto.
+- **Beneficio**: Respeto total de la configuración de visibilidad de módulos por usuario desde la base de datos.
+
+---
+
 ## 1.4.0 - 4/02/2026
 
 

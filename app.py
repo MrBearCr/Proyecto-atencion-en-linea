@@ -43,7 +43,7 @@ from win10toast import ToastNotifier
 CONFIG_FILE = 'db_config.ini'
 LICENSE_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTdAdOg6pI7tOF-9UdFDzw0P5aSpNRc-jGIYHwOHmXb7qqOtag9QTYAi4JU0U2VoIZLd_TjvK_7cxX9/pub?output=csv"
 LICENSE_CLIENT_NAME = "PALPY"
-APP_VERSION = "1.3.1"# Versión actual de la aplicación
+APP_VERSION = "1.4.1" # Versión actual de la aplicación
 UPDATE_URL_DEFAULT = "https://raw.githubusercontent.com/MrBearCr/nexus/main/updates"  # URL base por defecto para actualizaciones (formato raw)
 
 def load_update_url():
@@ -87,42 +87,6 @@ DB_MODULE_TO_FLAG = {
 }
 FLAG_TO_DB_MODULE = {v: k for k, v in DB_MODULE_TO_FLAG.items()}
 
-def load_modules_config():
-        """Lee la sección [Modules] de db_config.ini o crea valores por defecto."""
-        config = configparser.ConfigParser()
-        # Si no existe, load_connection_settings ya habrá creado el ini
-        if os.path.exists(CONFIG_FILE):
-            config.read(CONFIG_FILE)
-        # Si no hay sección Modules, la inicializamos
-        if 'Modules' not in config:
-            config['Modules'] = {
-                'envio_mensajes': 'True',
-                'estadisticas':   'False',
-                'calendario':     'False',
-                'stock':          'False',
-                'tra':          'False',
-                'mbrp':           'False',
-            }
-            with open(CONFIG_FILE, 'w') as f:
-                config.write(f)
-        # Convertir a booleans
-        mods = {}
-        for key in config['Modules']:
-            mods[key] = config.getboolean('Modules', key, fallback=False)
-        return mods
-
-def save_modules_config(mods: dict):
-        """Guarda en [Modules] del ini el dict de estados."""
-        config = configparser.ConfigParser()
-        # Cargamos todo el ini existente (incluye 'Database'…)
-        if os.path.exists(CONFIG_FILE):
-            config.read(CONFIG_FILE)
-        if 'Modules' not in config:
-            config.add_section('Modules')
-        for key, val in mods.items():
-            config['Modules'][key] = 'True' if val else 'False'
-        with open(CONFIG_FILE, 'w') as f:
-            config.write(f)
 
 # === Configuración de Depuración por Módulo ===
 
@@ -350,7 +314,7 @@ class DatabaseApp:
             # Reportar progreso: 20%
             self.splash.set_progress(0.20)
             
-            self.modules_enabled = load_modules_config()
+            self.modules_enabled = {} # Se cargará desde la BD después del login
             self.audit_log = AuditLogger()
             self.db_manager = DatabaseManager(self.cred_manager)
             self.auth = None
@@ -421,21 +385,7 @@ class DatabaseApp:
             except Exception:
                 pass
 
-            if self.modules_enabled.get("envio_mensajes", False):
-                self.programador = ProgramadorEnvios(self.db_manager, self)
-                self.envios_programados = EnvioProgramado(self.db_manager)
-
-            if self.modules_enabled.get("stock", False):
-                # Inicializar el notificador antes de iniciar el hilo que lo usa
-                self.toaster = ToastNotifier()
-                self.monitor_thread = threading.Thread(target=self.monitorear_favoritos, daemon=True)
-                self.monitor_thread.start()
-
-            if self.modules_enabled.get("tra", False):
-                # Initialize TRA dictionaries before setting up UI
-                self.tra_dept_dict = {}
-                self.tra_group_dict = {}
-                self.tra_sub_dict = {}
+                # Inicialización diferida post-login para monitoreo
                 
                 # Inicialización de variables para carga paralela TRA
                 self.cached_ventas_tra = []
@@ -448,20 +398,7 @@ class DatabaseApp:
                 self.tra_sede_codigo = None
             
             # MBRP - Movimiento de Baja Rotación de Producto
-            if self.modules_enabled.get("mbrp", False):
-                # Diccionarios de filtros (separados para MBRP)
-                self.mbrp_dept_dict = {}
-                self.mbrp_group_dict = {}
-                self.mbrp_sub_dict = {}
-                
-                # Estado de carga MBRP
-                self.cached_ventas_mbrp = []
-                self.mbrp_loader_thread = None
-                self.mbrp_page_size = 500
-                self.mbrp_current_page = 1
-                self.mbrp_fecha_inicio = None
-                self.mbrp_fecha_fin = None
-                self.mbrp_sede_codigo = None
+                # Inicialización diferida post-login para MBRP
             
             # Sistema de Paginacion ya inicializado arriba
             # Sistema de notificaciones (inicializar antes de auto-connect)
@@ -484,10 +421,11 @@ class DatabaseApp:
             # Cargar configuraciones globales (exclusiones)
             try:
                 self._load_global_settings()
-            except Exception as e:
-                print(f"[WARNING] No se pudieron cargar configuraciones globales: {e}")
+            except Exception:
+                pass
 
-            self.programar_actualizaciones_stock()
+            # Diferir actualizaciones de stock hasta después del login
+            # self.programar_actualizaciones_stock()
             
             # Verificar hilos activos en segundo plano
             self.listar_hilos_activos()
@@ -3506,8 +3444,47 @@ class DatabaseApp:
         except Exception as e:
             self.log(f"Error cargando configuraciones globales: {e}", "WARNING")
             self.excluded_depts = set()
-        
-        self._update_excluded_set()
+
+    def _start_module_services(self):
+        """Inicializa servicios de fondo según los módulos habilitados post-login."""
+        try:
+            self.log("🚀 Iniciando servicios de módulos...", "INFO")
+            
+            # Envio de Mensajes
+            if self.modules_enabled.get("envio_mensajes", False):
+                from pal.services.envios import ProgramadorEnvios, EnvioProgramado
+                self.programador = ProgramadorEnvios(self.db_manager, self)
+                self.envios_programados = EnvioProgramado(self.db_manager)
+                self.log("  ✓ Programador de mensajes activo", "DEBUG")
+
+            # Stock
+            if self.modules_enabled.get("stock", False):
+                # Inicializar el notificador (ya importado al inicio de app.py)
+                self.toaster = ToastNotifier()
+                self.monitor_thread = threading.Thread(target=self.monitorear_favoritos, daemon=True)
+                self.monitor_thread.start()
+                self.programar_actualizaciones_stock()
+                self.log("  ✓ Monitor de stock activo", "DEBUG")
+
+            # TRA / MBRP (Inicialización de estructuras si no existen)
+            if self.modules_enabled.get("tra", False):
+                self.tra_dept_dict = {}
+                self.tra_group_dict = {}
+                self.tra_sub_dict = {}
+            
+            if self.modules_enabled.get("mbrp", False):
+                self.mbrp_dept_dict = {}
+                self.mbrp_group_dict = {}
+                self.mbrp_sub_dict = {}
+                self.cached_ventas_mbrp = []
+                self.mbrp_loader_thread = None
+                self.mbrp_page_size = 500
+                self.mbrp_current_page = 1
+
+        except Exception as e:
+            self.log(f"Error iniciando servicios de módulos: {e}", "ERROR")
+
+    # _load_global_module_settings eliminada según requerimiento del usuario (usar pal_usuarios_modulos exclusivamente)
     
     def on_deposito_stock_selected(self):
         """Handler cuando cambian los depósitos seleccionados"""
@@ -6250,7 +6227,7 @@ class DatabaseApp:
                     # Se hará tras login exitoso para evitar prompts durante el splash
 
                     # Continuar con carga del resto de módulos en paralelo
-                    self._inicializar_modulos_paralelo()
+                    # Carga inicial de módulos se hará tras el login exitoso
 
                     total_elapsed = time.perf_counter() - total_start
                     self.log(f"🏁 App inicializada (parcial) en {total_elapsed:.2f}s", "INFO")
@@ -8219,26 +8196,30 @@ class DatabaseApp:
                     except Exception as e:
                         self.log(f"Nota: {e}", "INFO")
                     
-                    # Cargar permisos del usuario y configurar UI
+                    # 1. Cargar permisos del usuario
                     from pal.core.permissions import PermissionsManager
                     self.permissions = PermissionsManager(self.db_manager)
                     user_id = self.current_user['id']
                     db_mods = self.permissions.obtener_modulos_disponibles(user_id) or []
                     
-                    # Mapear nombres de BD a flags de app
-                    flags_enabled = {DB_MODULE_TO_FLAG[m] for m in db_mods if m in DB_MODULE_TO_FLAG}
+                    # 2. Resetear y poblar módulos habilitados basado en la tabla del usuario
+                    self.modules_enabled = {k: False for k in FLAG_TO_DB_MODULE.keys()}
                     
-                    # Actualizar módulos habilitados según permisos del usuario
-                    for flag in ['stock', 'tra', 'mbrp', 'envio_mensajes', 'calendario', 'estadisticas', 'admin']:
-                        self.modules_enabled[flag] = flag in flags_enabled
+                    # 3. Mapear nombres de BD a flags de app
+                    for m in db_mods:
+                        if m in DB_MODULE_TO_FLAG:
+                            flag = DB_MODULE_TO_FLAG[m]
+                            self.modules_enabled[flag] = True
                     
-                    self.log(f"Módulos disponibles: {', '.join(db_mods) or 'ninguno'}", "INFO")
+                    self.log(f"Módulos disponibles para usuario {self.current_user['username']}: {', '.join(db_mods) or 'ninguno'}", "INFO")
                     
                     # Recrear workspace con módulos actualizados
                     try:
                         if hasattr(self, 'main_notebook') and self.main_notebook.winfo_exists():
                             self.main_notebook.destroy()
+                        
                         self.create_main_workspace()
+                        
                         # Cargar lista de registros al iniciar si la pestaña existe
                         try:
                             if hasattr(self, 'search_records'):
@@ -8247,6 +8228,9 @@ class DatabaseApp:
                             pass
                     except Exception as e:
                         self.log(f"Error recreando workspace: {e}", "WARNING")
+                    
+                    # Inicializar servicios de fondo según módulos habilitados
+                    self._start_module_services()
                     
                     # Inicializar módulos en segundo plano
                     threading.Thread(target=self._inicializar_modulos_paralelo, daemon=True).start()
@@ -11134,192 +11118,5 @@ if __name__ == "__main__":
     root.withdraw()
     app = DatabaseApp(root)
     root.mainloop() 
-
-
-    def _create_admin_sedes_tab(self, parent):
-        # --- Variables ---
-        self.admin_sedes_vars = {
-            'id': tk.StringVar(),
-            'nombre_sede': tk.StringVar(),
-            'ip_servidor': tk.StringVar(),
-            'nombre_bd': tk.StringVar(value='VAD20'),
-            'usuario_bd': tk.StringVar(),
-            'password_bd': tk.StringVar(),
-            'activa': tk.BooleanVar(value=True)
-        }
-
-        # --- Layout ---
-        main_frame = ttk.Frame(parent, padding=10)
-        main_frame.pack(fill=tk.BOTH, expand=True)
-        main_frame.rowconfigure(0, weight=1)
-        main_frame.columnconfigure(0, weight=3) # Treeview más grande
-        main_frame.columnconfigure(1, weight=2) # Formulario más pequeño
-
-        # --- Treeview para listar sedes ---
-        tree_frame = ttk.Frame(main_frame)
-        tree_frame.grid(row=0, column=0, sticky='nsew', padx=(0, 10))
-        tree_frame.rowconfigure(0, weight=1)
-        tree_frame.columnconfigure(0, weight=1)
-        
-        self.sedes_tree = ttk.Treeview(tree_frame, columns=('nombre', 'ip', 'db', 'user', 'activa'), show='headings')
-        self.sedes_tree.heading('nombre', text='Nombre Sede')
-        self.sedes_tree.heading('ip', text='IP Servidor')
-        self.sedes_tree.heading('db', text='Base de Datos')
-        self.sedes_tree.heading('user', text='Usuario')
-        self.sedes_tree.heading('activa', text='Activa')
-        self.sedes_tree.grid(row=0, column=0, sticky='nsew')
-        
-        scrollbar = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.sedes_tree.yview)
-        scrollbar.grid(row=0, column=1, sticky='ns')
-        self.sedes_tree.configure(yscrollcommand=scrollbar.set)
-        
-        self.sedes_tree.bind('<<TreeviewSelect>>', self._on_sede_select)
-
-        # --- Formulario para editar/crear ---
-        form_frame = ttk.LabelFrame(main_frame, text='Detalles de la Sede', padding=10)
-        form_frame.grid(row=0, column=1, sticky='nsew')
-        form_frame.columnconfigure(1, weight=1)
-
-        fields = [
-            ('Nombre Sede:', 'nombre_sede'), ('IP Servidor:', 'ip_servidor'), 
-            ('Nombre BD:', 'nombre_bd'), ('Usuario BD:', 'usuario_bd'),
-            ('Contraseña:', 'password_bd')
-        ]
-        
-        for i, (text, var_name) in enumerate(fields):
-            ttk.Label(form_frame, text=text).grid(row=i, column=0, sticky='w', pady=5, padx=5)
-            show_opt = "*" if var_name == 'password_bd' else None
-            ttk.Entry(form_frame, textvariable=self.admin_sedes_vars[var_name], show=show_opt).grid(row=i, column=1, sticky='ew', pady=5)
-        
-        ttk.Checkbutton(form_frame, text='Sede Activa', variable=self.admin_sedes_vars['activa']).grid(row=len(fields), column=0, columnspan=2, pady=10)
-
-        # --- Botones ---
-        btn_frame = ttk.Frame(form_frame)
-        btn_frame.grid(row=len(fields) + 1, column=0, columnspan=2, pady=10)
-        
-        ttk.Button(btn_frame, text="Guardar", command=self._save_sede).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="Nuevo", command=self._clear_sede_form).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="Eliminar", command=self._delete_sede).pack(side=tk.LEFT, padx=5)
-
-        # Carga inicial
-        self._load_sedes_to_treeview()
-
-    def _load_sedes_to_treeview(self):
-        """Carga o recarga las sedes desde la BD al Treeview."""
-        for i in self.sedes_tree.get_children():
-            self.sedes_tree.delete(i)
-        
-        try:
-            sedes = self.db_manager.get_sedes_config()
-            for sede in sedes:
-                self.sedes_tree.insert('', tk.END, iid=sede['id'], values=(
-                    sede['nombre_sede'], sede['ip_servidor'], sede['nombre_bd'],
-                    sede['usuario_bd'], 'Sí' if sede['activa'] else 'No'
-                ))
-        except Exception as e:
-            messagebox.showerror("Error", f"No se pudieron cargar las sedes: {e}", parent=self.root)
-
-    def _on_sede_select(self, event):
-        """Puebla el formulario cuando se selecciona una sede en el Treeview."""
-        selected_items = self.sedes_tree.selection()
-        if not selected_items:
-            return
-        
-        item_id = selected_items[0]
-        try:
-            # Re-fetch data for the selected item to get encrypted pass
-            sedes = self.db_manager.get_sedes_config()
-            sede_data = next((s for s in sedes if s['id'] == int(item_id)), None)
-
-            if sede_data:
-                self.admin_sedes_vars['id'].set(sede_data['id'])
-                self.admin_sedes_vars['nombre_sede'].set(sede_data['nombre_sede'])
-                self.admin_sedes_vars['ip_servidor'].set(sede_data['ip_servidor'])
-                self.admin_sedes_vars['nombre_bd'].set(sede_data['nombre_bd'])
-                self.admin_sedes_vars['usuario_bd'].set(sede_data['usuario_bd'])
-                self.admin_sedes_vars['password_bd'].set('') # No mostrar la contraseña
-                self.admin_sedes_vars['activa'].set(sede_data['activa'])
-        except Exception as e:
-            messagebox.showerror("Error", f"No se pudo cargar el detalle de la sede: {e}", parent=self.root)
-            self._clear_sede_form()
-
-    def _save_sede(self):
-        """Guarda una sede (nueva o existente)."""
-        sede_id = self.admin_sedes_vars['id'].get()
-        nombre_sede = self.admin_sedes_vars['nombre_sede'].get().strip()
-
-        if not nombre_sede:
-            messagebox.showwarning("Campo Requerido", "El nombre de la sede no puede estar vacío.", parent=self.root)
-            return
-
-        sede_data = {
-            'nombre_sede': nombre_sede,
-            'ip_servidor': self.admin_sedes_vars['ip_servidor'].get().strip(),
-            'nombre_bd': self.admin_sedes_vars['nombre_bd'].get().strip(),
-            'usuario_bd': self.admin_sedes_vars['usuario_bd'].get().strip(),
-            'activa': self.admin_sedes_vars['activa'].get()
-        }
-
-        password = self.admin_sedes_vars['password_bd'].get()
-        if password: # Si se ingresó una nueva contraseña, encriptarla
-            try:
-                sede_data['password_bd_enc'] = self.cred_manager.encrypt(password)
-            except Exception as e:
-                messagebox.showerror("Error de Encriptación", f"No se pudo encriptar la contraseña: {e}", parent=self.root)
-                return
-        else: # Si se deja en blanco, se mantiene la existente (en caso de edición)
-            sede_data['password_bd_enc'] = None
-            if sede_id:
-                try:
-                    sedes = self.db_manager.get_sedes_config()
-                    existing_sede = next((s for s in sedes if s['id'] == int(sede_id)), None)
-                    if existing_sede:
-                        sede_data['password_bd_enc'] = existing_sede['password_bd_enc']
-                except Exception:
-                    pass
-
-        try:
-            if sede_id: # Actualizar
-                self.db_manager.update_sede(int(sede_id), sede_data)
-                messagebox.showinfo("Éxito", "Sede actualizada correctamente.", parent=self.root)
-            else: # Crear
-                self.db_manager.add_sede(sede_data)
-                messagebox.showinfo("Éxito", "Sede creada correctamente.", parent=self.root)
-            
-            self._clear_sede_form()
-            self._load_sedes_to_treeview()
-        except Exception as e:
-            messagebox.showerror("Error al Guardar", f"No se pudo guardar la sede: {e}", parent=self.root)
-
-    def _clear_sede_form(self):
-        """Limpia el formulario."""
-        for var in self.admin_sedes_vars.values():
-            if isinstance(var, tk.BooleanVar):
-                var.set(True)
-            else:
-                var.set('')
-        self.admin_sedes_vars['nombre_bd'].set('VAD20') # Valor por defecto
-        self.sedes_tree.selection_remove(self.sedes_tree.selection())
-
-    def _delete_sede(self):
-        """Elimina la sede seleccionada."""
-        selected_items = self.sedes_tree.selection()
-        if not selected_items:
-            messagebox.showwarning("Sin Selección", "Por favor, seleccione una sede de la lista para eliminar.", parent=self.root)
-            return
-
-        sede_id = selected_items[0]
-        nombre_sede = self.sedes_tree.item(sede_id, 'values')[0]
-        
-        if not messagebox.askyesno("Confirmar Eliminación", f"¿Está seguro de que desea eliminar la sede '{nombre_sede}'?", parent=self.root):
-            return
-            
-        try:
-            self.db_manager.delete_sede(int(sede_id))
-            messagebox.showinfo("Éxito", "Sede eliminada correctamente.", parent=self.root)
-            self._clear_sede_form()
-            self._load_sedes_to_treeview()
-        except Exception as e:
-            messagebox.showerror("Error al Eliminar", f"No se pudo eliminar la sede: {e}", parent=self.root)
 
 

@@ -7,6 +7,37 @@ y este proyecto adhiere al [Versionado Semántico](https://semver.org/lang/es/).
 
 ---
 
+## [1.5.2] - 10/02/2026
+
+### 🆕 Añadido
+
+#### Actualizaciones Obligatorias durante el Login
+- **Archivos modificados**: `app.py`
+- **Funcionalidad**: Se implementó una comprobación forzada de actualizaciones al iniciar sesión.
+- **Detalles**:
+  - **Caché de 12 horas**: El sistema recuerda la última comprobación para evitar retrasos innecesarios en cada login.
+  - **Bloqueo Mandatorio**: Si hay una actualización disponible, se detiene el inicio de sesión y se muestra un diálogo obligatorio.
+  - **Notas de Versión**: El diálogo incluye el changelog detallado de la nueva versión.
+  - **Botón de Actualización Forzada**: El usuario debe actualizar para poder entrar al sistema.
+- **Razón**: Garantizar que todos los terminales utilicen la última versión crítica de la plataforma.
+
+---
+
+## [1.5.1] - 10/02/2026
+
+### 🐛 Corregido
+
+#### Disponibilidad del Gestor de Actualizaciones
+- **Archivos modificados**: `app.py`
+- **Problema**: El gestor de actualizaciones no estaba disponible inmediatamente después del login (esperaba 30 segundos), causando errores al verificar actualizaciones manualmente.
+- **Solución**: 
+  - Se modificó `_initialize_post_login_components` para instanciar el `UpdateManager` inmediatamente.
+  - Se implementó un asistente `_ensure_update_manager` para inicialización a demanda (lazy loading).
+  - Se difirió únicamente la verificación periódica (verificación de red) por 30 segundos para proteger el rendimiento del inicio.
+- **Beneficio**: Los usuarios pueden verificar actualizaciones manualmente al instante después de iniciar sesión.
+
+---
+
 ## 1.5.0 - 10/02/2026
 
 ### 🆕 Añadido

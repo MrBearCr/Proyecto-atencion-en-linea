@@ -1,0 +1,8 @@
+2026-02-10 13:10:27,411 - INFO - checkpass: log file created
+2026-02-10 13:10:27,411 - INFO - Instalando actualización...
+2026-02-10 13:10:27,793 - INFO - Instalador más reciente encontrado: C:\Users\rafae\OneDrive\Desktop\Proyecto-atencion-en-linea-1\pal\core\updates\extracted\NEXUS-Setup-v1.5.1.exe
+2026-02-10 13:10:27,793 - INFO - Lanzando el instalador a través del script: C:\Users\rafae\OneDrive\Desktop\Proyecto-atencion-en-linea-1\pal\core\updates\extracted\NEXUS-Setup-v1.5.1.exe
+2026-02-10 13:10:27,809 - INFO - subprocess.Popen llamado. Script de actualización iniciado.
+2026-02-10 13:10:27,809 - INFO - checkpass: installer launched
+2026-02-10 13:10:27,809 - INFO - Llamando a restart_callback para cerrar la aplicación.
+2026-02-10 13:10:27,810 - INFO - checkpass: application closing

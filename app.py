@@ -65,6 +65,29 @@ def save_update_url(url: str):
     config['Updates']['url'] = url
     with open(CONFIG_FILE, 'w') as f:
         config.write(f)
+
+def load_last_update_check() -> Optional[datetime]:
+    """Carga la fecha de la última comprobación de actualizaciones."""
+    config = configparser.ConfigParser()
+    if os.path.exists(CONFIG_FILE):
+        config.read(CONFIG_FILE)
+        if 'Updates' in config and 'last_check' in config['Updates']:
+            try:
+                return datetime.fromisoformat(config['Updates']['last_check'])
+            except Exception:
+                return None
+    return None
+
+def save_last_update_check(dt: datetime):
+    """Guarda la fecha de la última comprobación de actualizaciones."""
+    config = configparser.ConfigParser()
+    if os.path.exists(CONFIG_FILE):
+        config.read(CONFIG_FILE)
+    if 'Updates' not in config:
+        config.add_section('Updates')
+    config['Updates']['last_check'] = dt.isoformat()
+    with open(CONFIG_FILE, 'w') as f:
+        config.write(f)
 JERARQUIA_CACHE_FILE = "productos_jerarquia_cache.json"
 FAVORITOS_CACHE_FILE = 'favoritos_cache.json'
 JERARQUIA_CACHE_TTL = timedelta(hours=15)
@@ -3459,7 +3482,8 @@ class DatabaseApp:
 
             # Stock
             if self.modules_enabled.get("stock", False):
-                # Inicializar el notificador (ya importado al inicio de app.py)
+                from pal.ui.toast import ToastNotifier
+                # Inicializar el notificador antes de iniciar el hilo que lo usa
                 self.toaster = ToastNotifier()
                 self.monitor_thread = threading.Thread(target=self.monitorear_favoritos, daemon=True)
                 self.monitor_thread.start()
@@ -8148,14 +8172,45 @@ class DatabaseApp:
 
     def _splash_login_submit(self, username: str, password: str) -> tuple[bool, str]:
         """
-        Validar credenciales desde el splash screen.
-        Retorna (success: bool, message: str)
+        Validar credenciales desde el splash screen e iniciar verificaciones críticas.
         """
         try:
             if not self.auth or not self.db_manager.conn:
                 return False, "Base de datos no conectada"
             
-            # Validar credenciales
+            # 1. Verificación de actualizaciones obligatorias (cada 12h)
+            try:
+                last_check = load_last_update_check()
+                now = datetime.now()
+                
+                # Si nunca se ha verificado o pasaron 12 horas
+                if last_check is None or (now - last_check) > timedelta(hours=12):
+                    print(f"[DEBUG] Ejecutando comprobación obligatoria de actualizaciones...", flush=True)
+                    
+                    # Asegurar que tenemos UpdateManager
+                    if not hasattr(self, 'update_manager') or self.update_manager is None:
+                        update_url = load_update_url()
+                        self.update_manager = UpdateManager(
+                            app_name="Casapro Nexus",
+                            current_version=APP_VERSION,
+                            update_url=update_url
+                        )
+                    
+                    # Verificar si hay actualización
+                    if self.update_manager.check_for_updates():
+                        latest_info = self.update_manager.get_latest_version_info()
+                        if latest_info:
+                            # Programar diálogo mandatorio en el hilo principal
+                            self.root.after(100, lambda: self.show_mandatory_update_dialog(latest_info))
+                            return False, "Actualización obligatoria disponible"
+                    
+                    # Guardar fecha de comprobación exitosa
+                    save_last_update_check(now)
+                    
+            except Exception as e:
+                print(f"[WARNING] Error en comprobación obligatoria: {e}", flush=True)
+
+            # 2. Validar credenciales
             resp = self.auth.login(username, password, ip_address=None)
             if not resp.get('success'):
                 try:
@@ -8298,6 +8353,83 @@ class DatabaseApp:
         except Exception as e:
             self.log(f"Error en cambio de contraseña: {e}", "ERROR")
             messagebox.showerror("Error", f"Error al cambiar contraseña: {str(e)[:100]}")
+    
+    def show_mandatory_update_dialog(self, info: dict):
+        """Muestra una ventana modal que obliga al usuario a actualizar."""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Actualización Obligatoria")
+        dialog.geometry("500x450")
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        # Centrar diálogo
+        dialog.update_idletasks()
+        x = (dialog.winfo_screenwidth() - 500) // 2
+        y = (dialog.winfo_screenheight() - 450) // 2
+        dialog.geometry(f"+{x}+{y}")
+        
+        # Contenido
+        frame = ttk.Frame(dialog, padding=20)
+        frame.pack(fill=tk.BOTH, expand=True)
+        
+        ttk.Label(frame, text="Nueva versión disponible", font=("Segoe UI", 14, "bold")).pack(pady=(0, 10))
+        ttk.Label(frame, text=f"Versión actual: {APP_VERSION}", font=("Segoe UI", 10)).pack(anchor="w")
+        ttk.Label(frame, text=f"Versión requerida: {info.get('version', 'Desconocida')}", font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 15))
+        
+        ttk.Label(frame, text="Notas de la versión:", font=("Segoe UI", 10, "bold")).pack(anchor="w")
+        
+        # Área de texto para changelog (con scroll)
+        text_frame = ttk.Frame(frame)
+        text_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+        
+        changelog_text = tk.Text(text_frame, height=10, font=("Segoe UI", 9), wrap=tk.WORD)
+        scrollbar = ttk.Scrollbar(text_frame, orient="vertical", command=changelog_text.yview)
+        changelog_text.configure(yscrollcommand=scrollbar.set)
+        
+        changelog_text.insert(tk.END, info.get('changelog', 'Sin notas detalladas.'))
+        changelog_text.config(state=tk.DISABLED)
+        
+        changelog_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        ttk.Label(frame, text="Es necesario actualizar para continuar usando la aplicación.", 
+                  foreground="red", wraplength=450, font=("Segoe UI", 10, "italic")).pack(pady=15)
+        
+        # Botones
+        btn_frame = ttk.Frame(frame)
+        btn_frame.pack(fill="x", side="bottom")
+        
+        def _do_update():
+            # Deshabilitar botones
+            btn_update.config(state=tk.DISABLED)
+            btn_exit.config(state=tk.DISABLED)
+            
+            # Cambiar label de estado
+            status_label.config(text="Iniciando descarga...", foreground="blue")
+            
+            # Ejecutar en hilo
+            def _thread_update():
+                try:
+                    # Usar update_and_install existente de DatabaseApp
+                    self.update_and_install(progress_callback=lambda p: self.root.after(0, lambda: status_label.config(text=f"Descargando: {int(p*100)}%")))
+                except Exception as e:
+                    self.root.after(0, lambda: messagebox.showerror("Error", f"No se pudo completar la actualización: {e}"))
+                    self.root.after(0, lambda: [btn_update.config(state=tk.NORMAL), btn_exit.config(state=tk.NORMAL)])
+
+            threading.Thread(target=_thread_update, daemon=True).start()
+
+        btn_update = ttk.Button(btn_frame, text="Actualizar ahora", command=_do_update, style="Accent.TButton")
+        btn_update.pack(side=tk.RIGHT, padx=5)
+        
+        btn_exit = ttk.Button(btn_frame, text="Salir", command=self.shutdown)
+        btn_exit.pack(side=tk.RIGHT)
+        
+        status_label = ttk.Label(frame, text="", font=("Segoe UI", 9))
+        status_label.pack(side="bottom", pady=5)
+        
+        # Prevenir cierre accidental
+        dialog.protocol("WM_DELETE_WINDOW", lambda: None)
     
     def _inicializar_modulos_paralelo(self):
         """

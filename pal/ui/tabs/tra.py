@@ -320,6 +320,9 @@ def setup_tra_tab(app):
     # Estos estilos se aplican cuando hay alta/media rotación + stock bajo
     app.tra_tree.tag_configure('stock_alert', background='#FFE082', foreground='#E65100', font=('', 11, 'bold'))  # Amarillo con naranja oscuro
     
+    # Estilo para VENTAS PERDIDAS (Fila resaltada en morado claro)
+    app.tra_tree.tag_configure('lost_sales_row', background='#E6E6FA', foreground='#000000', font=('', 11, 'bold'))
+    
     # Configurar colores de selección en el style para que funcione correctamente
     style.map('Large.Treeview',
         background=[('selected', '#0D47A1')],  # Azul oscuro para selección

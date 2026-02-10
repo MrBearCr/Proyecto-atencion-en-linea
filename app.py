@@ -4594,6 +4594,13 @@ class DatabaseApp:
         # Usar el cache para obtener el stock
         stock_map = {cod: self._stock_cache.get(cod, 0) for cod in codigos}
         
+        # Identificar productos con stock cero o negativo para consulta de fechas críticas
+        codigos_criticos = [str(cod).strip() for cod in codigos if float(stock_map.get(cod, 0) or 0) <= 0]
+        fechas_criticas = {}
+        if codigos_criticos:
+            fechas_criticas = self.db_manager.obtener_fechas_criticas_tra(codigos_criticos, sede)
+            self.tra_debug_log(f"Fechas críticas obtenidas para {len(fechas_criticas)} productos (Stock <= 0)")
+        
         # Obtener códigos en alerta de stock
         alertas_stock = getattr(self, 'cached_alertas', [])
         codigos_alerta = {str(alerta[0]).strip() for alerta in alertas_stock}
@@ -4601,62 +4608,71 @@ class DatabaseApp:
         for idx, fila in enumerate(datos):
             try:
                 # Manejo robusto para diferentes longitudes de tupla
-                # Después de clasificar_rotacion_tra: [codigo, descripcion, departamento, grupo, subgrupo, neto, rotacion, precio, impuesto1, costo]
                 if len(fila) >= 10:
-                    # Estructura completa con rotación clasificada
-                    codigo = fila[0]
-                    desc = fila[1]
-                    neto = fila[5]
-                    rotacion = fila[6]  # Rotación clasificada
-                    precio = fila[7] if len(fila) > 7 else 0  # n_precio1
-                    impuesto1 = fila[8] if len(fila) > 8 else 0  # n_impuesto1
-                    costo = fila[9] if len(fila) > 9 else 0  # n_costoact
-                elif len(fila) >= 9:
-                    # Estructura con 9 campos (sin costo)
                     codigo = fila[0]
                     desc = fila[1]
                     neto = fila[5]
                     rotacion = fila[6]
                     precio = fila[7]
                     impuesto1 = fila[8]
-                    costo = 0
-                elif len(fila) >= 8:
-                    # Estructura con 8 campos (sin impuesto1)
-                    codigo = fila[0]
-                    desc = fila[1]
-                    neto = fila[5]
-                    rotacion = fila[6]
-                    precio = fila[7]
-                    impuesto1 = 0
-                    costo = 0
-                elif len(fila) >= 7:
-                    # Estructura con 7 campos (solo rotación y precio)
-                    codigo = fila[0]
-                    desc = fila[1]
-                    neto = fila[5]
-                    rotacion = fila[6]
-                    precio = 0
-                    impuesto1 = 0
-                    costo = 0
+                    costo = fila[9]
                 elif len(fila) >= 6:
-                    # Estructura básica sin rotación clasificada
                     codigo, desc, _, _, _, neto = fila[:6]
-                    rotacion = "SIN CLASIFICAR"
-                    precio = 0
-                    impuesto1 = 0
+                    rotacion = fila[6] if len(fila) > 6 else "SIN CLASIFICAR"
+                    precio = fila[7] if len(fila) > 7 else 0
+                    impuesto1 = fila[8] if len(fila) > 8 else 0
                     costo = 0
-                    # Solo loggear la primera vez para evitar spam
-                    self.tra_debug_log(
-                        f"Fila sin rotación clasificada (6 campos): {codigo}",
-                        throttle_key="missing_rotation",
-                        throttle_seconds=10.0
-                    )
                 else:
-                    self.log(f"[TRA DEBUG] Fila con formato incorrecto ({len(fila)} campos): {fila}", "WARNING")
                     continue
 
                 stock_actual = int(stock_map.get(codigo, 0) or 0)
                 porcentaje = getattr(self, 'tra_porcentajes_map', {}).get(str(codigo), 0.0)
+                
+                # --- LÓGICA DE VENTAS PERDIDAS ---
+                is_lost_sale = False
+                lost_sales_msg = ""
+                dias_fuera_msg = ""
+                ult_compra_msg = ""
+                ult_venta_msg = ""
+                
+                # CASO 1: VENTAS PERDIDAS (Solo Stock == 0 y Rotación ALTA)
+                current_codigo_str = str(codigo).strip()
+                rotacion_norm = str(rotacion or "").strip().upper()
+                
+                if stock_actual == 0 and rotacion_norm == "ALTA" and current_codigo_str in fechas_criticas:
+                    update_date, last_ven, total_sales_since_uc = fechas_criticas[current_codigo_str]
+                    if update_date and last_ven:
+                        today = datetime.now()
+                        try:
+                            if isinstance(update_date, str):
+                                update_date = datetime.strptime(update_date[:19].replace('T', ' '), '%Y-%m-%d %H:%M:%S')
+                            if isinstance(last_ven, str):
+                                last_ven = datetime.strptime(last_ven[:19].replace('T', ' '), '%Y-%m-%d %H:%M:%S')
+                            
+                            dias_activo = (last_ven - update_date).days + 1
+                            dias_activo = max(1, dias_activo)
+                            days_out = (today - last_ven).days
+                            
+                            if days_out > 0:
+                                is_lost_sale = True
+                                rate = total_sales_since_uc / dias_activo
+                                lost_units = rate * days_out
+                                
+                                mostrar_dolares = getattr(self, 'tra_mostrar_dolares_var', tk.BooleanVar()).get()
+                                precio_real = float(precio or 0) * (1 + float(impuesto1 or 0) / 100)
+                                if mostrar_dolares and precio_real > 0:
+                                    lost_sales_msg = f"PERDIDA: ${lost_units * precio_real:,.2f}"
+                                else:
+                                    lost_sales_msg = f"PERDIDA: {lost_units:.0f} UNID"
+                                
+                                dias_fuera_msg = f"FUERA: {days_out} DÍAS"
+                                ult_compra_msg = f"UC: {update_date.strftime('%d/%m/%y')}"
+                                ult_venta_msg = f"UV: {last_ven.strftime('%d/%m/%y')}"
+                                
+                                if days_out > 180 and total_sales_since_uc == 0:
+                                    ult_venta_msg = "ESTANCADO"
+                        except Exception as date_err:
+                            self.tra_debug_log(f"Error procesando fechas para {codigo}: {date_err}", level="DEBUG")
 
                 # Calcular stock ideal y días restantes
                 stock_ideal = self.calcular_stock_ideal_producto(neto)
@@ -4671,63 +4687,51 @@ class DatabaseApp:
                 if dias_restantes is not None:
                     try:
                         dr = float(dias_restantes)
-                        if dr < 25:
-                            estado_stock = "Posible quiebre"
-                        elif 25 <= dr <= 59:
-                            estado_stock = "Alerta Compra"
-                        elif 60 <= dr <= 90:
-                            estado_stock = "Optimo"
-                        elif 91 <= dr <= 119:
-                            estado_stock = "Critico"
-                        else: # >= 120
-                            estado_stock = "Sobre Stock"
-                    except:
-                        pass
+                        if dr < 25: estado_stock = "Posible quiebre"
+                        elif 25 <= dr <= 59: estado_stock = "Alerta Compra"
+                        elif 60 <= dr <= 90: estado_stock = "Optimo"
+                        elif 91 <= dr <= 119: estado_stock = "Critico"
+                        else: estado_stock = "Sobre Stock"
+                    except: pass
 
-                # Determinar tag de color según rotación con filas alternadas
+                # Determinar tag de color
                 tag_base = (str(rotacion).lower() if rotacion else "sin_clasificar")
-                if idx % 2 == 0:
-                    tag_rotacion = tag_base  # Filas pares: colores claros
-                else:
-                    tag_rotacion = f"{tag_base}_alt"  # Filas impares: colores oscuros
+                tag_rotacion = tag_base if idx % 2 == 0 else f"{tag_base}_alt"
 
-                # Formatear neto según el modo de display
-                neto_valor = float(neto or 0)
-                mostrar_dolares = getattr(self, 'tra_mostrar_dolares_var', tk.BooleanVar()).get()
-                
-                # Calcular precio real con impuesto incluido
-                precio_real = float(precio or 0)
-                if precio_real > 0 and impuesto1 > 0:
-                    # Precio real = precio_base * (1 + impuesto1/100)
-                    precio_real = precio_real * (1 + float(impuesto1) / 100)
-                
-                # Formatear valor de ventas según el modo
-                if mostrar_dolares and precio_real > 0:
-                    ventas_display = f"{neto_valor * precio_real:.2f}"
+                # Formatear valores finales
+                if is_lost_sale:
+                    values = (
+                        codigo,
+                        desc,
+                        rotacion or "SIN CLASIFICAR",
+                        lost_sales_msg,
+                        dias_fuera_msg,
+                        0,
+                        ult_compra_msg,
+                        "N/A",
+                        ult_venta_msg
+                    )
+                    inserted_tags = ("lost_sales_row",)
                 else:
-                    ventas_display = f"{neto_valor:.0f}"
-                
-                # Formatear porcentaje
-                porcentaje_display = f"{porcentaje:.2f}%"
-                
-                # Preparar valores para insertar
-                values = (
-                    codigo,
-                    desc,
-                    rotacion or "SIN CLASIFICAR",
-                    ventas_display,
-                    porcentaje_display,
-                    stock_actual,
-                    stock_ideal,
-                    f"{dias_restantes:.0f}" if dias_restantes is not None else "N/A",
-                    estado_stock
-                )
+                    neto_valor = float(neto or 0)
+                    mostrar_dolares = getattr(self, 'tra_mostrar_dolares_var', tk.BooleanVar()).get()
+                    precio_real = float(precio or 0) * (1 + float(impuesto1 or 0) / 100)
+                    ventas_display = f"{neto_valor * precio_real:.2f}" if mostrar_dolares and precio_real > 0 else f"{neto_valor:.0f}"
+                    
+                    values = (
+                        codigo, desc, rotacion or "SIN CLASIFICAR",
+                        ventas_display, f"{porcentaje:.2f}%",
+                        stock_actual, stock_ideal,
+                        f"{dias_restantes:.0f}" if dias_restantes is not None else "N/A",
+                        estado_stock
+                    )
+                    inserted_tags = (tag_rotacion,)
                 
                 # Insertar en el treeview
-                item_id = self.tra_tree.insert("", tk.END, values=values, tags=(tag_rotacion,))
+                item_id = self.tra_tree.insert("", tk.END, values=values, tags=inserted_tags)
                 
-                # Aplicar tag adicional si está en alerta de stock
-                if str(codigo).strip() in codigos_alerta:
+                # Aplicar tag adicional si está en alerta de stock (y no es lost sale ya resaltado)
+                if not is_lost_sale and str(codigo).strip() in codigos_alerta:
                     self.tra_tree.item(item_id, tags=(tag_rotacion, "stock_alert"))
             
             except Exception as e:

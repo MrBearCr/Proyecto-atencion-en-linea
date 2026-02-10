@@ -7,6 +7,15 @@ y este proyecto adhiere al [Versionado Semántico](https://semver.org/lang/es/).
 
 ---
 
+## [1.6.0] - 10/02/2026
+
+### 🆕 Añadido
+- **Análisis de Ventas Perdidas en RI (TRA)**
+  - Implementación de proyección de ventas perdidas para productos con stock cero.
+  - Uso de `Update_date` (MA_PRODUCTOS) para inicio de disponibilidad.
+  - Integración visual de mensajes en columnas existentes (Ventas, Días Fuera, UC, UV).
+  - Resaltado en morado claro (`#E6E6FA`) para filas con quiebre de stock proyectado.
+
 ## [1.5.2] - 10/02/2026
 
 ### 🆕 Añadido

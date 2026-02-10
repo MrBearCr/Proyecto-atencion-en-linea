@@ -25,7 +25,7 @@ def filter_ventas_tra(ventas, dept_code=None, group_code=None, sub_code=None,
         alertas_stock: Lista de tuplas (codigo, desc, stock, nivel) de productos en alerta
         
     Returns:
-        list: Lista filtrada de datos de ventas, ordenada por: favoritos+alerta, alerta, neto descendente
+        list: Lista filtrada de datos de ventas, ordenada por: Lost Sales (ALTA+0), Favoritos, Neto desc
     """
     if not ventas:
         return []
@@ -34,8 +34,21 @@ def filter_ventas_tra(ventas, dept_code=None, group_code=None, sub_code=None,
     favoritos = favoritos or set()
     alertas_stock = alertas_stock or []
     
-    # Crear set de códigos en alerta para búsqueda rápida
-    codigos_alerta = {str(alerta[0]).strip() for alerta in alertas_stock}
+    # Crear sets para búsqueda rápida de stock crítico
+    stocks_cero = set()
+    stocks_negativos = set()
+    if alertas_stock:
+        for a in alertas_stock:
+            try:
+                # alerta = (codigo, descripcion, stock, nivel_alerta)
+                s = float(a[2] or 0)
+                cod = str(a[0]).strip()
+                if s == 0:
+                    stocks_cero.add(cod)
+                elif s < 0:
+                    stocks_negativos.add(cod)
+            except:
+                pass
     
     # Filtro jerárquico unificado (lee jerarquía desde el propio registro: idx 2,3,4)
     datos_filtrados = filter_by_hierarchy(
@@ -60,6 +73,18 @@ def filter_ventas_tra(ventas, dept_code=None, group_code=None, sub_code=None,
             )
         ]
     
+    # Crear set para búsqueda rápida de stock cero (Ventas Perdidas)
+    stocks_cero = set()
+    if alertas_stock:
+        for a in alertas_stock:
+            try:
+                # alerta = (codigo, descripcion, stock, nivel_alerta)
+                s = float(a[2] or 0)
+                if s == 0:
+                    stocks_cero.add(str(a[0]).strip())
+            except:
+                pass
+    
     # Filtro de rotación (si se implementa en el futuro)
     if filter_rotacion != "TODAS":
         datos_filtrados = [
@@ -67,32 +92,27 @@ def filter_ventas_tra(ventas, dept_code=None, group_code=None, sub_code=None,
             if len(r) > 6 and str(r[6]).upper() == filter_rotacion.upper()
         ]
     
-    # Ordenar con prioridad: Favoritos > Rotación (ALTA > MEDIA > BAJA) > Alertas > Neto
-    def _get_rotacion(item):
-        """Extrae rotación de forma segura"""
+    def _get_rotacion_val(item):
+        """Extrae valor numérico de rotación para ordenamiento (ALTA=0, etc)"""
         try:
             if len(item) > 6:
-                rotacion = str(item[6]).upper()
-                if rotacion == 'ALTA':
-                    return 0  # Prioridad más alta
-                elif rotacion == 'MEDIA':
-                    return 1
-                elif rotacion == 'BAJA':
-                    return 2
-            return 3  # Sin clasificación
+                rot = str(item[6] or "").strip().upper()
+                if rot == 'ALTA': return 0
+                if rot == 'MEDIA': return 1
+                if rot == 'BAJA': return 2
+            return 3
         except:
             return 3
     
+    # Ordenar con prioridad: 
+    # 1. Ventas Perdidas (Stock == 0 Y Rotación ALTA)
+    # 2. Representación (Neto descendente)
     datos_ordenados = sorted(
         datos_filtrados,
         key=lambda x: (
-            # 1. Favoritos primero (False=0 < True=1)
-            str(x[0]) not in favoritos,
-            # 2. Rotación (ALTA=0, MEDIA=1, BAJA=2)
-            _get_rotacion(x),
-            # 3. Alerta de stock (con alerta primero: False=0 < True=1)
-            str(x[0]) not in codigos_alerta,
-            # 4. Neto descendente (negativo para orden inverso)
+            # 1. Ventas Perdidas (Stock 0 + ALTA) -> True=0, False=1.
+            not (str(x[0]).strip() in stocks_cero and _get_rotacion_val(x) == 0),
+            # 2. Representación (Neto descendente)
             -_get_tra_neto(x)
         )
     )

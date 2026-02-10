@@ -1244,6 +1244,56 @@ class DatabaseManager:
             print(f"Error obteniendo chunk de ventas TRA: {str(e)}")
             return []
     
+    def obtener_fechas_criticas_tra(self, codigos, sede_codigo):
+        """
+        Obtiene Update_date, última venta y TOTAL VENTAS desde UC hasta hoy.
+        
+        Returns:
+            dict: {codigo: (update_date, last_ven_date, total_sales_since_uc)}
+        """
+        if not codigos:
+            return {}
+            
+        try:
+            placeholders = ','.join(['?'] * len(codigos))
+            
+            # Subconsulta para última venta y suma de ventas desde Update_date
+            query = f"""
+                SELECT 
+                    RTRIM(LTRIM(p.C_CODIGO)) as codigo,
+                    p.Update_date,
+                    dates.last_ven,
+                    dates.total_qty
+                FROM MA_PRODUCTOS p WITH (NOLOCK)
+                OUTER APPLY (
+                    SELECT 
+                        MAX(i.f_fecha) as last_ven,
+                        SUM(CASE WHEN i.c_Concepto = 'DEV' THEN i.n_Cantidad * -1 ELSE i.n_Cantidad END) AS total_qty
+                    FROM TR_INVENTARIO i WITH (NOLOCK)
+                    WHERE i.c_Codarticulo = p.C_CODIGO 
+                      AND (i.c_Concepto = 'VEN' OR i.c_Concepto = 'DEV')
+                      AND i.f_fecha >= p.Update_date
+                      AND (i.c_Deposito = ? OR ? IN ('00', 'ICH', 'ALL', '%'))
+                ) dates
+                WHERE p.C_CODIGO IN ({placeholders})
+            """
+            
+            params = [sede_codigo, sede_codigo] + list(codigos)
+            rows = self.fetch_data(query, params)
+            
+            fechas = {}
+            for row in rows:
+                codigo = str(row[0]).strip()
+                update_date = row[1]
+                last_ven = row[2]
+                total_qty = float(row[3] or 0)
+                fechas[codigo] = (update_date, last_ven, total_qty)
+                
+            return fechas
+        except Exception as e:
+            print(f"Error obteniendo fechas críticas TRA: {str(e)}")
+            return {}
+
     def obtener_depositos(self):
         """Obtiene lista de depósitos desde MA_DEPOSITO
         

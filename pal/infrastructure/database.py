@@ -5,6 +5,7 @@ import pyodbc
 import configparser
 import time
 import threading
+from typing import List, Dict, Tuple, Any
 from ..core.errors import ErrorCode
 from ..core.credentials import SecureCredentialsManager
 

@@ -1,7 +1,7 @@
 
 
 #define MyAppName "Casapro Nexus"
-#define MyAppVersion "1.3.0"
+#define MyAppVersion "1.5.7"
 #define MyAppPublisher "rafael3gn@gmail.com"
 #define MyAppURL "http://www.example.com/"
 #define MyAppExeName "Casapro Nexus.exe"
@@ -55,6 +55,3 @@ Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
 ; Optional desktop shortcut
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon; IconFilename: "{app}\pal\ui\image.ico";
 
-[Run]
-; Offers to run the application after the installation is complete.
-Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent

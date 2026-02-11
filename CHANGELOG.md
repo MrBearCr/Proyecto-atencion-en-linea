@@ -1,6 +1,39 @@
-# Registro de Cambios (CHANGELOG)
+# Changelog
 
-Todos los cambios notables en el proyecto **PAL (Proyecto Atención en Línea)** serán documentados en este archivo.
+Todas las modificaciones notables a este proyecto serán documentadas en este archivo.
+
+## [1.5.7] - 2026-02-11
+
+### Corregido
+- **Filtros de jerarquía vacíos para usuarios no-admin**
+  - **Problema**: Los filtros de departamento, grupo y subgrupo aparecían vacíos para usuarios no-administradores en su primer inicio de sesión, aunque la jerarquía se cargaba correctamente (547 elementos). Los diccionarios `tra_dept_dict`, `tra_group_dict` y `tra_sub_dict` permanecían vacíos.
+  - **Razón**: La función `cargar_jerarquia_unificada()` tenía un early return que verificaba un flag (`jerarquias_unificadas_cargadas`) pero no verificaba que los diccionarios realmente tuvieran datos. En la segunda llamada (desde `_inicializar_modulos_paralelo`), salía inmediatamente dejando los diccionarios vacíos.
+  - **Solución**: Modificado el early return para verificar tanto el flag como que los diccionarios tengan datos reales. Si el flag está en `True` pero los diccionarios están vacíos, resetea el flag y recarga la jerarquía.
+  - **Beneficio**: Los filtros de jerarquía funcionan correctamente para todos los usuarios, independientemente del orden de inicio de sesión o permisos.
+
+### Agregado
+- **Logs de debug para filtros de jerarquía**
+  - Agregados logs detallados en `on_tra_dept_selected`, `on_tra_group_selected` y `aplicar_filtro_tra` para facilitar el diagnóstico de problemas con filtros.
+  - Los logs muestran el estado de los diccionarios, códigos seleccionados y flujo de filtrado.
+
+## [1.5.6] - 2026-02-11
+
+### 🔧 Cambiado
+- **Optimización de carga de jerarquía y módulos**
+  - **Archivo**: `app.py`
+  - **Razón**: Mejora del rendimiento inicial y corrección de bloqueos en la UI.
+  - **Beneficio**: Tiempos de carga reducidos (vistos 0.049s en caché) y filtros consistentes para todos los usuarios.
+
+### 🐛 Corregido
+- **Filtros vacíos para usuarios no-admin**
+  - **Problema**: Los usuarios sin privilegios administrativos veían los filtros de jerarquía vacíos.
+  - **Solución**: Se aseguró la actualización de la UI en `cargar_jerarquia_unificada` incluso si los datos ya están en memoria.
+- **Sobreescritura de métodos paralelos**
+  - **Problema**: Existían implementaciones duplicadas de `_inicializar_modulos_paralelo`.
+  - **Solución**: Limpieza y consolidación del método para ejecución concurrente real.
+- **Consistencia de estado en Login/Logout**
+  - **Problema**: Comportamiento inconsistente entre diferentes sesiones de usuario.
+  - **Solución**: Se añadió un reinicio de flags al cerrar sesión.
 
 El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.0.0/),
 y este proyecto adhiere al [Versionado Semántico](https://semver.org/lang/es/).

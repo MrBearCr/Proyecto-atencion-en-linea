@@ -43,7 +43,7 @@ from win10toast import ToastNotifier
 CONFIG_FILE = 'db_config.ini'
 LICENSE_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTdAdOg6pI7tOF-9UdFDzw0P5aSpNRc-jGIYHwOHmXb7qqOtag9QTYAi4JU0U2VoIZLd_TjvK_7cxX9/pub?output=csv"
 LICENSE_CLIENT_NAME = "PALPY"
-APP_VERSION = "1.5.5" # Versión actual de la aplicación
+APP_VERSION = "1.5.7" # Versión actual de la aplicación
 UPDATE_URL_DEFAULT = "https://raw.githubusercontent.com/MrBearCr/nexus/main/updates"  # URL base por defecto para actualizaciones (formato raw)
 
 def load_update_url():
@@ -2548,7 +2548,12 @@ class DatabaseApp:
         """Actualiza grupos cuando se selecciona departamento"""
         dept = self.tra_dept_var.get() if hasattr(self, 'tra_dept_var') else None
         dept_cod = self.tra_dept_dict.get(dept) if dept else None
-    
+        
+        # DEBUG: Log de selección de departamento
+        self.log(f"🔍 [TRA] Departamento seleccionado: '{dept}' (código: {dept_cod})", "DEBUG")
+        self.log(f"🔍 [TRA] Diccionario tra_dept_dict tiene {len(self.tra_dept_dict)} departamentos", "DEBUG")
+        self.log(f"🔍 [TRA] Diccionario tra_group_dict tiene {len(self.tra_group_dict)} claves", "DEBUG")
+
         # Resetear subgrupos
         if hasattr(self, 'tra_sub_combo'):
             self.tra_sub_combo['values'] = ['Todos']
@@ -2557,14 +2562,17 @@ class DatabaseApp:
         if dept_cod and hasattr(self, 'tra_group_combo'):
             grupos = list(self.tra_group_dict.get(dept_cod, {}).keys())
             self.tra_group_combo['values'] = ['Todos'] + grupos
+            self.log(f"🔍 [TRA] Grupos cargados para dept {dept_cod}: {len(grupos)} grupos", "DEBUG")
         elif hasattr(self, 'tra_group_combo'):
             self.tra_group_combo['values'] = ['Todos']
+            self.log(f"🔍 [TRA] No hay dept_cod, reseteando grupos a 'Todos'", "DEBUG")
     
         if hasattr(self, 'tra_group_var'):
             self.tra_group_var.set('Todos')
         
         # Resetear página actual y aplicar filtros
         self.tra_current_page = 1
+        self.log(f"🔍 [TRA] Llamando aplicar_filtro_tra()...", "DEBUG")
         self.aplicar_filtro_tra()
 
     def on_group_selected(self):
@@ -2602,21 +2610,27 @@ class DatabaseApp:
         group = self.tra_group_var.get() if hasattr(self, 'tra_group_var') else None
         dept_cod = self.tra_dept_dict.get(dept) if dept else None
         group_cod = self.tra_group_dict.get(dept_cod, {}).get(group) if dept_cod else None
-    
+        
+        # DEBUG: Log de selección de grupo
+        self.log(f"🔍 [TRA] Grupo seleccionado: '{group}' (dept: {dept}, dept_cod: {dept_cod}, group_cod: {group_cod})", "DEBUG")
+
         if hasattr(self, 'tra_sub_combo'):
             if dept_cod and group_cod:
                 # Usar string como key (formato: "dept|group")
                 key = f"{dept_cod}|{group_cod}"
                 subgrupos = list(self.tra_sub_dict.get(key, {}).keys())
                 self.tra_sub_combo['values'] = ['Todos'] + subgrupos
+                self.log(f"🔍 [TRA] Subgrupos cargados para {key}: {len(subgrupos)} subgrupos", "DEBUG")
             else:
                 self.tra_sub_combo['values'] = ['Todos']
+                self.log(f"🔍 [TRA] No hay dept_cod/group_cod, reseteando subgrupos a 'Todos'", "DEBUG")
     
         if hasattr(self, 'tra_sub_var'):
             self.tra_sub_var.set('Todos')
         
         # Resetear página actual y aplicar filtros
         self.tra_current_page = 1
+        self.log(f"🔍 [TRA] Llamando aplicar_filtro_tra()...", "DEBUG")
         self.aplicar_filtro_tra()
 
         
@@ -4425,10 +4439,17 @@ class DatabaseApp:
         dept_cod = self.tra_dept_dict.get(self.tra_dept_var.get()) if hasattr(self, 'tra_dept_var') else None
         group_cod = None
         sub_cod = None
-    
+        
+        # DEBUG: Log de valores de filtro
+        dept_desc = self.tra_dept_var.get() if hasattr(self, 'tra_dept_var') else 'N/A'
+        self.log(f"🔍 [FILTRO TRA] Iniciando filtrado...", "DEBUG")
+        self.log(f"🔍 [FILTRO TRA] Dept seleccionado: '{dept_desc}' -> código: {dept_cod}", "DEBUG")
+        self.log(f"🔍 [FILTRO TRA] Datos base: {len(datos_base)} registros", "DEBUG")
+
         if dept_cod and hasattr(self, 'tra_group_var'):
             group_desc = self.tra_group_var.get()
             group_cod = self.tra_group_dict.get(dept_cod, {}).get(group_desc)
+            self.log(f"🔍 [FILTRO TRA] Grupo seleccionado: '{group_desc}' -> código: {group_cod}", "DEBUG")
         
             if group_cod and hasattr(self, 'tra_sub_var'):
                 sub_desc = self.tra_sub_var.get()
@@ -5099,10 +5120,18 @@ class DatabaseApp:
         import time
         # Evitar cargas duplicadas si ya fue cargado por otro hilo
         if getattr(self, 'jerarquias_unificadas_cargadas', False):
-            # Asegurar que los combos estén actualizados incluso si omitimos la carga
-            self._update_hierarchy_combos()
-            self.log("Jerarquía unificada ya cargada — se omite carga duplicada", "DEBUG")
-            return
+            # IMPORTANTE: Verificar que los diccionarios realmente tengan datos
+            # Si el flag está en True pero los diccionarios están vacíos, hay que recargar
+            if (hasattr(self, 'tra_dept_dict') and self.tra_dept_dict and 
+                hasattr(self, 'tra_group_dict') and self.tra_group_dict):
+                # Asegurar que los combos estén actualizados incluso si omitimos la carga
+                self._update_hierarchy_combos()
+                self.log("Jerarquía unificada ya cargada — se omite carga duplicada", "DEBUG")
+                return
+            else:
+                # Flag está en True pero diccionarios vacíos - resetear flag y recargar
+                self.log("⚠️ Flag de jerarquía en True pero diccionarios vacíos - recargando...", "WARNING")
+                self.jerarquias_unificadas_cargadas = False
         start_time = time.perf_counter()
         
         # Verificar cache primero
@@ -5183,14 +5212,20 @@ class DatabaseApp:
                     if key not in tra_sub_dict:
                         tra_sub_dict[key] = {}
                     tra_sub_dict[key][sub_desc.strip()] = sub_cod.strip()
-            # Asignar a ambos módulos (TRA y MBRP comparten la misma jerar quía)
+            # Asignar a ambos módulos (TRA y MBRP comparten la misma jerarquía)
             self.tra_dept_dict = tra_dept_dict
             self.tra_group_dict = tra_group_dict
             self.tra_sub_dict = tra_sub_dict
             
+            # DEBUG: Verificar asignación
+            self.log(f"🔍 [JERARQUIA] Asignados a TRA: {len(self.tra_dept_dict)} depts, {len(self.tra_group_dict)} groups", "DEBUG")
+            
             self.mbrp_dept_dict = tra_dept_dict.copy()
             self.mbrp_group_dict = tra_group_dict.copy()
             self.mbrp_sub_dict = tra_sub_dict.copy()
+            
+            # DEBUG: Verificar asignación MBRP
+            self.log(f"🔍 [JERARQUIA] Asignados a MBRP: {len(self.mbrp_dept_dict)} depts, {len(self.mbrp_group_dict)} groups", "DEBUG")
             
             # Calcular totales
             total_items = len(tra_dept_dict) + sum(len(v) for v in tra_group_dict.values()) + sum(len(v) for v in tra_sub_dict.values())
@@ -5267,6 +5302,37 @@ class DatabaseApp:
                         self.tra_dept_combo['values'] = valores_tra
                         if hasattr(self, 'tra_dept_var'):
                             self.tra_dept_var.set('Todos')
+                        
+                        # NUEVO: Inicializar combos de grupos y subgrupos con TODAS las opciones disponibles
+                        # Esto asegura que los filtros sean funcionales inmediatamente
+                        if hasattr(self, 'tra_group_combo') and hasattr(self, 'tra_group_dict'):
+                            try:
+                                # Recopilar TODOS los grupos de TODOS los departamentos
+                                all_groups = set()
+                                for dept_groups in self.tra_group_dict.values():
+                                    all_groups.update(dept_groups.keys())
+                                
+                                if all_groups:
+                                    self.tra_group_combo['values'] = ['Todos'] + sorted(list(all_groups))
+                                    if hasattr(self, 'tra_group_var'):
+                                        self.tra_group_var.set('Todos')
+                            except Exception:
+                                pass
+                        
+                        if hasattr(self, 'tra_sub_combo') and hasattr(self, 'tra_sub_dict'):
+                            try:
+                                # Recopilar TODOS los subgrupos de TODOS los grupos
+                                all_subs = set()
+                                for sub_groups in self.tra_sub_dict.values():
+                                    all_subs.update(sub_groups.keys())
+                                
+                                if all_subs:
+                                    self.tra_sub_combo['values'] = ['Todos'] + sorted(list(all_subs))
+                                    if hasattr(self, 'tra_sub_var'):
+                                        self.tra_sub_var.set('Todos')
+                            except Exception:
+                                pass
+                        
                         tra_actualizado = True
                 except (tk.TclError, AttributeError):
                     # Widget destruido o no accesible
@@ -5281,6 +5347,34 @@ class DatabaseApp:
                         self.mbrp_dept_combo['values'] = valores_mbrp
                         if hasattr(self, 'mbrp_dept_var'):
                             self.mbrp_dept_var.set('Todos')
+                        
+                        # NUEVO: Inicializar combos de grupos y subgrupos para MBRP también
+                        if hasattr(self, 'mbrp_group_combo') and hasattr(self, 'mbrp_group_dict'):
+                            try:
+                                all_groups = set()
+                                for dept_groups in self.mbrp_group_dict.values():
+                                    all_groups.update(dept_groups.keys())
+                                
+                                if all_groups:
+                                    self.mbrp_group_combo['values'] = ['Todos'] + sorted(list(all_groups))
+                                    if hasattr(self, 'mbrp_group_var'):
+                                        self.mbrp_group_var.set('Todos')
+                            except Exception:
+                                pass
+                        
+                        if hasattr(self, 'mbrp_sub_combo') and hasattr(self, 'mbrp_sub_dict'):
+                            try:
+                                all_subs = set()
+                                for sub_groups in self.mbrp_sub_dict.values():
+                                    all_subs.update(sub_groups.keys())
+                                
+                                if all_subs:
+                                    self.mbrp_sub_combo['values'] = ['Todos'] + sorted(list(all_subs))
+                                    if hasattr(self, 'mbrp_sub_var'):
+                                        self.mbrp_sub_var.set('Todos')
+                            except Exception:
+                                pass
+                        
                         mbrp_actualizado = True
                 except (tk.TclError, AttributeError):
                     # Widget destruido o no accesible

@@ -7,7 +7,28 @@ y este proyecto adhiere al [Versionado Semántico](https://semver.org/lang/es/).
 
 ---
 
-## [1.6.0] - 10/02/2026
+
+## [1.5.5] - 2026-02-11
+
+### 🔧 Cambiado
+- **Optimización de carga de jerarquía y módulos**
+  - **Archivo**: `app.py`
+  - **Razón**: Mejora del rendimiento inicial y corrección de bloqueos en la UI.
+  - **Beneficio**: Tiempos de carga reducidos (vistos 0.049s en caché) y filtros consistentes para todos los usuarios.
+
+### 🐛 Corregido
+- **Filtros vacíos para usuarios no-admin**
+  - **Problema**: Los usuarios sin privilegios administrativos veían los filtros de jerarquía vacíos.
+  - **Solución**: Se aseguró la actualización de la UI en `cargar_jerarquia_unificada` incluso si los datos ya están en memoria.
+- **Sobreescritura de métodos paralelos**
+  - **Problema**: Existían implementaciones duplicadas de `_inicializar_modulos_paralelo`.
+  - **Solución**: Limpieza y consolidación del método para ejecución concurrente real.
+- **Consistencia de estado en Login/Logout**
+  - **Problema**: Comportamiento inconsistente entre diferentes sesiones de usuario.
+  - **Solución**: Se añadió un reinicio de flags al cerrar sesión.
+
+
+## [1.5.4] - 10/02/2026
 
 ### 🆕 Añadido
 - **Análisis de Ventas Perdidas en RI (TRA)**

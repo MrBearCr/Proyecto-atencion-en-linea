@@ -43,7 +43,7 @@ from win10toast import ToastNotifier
 CONFIG_FILE = 'db_config.ini'
 LICENSE_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTdAdOg6pI7tOF-9UdFDzw0P5aSpNRc-jGIYHwOHmXb7qqOtag9QTYAi4JU0U2VoIZLd_TjvK_7cxX9/pub?output=csv"
 LICENSE_CLIENT_NAME = "PALPY"
-APP_VERSION = "1.4.1" # Versión actual de la aplicación
+APP_VERSION = "1.5.5" # Versión actual de la aplicación
 UPDATE_URL_DEFAULT = "https://raw.githubusercontent.com/MrBearCr/nexus/main/updates"  # URL base por defecto para actualizaciones (formato raw)
 
 def load_update_url():
@@ -5099,6 +5099,8 @@ class DatabaseApp:
         import time
         # Evitar cargas duplicadas si ya fue cargado por otro hilo
         if getattr(self, 'jerarquias_unificadas_cargadas', False):
+            # Asegurar que los combos estén actualizados incluso si omitimos la carga
+            self._update_hierarchy_combos()
             self.log("Jerarquía unificada ya cargada — se omite carga duplicada", "DEBUG")
             return
         start_time = time.perf_counter()
@@ -8296,8 +8298,8 @@ class DatabaseApp:
                 except Exception as e:
                     self.log(f"Error en setup post-login: {e}", "ERROR")
             
-            # Ejecutar setup después de 100ms (después de que el splash se cierre)
-            self.root.after(100, _post_login_setup)
+            # Ejecutar setup después de 150ms (asegurar que el splash y tabs se procesen)
+            self.root.after(150, _post_login_setup)
             
             return True, "Login exitoso"
             
@@ -8435,33 +8437,6 @@ class DatabaseApp:
         # Prevenir cierre accidental
         dialog.protocol("WM_DELETE_WINDOW", lambda: None)
     
-    def _inicializar_modulos_paralelo(self):
-        """
-        Carga los módulos habilitados en segundo plano después del login.
-        Se ejecuta en thread daemon para no bloquear la UI.
-        """
-        try:
-            # Stock
-            if self.modules_enabled.get("stock", False):
-                self.log("📦 Inicializando Stock...", "INFO")
-                self.root.after(100, lambda: self.actualizar_alertas_stock(force_refresh=True))
-            
-            # TRA
-            if self.modules_enabled.get("tra", False):
-                self.log("📈 Inicializando TRA...", "INFO")
-                # Se cargarán bajo demanda en la pestaña
-            
-            # MBRP
-            if self.modules_enabled.get("mbrp", False):
-                self.log("📉 Inicializando MBRP...", "INFO")
-                # Se cargarán bajo demanda en la pestaña
-            
-            # Habilitar UI dependiente
-            self.root.after(200, lambda: self._set_ui_connected(True))
-            self.log("✅ Módulos inicializados", "SUCCESS")
-            
-        except Exception as e:
-            self.log(f"Error inicializando módulos: {e}", "ERROR")
     
     def logout(self):
         """Cierra la sesión actual y muestra pantalla de login."""
@@ -8479,6 +8454,9 @@ class DatabaseApp:
             self.session_token = None
             self.current_user = None
             self.permissions = None
+            
+            # Resetear flags de jerarquías para el próximo usuario
+            self.jerarquias_unificadas_cargadas = False
             
             self.log("Sesión cerrada", "INFO")
             

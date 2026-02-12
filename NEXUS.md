@@ -598,8 +598,10 @@ Asegurar que las operaciones corran en hilos en segundo plano, no en el hilo pri
 - **Reportes RI interactivos**: Ahora puede expandir/colapsar departamentos y grupos en Excel
 
 ## 🛠️ Mejoras
+- Nueva columna 'Marca' en reportes RI y MBRP (Excel)
+- Ajuste de anchos de columna en exportaciones (Proveedor a 350px)
 - Gráficos adaptativos según cantidad de categorías
-- Mejor rendimiento en carga de datos TRA (180+ días)
+- Mejor rendimiento en carga de datos TRA (180+ días) mediante índices
 
 ## 🐛 Correcciones
 - Corregidos gráficos que no se generaban en algunos reportes

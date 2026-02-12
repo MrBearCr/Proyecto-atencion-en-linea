@@ -795,9 +795,13 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
                 subs = db_manager.fetch_data("SELECT C_CODIGO, C_DESCRIPCIO FROM MA_SUBGRUPOS WHERE C_CODIGO IS NOT NULL AND C_DESCRIPCIO IS NOT NULL")
                 sub_desc_map = {codigo: desc for codigo, desc in subs if codigo and desc}
                 
-                logger.info(f"Mapeos cargados - Departamentos: {len(dept_desc_map)}, Grupos: {len(group_desc_map)}, Subgrupos: {len(sub_desc_map)}")
+                # Obtener marcas
+                marcas = db_manager.fetch_data("SELECT RTRIM(LTRIM(C_CODIGO)), COALESCE(c_marca, '') FROM MA_PRODUCTOS WITH (NOLOCK)")
+                marca_map = {str(codigo).strip(): marca for codigo, marca in marcas if codigo}
+                
+                logger.info(f"Mapeos cargados - Departamentos: {len(dept_desc_map)}, Grupos: {len(group_desc_map)}, Subgrupos: {len(sub_desc_map)}, Marcas: {len(marca_map)}")
             except Exception as e:
-                logger.warning(f"No se pudieron cargar las descripciones de jerarquía: {e}")
+                logger.warning(f"No se pudieron cargar las descripciones de jerarquía/marcas: {e}")
             
             # Cargar impuestos (IVA) por producto desde MA_PRODUCTOS.n_impuesto1
             try:
@@ -1007,7 +1011,7 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
                     logger.warning(f"Error cargando proveedores para export: {e}")
         
         # Headers de la tabla (fila 7) - Orden: Ventas Netas, Stock/Stocks, Estado Stock, Rotación
-        headers = ['Código', 'Descripción', 'Departamento', 'Grupo', 'Subgrupo', 'Ventas Netas']
+        headers = ['Código', 'Descripción', 'Marca', 'Departamento', 'Grupo', 'Subgrupo', 'Ventas Netas']
         
         # Agregar columnas de stock según modo ICH
         if ich_mode:
@@ -1074,19 +1078,21 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
                 dept_desc = dept_desc_map.get(dept, dept) if dept else 'Sin clasificar'
                 grupo_desc = group_desc_map.get(grupo, grupo) if grupo else 'Sin clasificar'
                 sub_desc = sub_desc_map.get(sub, sub) if sub else 'Sin clasificar'
+                marca_val = marca_map.get(str(codigo).strip(), '')
                 
                 ws_main.cell(row=row, column=1, value=clean_for_excel(codigo))
                 ws_main.cell(row=row, column=2, value=clean_for_excel(desc))
-                ws_main.cell(row=row, column=3, value=clean_for_excel(dept_desc))
-                ws_main.cell(row=row, column=4, value=clean_for_excel(grupo_desc))
-                ws_main.cell(row=row, column=5, value=clean_for_excel(sub_desc))
+                ws_main.cell(row=row, column=3, value=clean_for_excel(marca_val)) # Marca
+                ws_main.cell(row=row, column=4, value=clean_for_excel(dept_desc))
+                ws_main.cell(row=row, column=5, value=clean_for_excel(grupo_desc))
+                ws_main.cell(row=row, column=6, value=clean_for_excel(sub_desc))
                 
                 # Usar helper robusto para obtener el neto
                 neto_valor = _get_tra_neto(fila)
                 neto_formateado = int(neto_valor) if neto_valor == int(neto_valor) else round(neto_valor, 2)
                 
-                # Columna 6: Ventas Netas
-                ws_main.cell(row=row, column=6, value=neto_formateado)
+                # Columna 7: Ventas Netas
+                ws_main.cell(row=row, column=7, value=neto_formateado)
                 
                 # Obtener código para consultar stock
                 try:
@@ -1094,7 +1100,7 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
                 except Exception:
                     codigo_str = ''
                 
-                current_col = 7
+                current_col = 8 # Starts after Ventas Netas (Col 7)
                 stock_para_calculo = 0
                 
                 # Columnas de stock según modo ICH
@@ -1218,9 +1224,9 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
         ws_main.add_table(table)
         
         # Formato condicional para rotación (columna después de estado stock)
-        # Sin ICH: Stocks(1) + Estado(1) -> col 8 (Stock(7), Estado(8)) -> Rotacion es 9
-        # Con ICH: Stocks(6) + Estado(1) -> col 13 -> Rotacion 14
-        rotacion_col = (8 + 1) if not ich_mode else (12 + 1)
+        # Sin ICH: Código(1), Descripción(2), Marca(3), Dept(4), Grupo(5), Subgrupo(6), Ventas Netas(7), Stock(8), Estado Stock(9), Rotación(10)
+        # Con ICH: Código(1), Descripción(2), Marca(3), Dept(4), Grupo(5), Subgrupo(6), Ventas Netas(7), Stock Cabudare(8), ..., Stock Total(13), Estado Stock(14), Rotación(15)
+        rotacion_col = 10 if not ich_mode else 15
         rotacion_col_letter = get_column_letter(rotacion_col)
         rotacion_range = f"{rotacion_col_letter}{data_start_row}:{rotacion_col_letter}{data_start_row + total_registros - 1}"
         
@@ -1262,32 +1268,45 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
         # Ajustar anchos de columna
         ws_main.column_dimensions['A'].width = 12  # Código
         ws_main.column_dimensions['B'].width = 40  # Descripción
-        ws_main.column_dimensions['C'].width = 20  # Departamento
-        ws_main.column_dimensions['D'].width = 20  # Grupo
-        ws_main.column_dimensions['E'].width = 20  # Subgrupo
-        ws_main.column_dimensions['F'].width = 15  # Ventas Netas
+        ws_main.column_dimensions['C'].width = 15  # Marca
+        ws_main.column_dimensions['D'].width = 20  # Departamento
+        ws_main.column_dimensions['E'].width = 20  # Grupo
+        ws_main.column_dimensions['F'].width = 20  # Subgrupo
+        ws_main.column_dimensions['G'].width = 15  # Ventas Netas
         
+        # Determinar letra de columna Último Proveedor y ajustar su ancho a 350 píxeles
+        # En openpyxl, el ancho no es en píxeles, sino en caracteres aproximados.
+        # 350 píxeles / 7 píxeles por carácter promedio ≈ 50 unidades de ancho.
+        # Ajustar ancho Último Proveedor a 350 píxeles
+        try:
+            if mostrar_proveedores:
+                prov_col_idx = len(headers)
+                prov_col_letter = get_column_letter(prov_col_idx)
+                ws_main.column_dimensions[prov_col_letter].width = 50 # Aprox 350px
+        except Exception:
+            pass
+
         if ich_mode:
-            ws_main.column_dimensions['G'].width = 15  # Stock Cabudare
-            ws_main.column_dimensions['H'].width = 15  # Stock Barinas
-            ws_main.column_dimensions['I'].width = 15  # Stock Guanare
-            ws_main.column_dimensions['J'].width = 15  # Stock Total
-            ws_main.column_dimensions['K'].width = 12  # Rotación
-            ws_main.column_dimensions['L'].width = 15  # Representación %
+            ws_main.column_dimensions['H'].width = 15  # Stock Cabudare
+            ws_main.column_dimensions['I'].width = 15  # Stock Barinas
+            ws_main.column_dimensions['J'].width = 15  # Stock Guanare
+            ws_main.column_dimensions['K'].width = 15  # Stock Total
+            ws_main.column_dimensions['L'].width = 12  # Rotación
+            ws_main.column_dimensions['M'].width = 15  # Representación %
             
             if mostrar_costo_utilidad:
-                ws_main.column_dimensions['M'].width = 15  # Precio + IVA
-                ws_main.column_dimensions['N'].width = 15  # Costo
-                ws_main.column_dimensions['O'].width = 15  # Utilidad %
+                ws_main.column_dimensions['N'].width = 15  # Precio + IVA
+                ws_main.column_dimensions['O'].width = 15  # Costo
+                ws_main.column_dimensions['P'].width = 15  # Utilidad %
         else:
-            ws_main.column_dimensions['G'].width = 15  # Stock
-            ws_main.column_dimensions['H'].width = 12  # Rotación
-            ws_main.column_dimensions['I'].width = 15  # Representación %
+            ws_main.column_dimensions['H'].width = 15  # Stock
+            ws_main.column_dimensions['I'].width = 12  # Rotación
+            ws_main.column_dimensions['J'].width = 15  # Representación %
             
             if mostrar_costo_utilidad:
-                ws_main.column_dimensions['J'].width = 15  # Precio + IVA
-                ws_main.column_dimensions['K'].width = 15  # Costo
-                ws_main.column_dimensions['L'].width = 15  # Utilidad %
+                ws_main.column_dimensions['K'].width = 15  # Precio + IVA
+                ws_main.column_dimensions['L'].width = 15  # Costo
+                ws_main.column_dimensions['M'].width = 15  # Utilidad %
         
         # === HOJA 2: RESUMEN POR ROTACIÓN ===
         ws_summary = wb.create_sheet("Resumen por Rotación")
@@ -1786,7 +1805,7 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
         # Headers de la tabla (fila 7) alineados con el módulo MBRP
         # Incluimos jerarquía para permitir filtros por Departamento/Grupo/Subgrupo
         headers = [
-            'Código', 'Descripción', 'Departamento', 'Grupo', 'Subgrupo',
+            'Código', 'Descripción', 'Marca', 'Departamento', 'Grupo', 'Subgrupo',
             'Rotación', 'Ventas', 'Stock Actual'
         ]
         
@@ -1825,7 +1844,7 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
         # Con ICH sin costo/utilidad: columna O (15) 
         # Sin ICH: no hay detalle ICH
         if ich_mode:
-            detalle_ich_col = 18 if mostrar_costo_utilidad else 15
+            detalle_ich_col = 19 if mostrar_costo_utilidad else 16
         else:
             detalle_ich_col = None
 
@@ -2075,8 +2094,13 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
                     f"[EXPORT MBRP] Mapeos cargados - Departamentos: {len(dept_desc_map)}, "
                     f"Grupos: {len(group_desc_map)}, Subgrupos: {len(sub_desc_map)}"
                 )
+                
+                # Obtener marcas
+                marcas = db_manager.fetch_data("SELECT RTRIM(LTRIM(C_CODIGO)), COALESCE(c_marca, '') FROM MA_PRODUCTOS WITH (NOLOCK)")
+                marca_map_mbrp = {str(codigo).strip(): marca for codigo, marca in marcas if codigo}
+                logger.info(f"[EXPORT MBRP] Marcas cargadas: {len(marca_map_mbrp)}")
             except Exception as e:
-                logger.warning(f"[EXPORT MBRP] No se pudieron cargar descripciones de jerarquía: {e}")
+                logger.warning(f"[EXPORT MBRP] No se pudieron cargar descripciones de jerarquía/marcas: {e}")
 
             # Cargar impuestos (IVA) por producto
             try:
@@ -2252,6 +2276,7 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
                 fila_datos = {
                     'codigo': codigo,
                     'desc': desc,
+                    'marca': marca_val, # Añadido
                     'dept_desc': dept_desc,
                     'grupo_desc': grupo_desc,
                     'sub_desc': sub_desc,
@@ -2303,14 +2328,15 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
                 # Escribir columnas principales
                 ws_main.cell(row=row, column=1, value=clean_for_excel(fila_datos['codigo']))
                 ws_main.cell(row=row, column=2, value=clean_for_excel(fila_datos['desc']))
-                ws_main.cell(row=row, column=3, value=clean_for_excel(fila_datos['dept_desc']))
-                ws_main.cell(row=row, column=4, value=clean_for_excel(fila_datos['grupo_desc']))
-                ws_main.cell(row=row, column=5, value=clean_for_excel(fila_datos['sub_desc']))
-                ws_main.cell(row=row, column=6, value=clean_for_excel(str(fila_datos['rotacion'])))
-                ws_main.cell(row=row, column=7, value=fila_datos['neto_valor'])
-                ws_main.cell(row=row, column=8, value=fila_datos['stock_actual'])
+                ws_main.cell(row=row, column=3, value=clean_for_excel(fila_datos.get('marca', ''))) # Marca añadida
+                ws_main.cell(row=row, column=4, value=clean_for_excel(fila_datos['dept_desc']))
+                ws_main.cell(row=row, column=5, value=clean_for_excel(fila_datos['grupo_desc']))
+                ws_main.cell(row=row, column=6, value=clean_for_excel(fila_datos['sub_desc']))
+                ws_main.cell(row=row, column=7, value=clean_for_excel(str(fila_datos['rotacion'])))
+                ws_main.cell(row=row, column=8, value=fila_datos['neto_valor'])
+                ws_main.cell(row=row, column=9, value=fila_datos['stock_actual'])
                 
-                current_col = 8
+                current_col = 9
                 
                 # Columnas de stock por sede (solo modo ICH)
                 if ich_mode:
@@ -2319,13 +2345,13 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
                     stock_barinas = dist.get('Barinas', 0)
                     stock_guanare = dist.get('Guanare', 0)
                     
-                    ws_main.cell(row=row, column=9, value=stock_cabudare)
-                    ws_main.cell(row=row, column=10, value=stock_barinas)
-                    ws_main.cell(row=row, column=11, value=stock_guanare)
-                    current_col = 11
+                    ws_main.cell(row=row, column=10, value=stock_cabudare)
+                    ws_main.cell(row=row, column=11, value=stock_barinas)
+                    ws_main.cell(row=row, column=12, value=stock_guanare)
+                    current_col = 12
                 else:
                     # Si no es modo ICH, dejamos espacios para las columnas de sede
-                    current_col = 8
+                    current_col = 9
                 
                 # Columnas adicionales de análisis
                 current_col += 1
@@ -2397,13 +2423,15 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
                 showLastColumn=False, showRowStripes=True, showColumnStripes=False
             )
             ws_main.add_table(table)
-        
-# Formato condicional para Índice de Movilidad (IM %)
+        # Formato condicional para Índice de Movilidad (IM %)
         if filas_exportadas > 0:
-            # Determinar columna de IM % según modo ICH
-            # Sin ICH: Columna M (13), Con ICH: Columna M (13) 
-            # Las columnas de stock por sede (I,K) no afectan la posición del IM %
-            im_col_letter = 'M'  # Siempre columna 13 (IM %)
+            # Determinar columna de IM % dinámicamente
+            try:
+                im_col_idx = headers.index('IM %') + 1
+                im_col_letter = get_column_letter(im_col_idx)
+            except Exception:
+                im_col_letter = 'N' if ich_mode else 'K' # Fallback
+                
             im_range = f"{im_col_letter}{data_start_row}:{im_col_letter}{data_start_row + filas_exportadas - 1}"
             
             # IM < 5% = Rojo (crítico)
@@ -2423,8 +2451,8 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
             
             # Formato condicional especial para modo ICH
             if ich_mode and filas_exportadas > 0:
-                # Columna de stock actual (siempre columna H)
-                stock_range = f"H{data_start_row}:H{data_start_row + filas_exportadas - 1}"
+                # Columna de stock actual (siempre columna I ahora que Marca está en C)
+                stock_range = f"I{data_start_row}:I{data_start_row + filas_exportadas - 1}"
                 ws_main.conditional_formatting.add(stock_range,
                     CellIsRule(operator='equal', formula=[0],
                               fill=PatternFill(start_color="FFE5E5", end_color="FFE5E5"),

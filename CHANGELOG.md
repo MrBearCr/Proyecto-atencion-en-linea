@@ -2,6 +2,25 @@
 
 Todas las modificaciones notables a este proyecto serán documentadas en este archivo.
 
+## [1.5.8] - 2026-02-11
+
+### Agregado
+- **Columna 'Marca' en reportes Excel de RI (TRA) y MBRP**
+  - **Razón**: Visualización de la marca del producto directamente en las exportaciones para facilitar el análisis.
+  - **Solución**: Inserción de la columna en la posición C (columna 3) y desplazamiento de columnas subsiguientes. Se implementó carga masiva optimizada desde `MA_PRODUCTOS`.
+  - **Beneficio**: Reportes más completos y listos para toma de decisiones sin pasos manuales.
+- **Ajuste de ancho para columna 'Último Proveedor'**
+  - **Razón**: Los nombres de proveedores se visualizaban truncados en Excel.
+  - **Solución**: Ajuste del ancho de columna a 50 unidades (~350 píxeles).
+  - **Beneficio**: Identificación rápida y clara de los proveedores en los reportes de rotación.
+
+### Mejorado
+- **Rendimiento de Base de Datos para Módulo TRA**
+  - **Problema**: Carga lenta en consultas con rangos de fechas superiores a 180 días.
+  - **Solución**: Creación de índices optimizados en `TR_INVENTARIO` y `MA_PRODUCTOS`.
+  - **Beneficio**: Mejora sustancial en la velocidad de respuesta de los módulos de análisis.
+  - **Archivo de Migración**: `docs/migrations/008_optimizacion_indices_tra.sql`
+
 ## [1.5.7] - 2026-02-11
 
 ### Corregido
@@ -288,7 +307,6 @@ y este proyecto adhiere al [Versionado Semántico](https://semver.org/lang/es/).
 ### 📚 Documentación
 
 - **WARP.md**: Traducido completamente a español y agregadas directrices de desarrollo
-- **CHANGELOG.md**: Creado este archivo para documentar cambios futuros
 
 ---
 

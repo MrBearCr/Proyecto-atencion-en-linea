@@ -309,19 +309,12 @@ def setup_tra_tab(app):
     app.tra_tree.tag_configure('sin_movimiento', background='#9E9E9E', foreground='#FFFFFF', font=('', 11))  # Gris vibrante
     app.tra_tree.tag_configure('sin_clasificar', background='#9C27B0', foreground='#FFFFFF', font=('', 11))  # Púrpura vibrante
     
-    # Estilos alternados para mejor distinción de filas
+    # Colores alternados para mejor distinción de filas
     app.tra_tree.tag_configure('alta_alt', background='#388E3C', foreground='#FFFFFF', font=('', 11))  # Verde más oscuro
     app.tra_tree.tag_configure('media_alt', background='#F57C00', foreground='#FFFFFF', font=('', 11))  # Naranja más oscuro
     app.tra_tree.tag_configure('baja_alt', background='#D32F2F', foreground='#FFFFFF', font=('', 11))  # Rojo más oscuro
     app.tra_tree.tag_configure('sin_movimiento_alt', background='#757575', foreground='#FFFFFF', font=('', 11))  # Gris más oscuro
     app.tra_tree.tag_configure('sin_clasificar_alt', background='#7B1FA2', foreground='#FFFFFF', font=('', 11))  # Púrpura más oscuro
-    
-    # Estilos para productos con ALERTA de stock (indicador visual adicional)
-    # Estos estilos se aplican cuando hay alta/media rotación + stock bajo
-    app.tra_tree.tag_configure('stock_alert', background='#FFE082', foreground='#E65100', font=('', 11, 'bold'))  # Amarillo con naranja oscuro
-    
-    # Estilo para VENTAS PERDIDAS (Fila resaltada en morado claro)
-    app.tra_tree.tag_configure('lost_sales_row', background='#E6E6FA', foreground='#000000', font=('', 11, 'bold'))
     
     # Configurar colores de selección en el style para que funcione correctamente
     style.map('Large.Treeview',

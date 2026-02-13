@@ -80,22 +80,21 @@ def get_existencias_por_ubicacion(db_manager, codigo, depositos, use_cache=True)
         return 0
 
 def filter_alertas(alertas, producto_jerarquia, dept_code=None, group_code=None, 
-                   sub_code=None, search_text="", filter_level="TODAS", favoritos=None):
+                   subgroup_code=None, search_text="", favoritos=None):
     """
-    Filtra las alertas de stock según múltiples criterios
+    Filtra los productos de quiebre de stock según múltiples criterios
     
     Args:
-        alertas: Lista de alertas desde cache
+        alertas: Lista de quiebres (codigo, descripcion, stock, ultima_venta)
         producto_jerarquia: Dict con jerarquía de productos 
         dept_code: Código de departamento a filtrar
         group_code: Código de grupo a filtrar
-        sub_code: Código de subgrupo a filtrar
+        subgroup_code: Código de subgrupo a filtrar
         search_text: Texto para buscar en código/descripción
-        filter_level: Nivel de alerta ('TODAS', 'CRÍTICA', 'MEDIA', 'LEVE')
         favoritos: Set de códigos favoritos
         
     Returns:
-        list: Lista filtrada de alertas
+        list: Lista filtrada de quiebres
     """
     if not alertas:
         return []
@@ -108,12 +107,12 @@ def filter_alertas(alertas, producto_jerarquia, dept_code=None, group_code=None,
         datos_filtrados,
         dept_code=dept_code,
         group_code=group_code,
-        sub_code=sub_code,
+        sub_code=subgroup_code,
         get_code=lambda r: r[0],
         jerarquia_map=producto_jerarquia or {},
         missing_strategy="exclude",
     )
-    if any([dept_code, group_code, sub_code]):
+    if any([dept_code, group_code, subgroup_code]):
         logger.debug(f"Filtro jerárquico aplicado - de {len(alertas)} a {len(datos_filtrados)} productos")
     
     # Filtro de texto en descripción y código
@@ -124,20 +123,9 @@ def filter_alertas(alertas, producto_jerarquia, dept_code=None, group_code=None,
             if texto_busqueda in (str(r[1]).lower() + str(r[0]).lower())
         ]
     
-    # Filtro de nivel de alerta
-    filtro_nivel = filter_level.upper()
-    if filtro_nivel != 'TODAS':
-        datos_filtrados = [r for r in datos_filtrados if str(r[3]).upper() == filtro_nivel]
-    
-    # Ordenar por severidad (CRÍTICA, MEDIA, LEVE), luego por stock asc, luego favoritos (como desempate), luego código
-    def _norm_nivel(n):
-        s = str(n or '').upper()
-        for a,b in [('Á','A'),('É','E'),('Í','I'),('Ó','O'),('Ú','U')]:
-            s = s.replace(a,b)
-        return s
+    # Ordenar por: Favoritos primero, luego fecha de última venta desc, luego código
     def _rank(n):
-        s = _norm_nivel(n)
-        return 0 if s == 'CRITICA' else 1 if s == 'MEDIA' else 2 if s == 'LEVE' else 3
+        return 0 # Nivel removido
     def _fav(code):
         try:
             return 0 if str(code) in favoritos else 1
@@ -155,13 +143,20 @@ def filter_alertas(alertas, producto_jerarquia, dept_code=None, group_code=None,
         datos_filtrados,
         key=lambda r: (
             _fav_rank(r[0]),
-            _rank(r[3] if len(r) > 3 else ''),
-            int(r[2] or 0) if len(r) > 2 and r[2] is not None else 0,
+            float(r[3]) if len(r) > 3 else 0.0, # Unidades perdidas desc
+            str(r[6]) if len(r) > 6 else '',    # Ultima venta desc
             str(r[0])
-        )
+        ),
+        reverse=True # Para que favoritos, mayor pérdida y fecha reciente suban
     )
     
-    return datos_ordenados
+    # Re-ordenar favoritos para que siempre estén arriba independientemente del reverse
+    datos_final = sorted(
+        datos_ordenados,
+        key=lambda r: _fav_rank(r[0])
+    )
+    
+    return datos_final
 
 
 def paginate(datos, current_page, page_size):
@@ -328,100 +323,59 @@ def build_producto_jerarquia(all_jerarquia, codigos_en_alerta):
     return {cod: norm_map[cod] for cod in norm_codes if cod in norm_map}
 
 
-def fetch_stock_alerts_optimized(db_manager, limit=None, offset=0, use_indices=True):
+# Función fetch_stock_alerts_optimized movida a deprecated/stock_legacy.py
+
+def get_multistore_stock_break_alerts(db_manager, depositos, high_rotation_codes=None):
     """
-    Obtiene alertas de stock usando consulta optimizada con índices y paginación
+    Detecta productos con stock 0 en los almacenes configurados que sean de alta rotación.
     
     Args:
-        db_manager: Instancia de DatabaseManager
-        limit: Límite de registros (None para todos)
-        offset: Desplazamiento para paginación
-        use_indices: Si usar hints de índices para optimización
+        db_manager: Administrador de BD
+        depositos: Lista de almacenes tratables
+        high_rotation_codes: Set de códigos identificados como ALTA rotación
         
     Returns:
-        list: Lista de tuplas (codigo, descripcion, stock, nivel)
+        list: Lista de diccionarios con alertas críticas
     """
+    if not depositos:
+        return []
+        
     try:
-        # Consulta optimizada con índices y filtros eficientes
-        base_query = """
-        SELECT 
-            p.C_CODIGO as codigo,
-            COALESCE(p.cu_descripcion_corta, 'SIN DESCRIPCIÓN') as descripcion,
-            ISNULL(d.n_cantidad, 0) as stock,
-            CASE 
-                WHEN ISNULL(d.n_cantidad, 0) <= 7 THEN 'CRÍTICA'
-                WHEN ISNULL(d.n_cantidad, 0) <= 15 THEN 'MEDIA'
-                ELSE 'LEVE'
-            END as nivel
-        FROM MA_PRODUCTOS p {index_hint}
-        LEFT JOIN MA_DEPOPROD d ON p.C_CODIGO = d.c_codarticulo AND d.c_coddeposito = '0301'
-        WHERE p.C_ESTADO = 'A'
-            AND (d.n_cantidad IS NULL OR d.n_cantidad <= 50)
-            AND p.C_CODIGO IS NOT NULL
-            AND (p.cu_descripcion_corta IS NOT NULL AND LTRIM(RTRIM(p.cu_descripcion_corta)) <> '')
+        # 1. Obtener productos con stock total 0 en esos almacenes
+        placeholders = ','.join(['?' for _ in depositos])
+        sql = f"""
+            SELECT 
+                p.C_CODIGO, 
+                p.cu_descripcion_corta,
+                SUM(ISNULL(d.n_cantidad, 0)) as total_stock
+            FROM MA_PRODUCTOS p WITH (NOLOCK)
+            LEFT JOIN MA_DEPOPROD d ON p.C_CODIGO = d.c_codarticulo AND d.c_coddeposito IN ({placeholders})
+            WHERE p.C_ESTADO = 'A'
+            GROUP BY p.C_CODIGO, p.cu_descripcion_corta
+            HAVING SUM(ISNULL(d.n_cantidad, 0)) <= 0
         """
+        rows = db_manager.fetch_data(sql, depositos) or []
         
-        # Aplicar hints de índices si están habilitados
-        index_hint = "WITH (NOLOCK)" if use_indices else ""
-        query = base_query.format(index_hint=index_hint)
+        alerts = []
+        for code, desc, stock in rows:
+            code_str = str(code).strip()
+            # 2. Filtrar solo los que están en la lista de alta rotación (si se provee)
+            if high_rotation_codes is None or code_str in high_rotation_codes:
+                alerts.append({
+                    'codigo': code_str,
+                    'descripcion': desc or code_str,
+                    'stock': 0,
+                    'nivel': 'CRÍTICA',
+                    'tipo': 'QUIEBRE'
+                })
         
-        # Agregar ORDER BY y paginación
-        query += "\nORDER BY ISNULL(d.n_cantidad, 0) ASC, p.C_CODIGO"
-        
-        if limit is not None:
-            if offset > 0:
-                query += f"\nOFFSET {offset} ROWS FETCH NEXT {limit} ROWS ONLY"
-            else:
-                query = f"SELECT TOP ({limit}) * FROM ({query}) AS subquery"
-        
-        result = db_manager.fetch_data(query)
-        return result if result else []
-        
+        return alerts
     except Exception as e:
-        logger.error(f"Error en consulta optimizada de stock: {e}")
+        logger.error(f"Error detectando quiebres de stock: {e}")
         return []
 
 
-def get_stock_alerts_chunked(db_manager, chunk_size=500, max_chunks=None, progress_callback=None):
-    """
-    Obtiene alertas de stock en chunks para evitar bloquear la UI
-    
-    Args:
-        db_manager: Instancia de DatabaseManager
-        chunk_size: Tamaño de cada chunk
-        max_chunks: Máximo número de chunks (None para todos)
-        progress_callback: Función callback para reportar progreso
-        
-    Yields:
-        list: Chunks de alertas de stock
-    """
-    try:
-        chunk_count = 0
-        offset = 0
-        
-        while max_chunks is None or chunk_count < max_chunks:
-            chunk_data = fetch_stock_alerts_optimized(
-                db_manager, limit=chunk_size, offset=offset
-            )
-            
-            if not chunk_data:
-                break
-            
-            chunk_count += 1
-            offset += chunk_size
-            
-            if progress_callback:
-                progress_callback(chunk_count, len(chunk_data), offset)
-            
-            yield chunk_data
-            
-            # Si el chunk es menor que el tamaño esperado, probablemente sea el último
-            if len(chunk_data) < chunk_size:
-                break
-                
-    except Exception as e:
-        logger.error(f"Error en carga chunked de stock: {e}")
-        return
+# Función get_stock_alerts_chunked removida a favor de carga directa de quiebres
 
 
 def cache_stock_data(cache_key, data, ttl_hours=1):

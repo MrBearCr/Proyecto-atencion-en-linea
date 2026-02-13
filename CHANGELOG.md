@@ -2,6 +2,46 @@
 
 Todas las modificaciones notables a este proyecto serán documentadas en este archivo.
 
+## [1.6.0] - 2026-02-12
+
+### 🆕 Añadido
+- **Persistencia de Rotación (Sistema de Nodo Maestro)**
+  - **Razón**: El cálculo de rotación ABC es una operación costosa que antes se repetía innecesariamente para cada usuario.
+  - **Cambio**: Se implementó una tabla de persistencia `pal_productos_rotacion` que almacena el neto, promedio diario y clasificación ABC.
+  - **Lógica de Nodo**: El primer usuario en realizar la carga del día actúa como "Nodo Maestro", persistiendo los resultados para que el resto de la organización los cargue instantáneamente.
+  - **Beneficio**: Reducción del tiempo de carga en el módulo TRA de minutos a milisegundos para los usuarios subsiguientes y menor carga sobre el servidor SQL.
+- **Inteligencia de Rotación en Quiebre de Stock**
+  - **Cambio**: El monitor de quiebres ahora utiliza un `JOIN` con la tabla de persistencia para filtrar automáticamente productos de **Alta y Media Rotación**.
+  - **Beneficio**: Alertas más precisas enfocadas exclusivamente en lo que realmente impacta al negocio, eliminando el ruido de productos de baja rotación.
+- **Nueva Migración de Base de Datos**
+  - **Archivo**: `docs/migrations/009_crear_tabla_rotacion_productos.sql`
+  - **Detalle**: Crea la infraestructura necesaria para la persistencia compartida.
+
+### 🔧 Cambiado
+- **Optimización de Carga TRA en app.py**
+  - **Cambio**: El método `_background_load_ventas_tra_fast` ahora busca datos persistidos frescos antes de iniciar la carga progresiva por chunks.
+  - **Impacto**: Experiencia de usuario "Instant-On" cuando los datos ya han sido calculados por un colega o el sistema.
+
+## [1.5.9] - 2026-02-12
+
+### 🆕 Añadido
+- **Módulo de Quiebre de Stock Optimizado**
+  - **Razón**: Detección más rápida y directa de ventas perdidas sin depender del procesamiento pesado del módulo TRA.
+  - **Cambio**: Implementada consulta SQL directa que cruza Stock 0 con ventas posteriores a la última fecha de compra (`Update_date`).
+  - **Beneficio**: Alertas instantáneas y reducción drástica de consumo de recursos en el servidor.
+- **Configuraciones Globales (Dashboard de Administración)**
+  - **Cambio**: Transformación de la pestaña de Administración en un dashboard interactivo de tarjetas.
+  - **Sub-módulos**: Sedes (Servidores), Depósitos (Almacenes tratables), Exclusiones, Usuarios, Roles y Auditoría.
+  - **Beneficio**: Navegación más intuitiva y organizada, similar al módulo de Clientes.
+- **Restauración de Gestión de Sedes (Servidores)**
+  - **Razón**: Recuperar la funcionalidad de configuración de conexiones remotas (IP, BD, Credenciales) necesaria para el módulo de Clientes.
+  - **Solución**: Nueva vista `SedesServidoresTab` integrada en Configuraciones Globales.
+
+### 🔧 Cambiado
+- **Renombrado de Módulo de Stock a "Quiebre de Stock"**
+  - **Razón**: Reflejar con mayor precisión el propósito del módulo (detectar rupturas de inventario con demanda real).
+  - **Impacto**: Actualizados menús, pestañas y columnas del sistema.
+
 ## [1.5.8] - 2026-02-11
 
 ### Agregado

@@ -37,7 +37,7 @@ from pal.ui.header import create_header, setup_styles as ui_setup_styles
 from pal.ui.splash import SplashScreen
 from pal.ui.clientes_menu import ClientesMenu
 from tkcalendar import Calendar, DateEntry
-from win10toast import ToastNotifier
+from pal.core.config_manager import ConfigManager
 
 
 CONFIG_FILE = 'db_config.ini'
@@ -340,6 +340,7 @@ class DatabaseApp:
             self.modules_enabled = {} # Se cargará desde la BD después del login
             self.audit_log = AuditLogger()
             self.db_manager = DatabaseManager(self.cred_manager)
+            self.config_manager = ConfigManager(self.db_manager)
             self.auth = None
             self.permissions = None
             self.current_user = None
@@ -575,106 +576,156 @@ class DatabaseApp:
             return None
     
     def actualizar_alertas_stock(self, force_refresh=False):
+        """Actualiza las alertas de stock respetando permisos y filtros de rotación"""
         if not self.modules_enabled.get("stock", False):
+            if hasattr(self, 'stock_alert_label'):
+                self.stock_alert_label.pack_forget()
             return
-        """Actualiza las alertas con paginación y caché"""
+
         try:
-            # Ensure database connection is valid before proceeding
             if not self.db_manager.ensure_connection():
-                print("No hay conexión activa a la base de datos para cargar alertas iniciales")
                 return
-            # Forzar refresco si han pasado más de 30 minutos
-            refresh_needed = (
-                force_refresh or 
-                not self.last_refresh or 
-                (datetime.now() - self.last_refresh).seconds > 1800
-            )
+                
+            refresh_needed = force_refresh or not self.last_refresh or (datetime.now() - self.last_refresh).seconds > 1800
         
             if refresh_needed:
-                # Carga rápida inicial (limitada) para no bloquear la UI
-                self.cached_alertas = self.db_manager.obtener_alertas_stock(limit=300)
-                self.last_refresh = datetime.now()
-                self.ultimas_notificaciones.clear()  # <-- Limpiar notificaciones
-                # Reconstruir vistas efectivas (sin departamentos excluidos)
-                self._rebuild_effective_views()
-                # Resumen de distribución por nivel para diagnóstico rápido
+                # Obtener parámetros de la UI
+                # CONFIGURACIÓN FIJA: 30 DÍAS PARA ANÁLISIS DE QUIEBRES
+                dias_context = 30
                 try:
-                    leves = medias = criticas = 0
-                    for _, _, stock, _ in self.cached_alertas:
-                        try:
-                            s = int(stock or 0)
-                        except Exception:
-                            s = 0
-                        if s >= 15:
-                            leves += 1
-                        elif s >= 8:
-                            medias += 1
-                        else:
-                            criticas += 1
-                    self.stock_debug_log(f"Distribución alertas -> Leves: {leves} | Medias: {medias} | Críticas: {criticas}")
+                    solo_alta = self.stock_solo_alta_var.get()
                 except Exception:
-                    pass
-                self.log("Datos de alertas actualizados desde BD", "INFO")
-            # Iniciar carga completa en segundo plano una sola vez
-                try:
-                    if not getattr(self, 'stock_full_loading_started', False):
-                        self.stock_full_loading_started = True
-                        
-                        # Debug: verificar total de registros disponibles
-                        try:
-                            total_count = self._get_total_stock_count()
-                            self.stock_debug_log(f"📃 Registros totales disponibles en BD: {total_count}")
-                        except Exception as debug_e:
-                            self.stock_debug_log(f"⚠️ No se pudo obtener total de registros: {debug_e}")
-                        
-                        if not getattr(self, '_stock_loading_in_progress', False):
-                            threading.Thread(target=self._background_load_alertas_stock, daemon=True).start()
-                            self.log("Carga paralela de alertas iniciada", "INFO")
+                    solo_alta = True
+
+                # Obtener depósitos tratables
+                sedes_config = self.config_manager.get_sedes_config()
+                
+                quiebres_totales = []
+                for sede_name, config in sedes_config.items():
+                    depositos = config.get('almacenes_tratables', [])
+                    if not depositos: continue
+                    
+                    # Extraer código de sede
+                    cod_sede = config.get('codigo_sede')
+                    if not cod_sede:
+                        if " - " in sede_name:
+                            cod_sede = sede_name.split(" - ")[0]
                         else:
-                            self.log("📡 Carga de alertas ya en progreso, omitiendo", "DEBUG")
-                except Exception as e:
-                    self.log(f"No se pudo iniciar carga paralela: {e}", "ERROR")
-        
+                            cod_sede = depositos[0] if depositos else sede_name
+                    
+                    # EXCLUSIÓN TOTAL DE ICH: Solo procesar sedes físicas reales
+                    if cod_sede in ('00', 'ICH', '%', 'ALL'):
+                        continue
+                    
+                    self.stock_debug_log(f"Consultando quiebres para {sede_name} (Cod: {cod_sede}, Rango: {dias_context}d, SoloAlta: {solo_alta})")
+                    
+                    # Carga de quiebres con contexto de rotación normalizado
+                    quiebres = self.db_manager.obtener_quiebres_directos(
+                        depositos, 
+                        solo_alta_rotacion=solo_alta,
+                        sede_context=cod_sede,
+                        dias_context=dias_context,
+                        nombre_sede_display=sede_name,
+                        exclude_depts=getattr(self, 'excluded_depts', [])
+                    )
+                    if quiebres:
+                        quiebres_totales.extend(quiebres)
+                
+                # Convertir a tuplas para compatibilidad
+                self.cached_alertas = [
+                    (q['codigo'], q['descripcion'], q['sede'], q['unidades_perdidas'], q['dias_quiebre'], q['ultima_compra'], q['ultima_venta'])
+                    for q in quiebres_totales
+                ]
+                self.last_refresh = datetime.now()
+                self._rebuild_effective_views()
+                self.root.after(0, self.aplicar_filtro_stock)
+                
+                # POPUP AUTOMÁTICO: Informar si hay quiebres críticos detectados
+                if self.cached_alertas and len(self.cached_alertas) > 0:
+                    # Mostrar alerta parpadeante en el dashboard
+                    if hasattr(self, 'stock_alert_label'):
+                        self.stock_alert_label.pack(side=tk.LEFT, padx=10)
+                        self.toggle_stock_blink()
+
+                    # Lógica de revisión: Solo abrir popup si los datos cambiaron (ID diferente)
+                    import hashlib
+                    codigos_actuales = "".join(sorted([str(q[0]) for q in self.cached_alertas]))
+                    current_id = hashlib.md5(codigos_actuales.encode()).hexdigest()
+                    
+                    last_id = getattr(self, 'quiebre_revisado_id', None)
+                    if current_id != last_id:
+                        self.abrir_popup_quiebres()
+                    else:
+                        self.log("ℹ️ Quiebres detectados pero ya fueron revisados previamente.", "DEBUG")
+                else:
+                    # Ocultar alerta si no hay quiebres
+                    if hasattr(self, 'stock_alert_label'):
+                        self.stock_alert_label.pack_forget()
+                
+                self.log(f"Quiebres de stock actualizados automáticamente ({len(self.cached_alertas)} encontrados)", "INFO")
+
         except Exception as e:
-            print(f"Error al actualizar alertas: {str(e)}")
-            self.log(f"Error crítico al actualizar alertas: {str(e)}", "ERROR")
+            self.log(f"Error al actualizar alertas: {e}", "ERROR")
     
-    def recargar_stock(self):
-        """Recarga completamente el módulo de stock de forma asíncrona sin bloquear la UI"""
+    def abrir_popup_quiebres(self):
+        """Abre el popup de quiebres manualmente desde la alerta o el menú"""
         if not self.modules_enabled.get("stock", False):
-            self.log("Módulo de stock deshabilitado", "WARNING")
             return
+
+        if hasattr(self, 'cached_alertas') and self.cached_alertas:
+            from pal.ui.stock_break_popup import StockBreakPopup
+            # Pasar la instancia de la app para poder llamar a marcar_revisado
+            popup = StockBreakPopup(self.root, self.cached_alertas)
+            # Modificar el botón del popup para que llame a la revisión
+            if hasattr(popup, 'top'):
+                # Buscamos el botón de cierre para inyectar la lógica de revisión
+                for widget in popup.top.winfo_children():
+                    if isinstance(widget, tk.Frame): # El footer
+                        for btn in widget.winfo_children():
+                            if isinstance(btn, tk.Button) and "Entendido" in btn.cget("text"):
+                                btn.configure(command=lambda: self.marcar_quiebres_como_revisados(popup))
+
+    def marcar_quiebres_como_revisados(self, popup_instance):
+        """Marca los quiebres actuales como revisados para no molestar con el popup"""
+        import hashlib
+        if self.cached_alertas:
+            # Creamos un ID único basado en los códigos de productos en quiebre
+            codigos = "".join(sorted([str(q[0]) for q in self.cached_alertas]))
+            self.quiebre_revisado_id = hashlib.md5(codigos.encode()).hexdigest()
+            self.log("✅ Quiebres marcados como revisados. El popup no aparecerá hasta que cambien los datos.", "INFO")
         
-        # Verificar si ya hay una carga en progreso antes de resetear flags
-        if getattr(self, '_stock_loading_in_progress', False):
-            self.log("📡 Carga de stock ya en progreso, omitiendo recarga", "DEBUG")
+        if popup_instance:
+            popup_instance.top.destroy()
+
+    def toggle_stock_blink(self):
+        """Efecto de parpadeo para la alerta de stock en la barra de estado"""
+        if not hasattr(self, 'stock_alert_label') or not self.stock_alert_label.winfo_exists():
             return
+
+        current_color = self.stock_alert_label.cget("foreground")
+        # El color de fondo para "apagar" el texto
+        bg_color = self.root.cget("background") 
         
-        # Resetear flags para permitir nueva carga
-        self.stock_full_loading_started = False
+        # Alternar entre rojo y el color de fondo (efecto desaparecer)
+        next_color = bg_color if current_color == "#D32F2F" else "#D32F2F"
+        self.stock_alert_label.configure(foreground=next_color)
         
-        # Confirmar acción con el usuario
+        # Solo seguir parpadeando si hay quiebres y la etiqueta es visible
+        if hasattr(self, 'cached_alertas') and self.cached_alertas and self.stock_alert_label.winfo_ismapped():
+            self.root.after(600, self.toggle_stock_blink)
+
+    def recargar_stock(self):
+        """Recarga completamente el módulo de stock"""
+        if not self.modules_enabled.get("stock", False): return
+        
         from tkinter import messagebox
-        if not messagebox.askyesno(
-            "Confirmar Recarga", 
-            "¿Está seguro de que desea recargar completamente el módulo de stock?\n\n"
-            "Esto incluirá:\n"
-            "• Recarga de filtros jerárquicos\n"
-            "• Actualización de alertas desde la BD\n"
-            "• Reinicio de la carga paralela\n"
+        if not messagebox.askyesno("Confirmar", "¿Desea recargar los quiebres de stock?"):
+            return
             
-        ):
-            return
-        
-        # Verificar conexión
-        if not hasattr(self.db_manager, 'conn') or not self.db_manager.conn:
-            self.log("No hay conexión activa a la base de datos", "ERROR")
-            messagebox.showerror("Error de Conexión", "No hay conexión activa a la base de datos.")
-            return
-        
-        # Iniciar recarga asíncrona
-        self.log("🚀 Iniciando recarga asíncrona del módulo de stock...", "INFO")
-        threading.Thread(target=self._recargar_stock_async, daemon=True).start()
+        self.log("🚀 Recargando módulo de quiebres...", "INFO")
+        # Recargar jerarquía y luego alertas
+        self.load_stock_filters()
+        self.actualizar_alertas_stock(force_refresh=True)
     
     def _recargar_stock_async(self):
         """Ejecuta la recarga completa del stock en segundo plano con actualizaciones progresivas de UI"""
@@ -1102,7 +1153,8 @@ class DatabaseApp:
             # Consulta optimizada: solo seleccionar columnas necesarias y usar índices
             # Usar el método correcto del DatabaseManager para evitar consultas duplicadas
             return self.db_manager.obtener_ventas_por_producto_chunk(
-                fecha_inicio, fecha_fin, sede_codigo, start_row, fetch_size
+                fecha_inicio, fecha_fin, sede_codigo, start_row, fetch_size,
+                exclude_depts=getattr(self, 'excluded_depts', [])
             )
             
         except Exception as e:
@@ -1110,7 +1162,8 @@ class DatabaseApp:
             # Fallback a método original si la optimizada falla
             try:
                 return self.db_manager.obtener_ventas_por_producto_chunk(
-                    fecha_inicio, fecha_fin, sede_codigo, start_row, fetch_size
+                    fecha_inicio, fecha_fin, sede_codigo, start_row, fetch_size,
+                    exclude_depts=getattr(self, 'excluded_depts', [])
                 )
             except Exception as e2:
                 self.tra_debug_log(f"Error en fallback TRA: {e2}", level="ERROR")
@@ -1151,6 +1204,24 @@ class DatabaseApp:
         load_start_time = time.perf_counter()
         
         try:
+            # Normalizar código de sede para persistencia (00/% -> ICH)
+            sede_persistencia = self.tra_sede_codigo
+            if sede_persistencia in ('00', '%', 'ALL'):
+                sede_persistencia = 'ICH'
+
+            # ATAJO: Verificar si hay datos persistidos frescos (Nodo Maestro)
+            from pal.services.tra import get_persisted_rotation, save_rotation_persistence, clasificar_rotacion
+            dias_context = (self.tra_fecha_fin - self.tra_fecha_inicio).days or 365
+            persisted = get_persisted_rotation(self.db_manager, sede=sede_persistencia, dias_rango=dias_context)
+            if persisted:
+                self.log(f"🚀 TRA: Usando datos de rotación persistidos (Sede: {sede_persistencia}, Rango: {dias_context}d)", "SUCCESS")
+                datos_persisted = self.db_manager.obtener_ventas_persisted_tra(sede=sede_persistencia, dias_rango=dias_context)
+                if datos_persisted:
+                    self.cached_ventas_tra = [tuple(r) for r in datos_persisted]
+                    self.root.after(0, lambda: self._update_tra_phase(3, len(self.cached_ventas_tra), time.perf_counter() - load_start_time))
+                    self.root.after(0, self._finalize_tra_loading)
+                    return
+
             # FASE 1: Carga ultra rápida (primeros 50 registros) - <1 segundo
             self.log("🚀 TRA: Iniciando carga ultra rápida (50 registros)...", "INFO")
             
@@ -1159,7 +1230,8 @@ class DatabaseApp:
                 self.tra_fecha_inicio, 
                 self.tra_fecha_fin, 
                 self.tra_sede_codigo, 
-                limit=50
+                limit=50,
+                exclude_depts=getattr(self, 'excluded_depts', [])
             )
             
             if not datos_ultra_rapidos:
@@ -1182,7 +1254,8 @@ class DatabaseApp:
                 self.tra_fecha_inicio, 
                 self.tra_fecha_fin, 
                 self.tra_sede_codigo, 
-                limit=250  # Total 250 (ya tenemos 50)
+                limit=250,  # Total 250 (ya tenemos 50)
+                exclude_depts=getattr(self, 'excluded_depts', [])
             )
             
             if datos_rapidos and len(datos_rapidos) > len(self.cached_ventas_tra):
@@ -1211,7 +1284,8 @@ class DatabaseApp:
                     self.tra_fecha_fin, 
                     self.tra_sede_codigo, 
                     start_row=start_row, 
-                    fetch_size=chunk_size
+                    fetch_size=chunk_size,
+                    exclude_depts=getattr(self, 'excluded_depts', [])
                 )
                 
                 if not chunk_data:
@@ -1268,6 +1342,25 @@ class DatabaseApp:
                 f"{chunk_count} chunks procesados", 
                 "SUCCESS"
             )
+
+            # GUARDAR PERSISTENCIA (Actuar como Nodo Maestro) - En hilo separado para evitar freeze
+            def _bg_save_persistence():
+                try:
+                    from pal.services.tra import save_rotation_persistence
+                    user_nodo = self.current_user['username'] if self.current_user else "SISTEMA"
+                    dias = (self.tra_fecha_fin - self.tra_fecha_inicio).days or 365
+                    
+                    # Normalizar sede para persistencia (00/% -> ICH)
+                    sede_save = self.tra_sede_codigo
+                    if sede_save in ('00', '%', 'ALL'):
+                        sede_save = 'ICH'
+                        
+                    save_rotation_persistence(self.db_manager, self.cached_ventas_tra, sede_save, dias, user_nodo)
+                except Exception as e:
+                    self.log(f"Error guardando persistencia RI: {e}", "DEBUG")
+            
+            import threading
+            threading.Thread(target=_bg_save_persistence, daemon=True, name="RI_Persistence_Fast").start()
             
             # Aplicar filtros finales
             self.root.after(0, self._finalize_tra_loading)
@@ -1391,138 +1484,76 @@ class DatabaseApp:
                     time.sleep(300)
                     continue
             
-                # Mantener lógica original de alertas
                 try:
-                    current_alerts = self.db_manager.obtener_alertas_stock()
+                    self.monitorear_quiebres_stock()
                 except Exception as e:
-                    self.log(f"[MONITOR] Error obteniendo alertas: {e}", "WARNING")
-                    time.sleep(300)
-                    continue
-            
-                for codigo, desc, stock, nivel in (current_alerts or []):
-                    if codigo in favoritos:
-                        clave = (codigo, stock, nivel)
-                        if clave not in self.ultimas_notificaciones:
-                            try:
-                                self.mostrar_notificacion(codigo, stock, nivel)
-                                self.ultimas_notificaciones.add(clave)
-                            except Exception as e:
-                                self.log(f"[MONITOR] Error mostrando notificación: {e}", "WARNING")
-                
-                # NUEVA CARACTERÍSTICA: Detectar productos críticos de alta/media rotación
-                if hasattr(self, 'cached_ventas_tra') and self.cached_ventas_tra:
-                    try:
-                        self._detectar_y_notificar_criticos(current_alerts or [])
-                    except Exception as e:
-                        self.log(f"[MONITOR] Error detectando críticos: {e}", "DEBUG")
-                        
+                    self.log(f"[MONITOR] Error en monitor de quiebres: {e}", "DEBUG")
+                         
                 time.sleep(300)  # 5 minutos
             
             except Exception as e:
-                self.log(f"[MONITOR] Error monitoreo favoritos: {str(e)}", "ERROR")
+                self.log(f"[MONITOR] Error monitoreo stock: {str(e)}", "ERROR")
                 time.sleep(100)
     
-    def _detectar_y_notificar_criticos(self, alertas_stock):
-        """Detecta y notifica sobre productos de alta/media rotación con alerta de stock"""
-        try:
-            from pal.services.tra import detectar_alertas_rotacion_alta, generar_reporte_critico_rotacion
-            
-            # Detectar productos críticos
-            productos_criticos = detectar_alertas_rotacion_alta(
-                self.cached_ventas_tra,
-                alertas_stock,
-                rotaciones_objetivo=["ALTA", "MEDIA"]
-            )
-            
-            if not productos_criticos:
-                return
-            
-            # Generar reporte
-            reporte = generar_reporte_critico_rotacion(productos_criticos)
-            
-            # Mostrar notificación al usuario (solo primera vez o cambios)
-            # Usar hash del reporte para detectar cambios
-            hash_actual = hash(str(sorted([p['codigo'] for p in productos_criticos])))
-            hash_anterior = getattr(self, '_hash_criticos_anterior', None)
-            
-            if hash_actual != hash_anterior:
-                self._mostrar_alerta_compras(reporte)
-                self._hash_criticos_anterior = hash_actual
-        
-        except Exception as e:
-            self.log(f"Error detectando productos críticos: {e}", "DEBUG")
-    
-    def _mostrar_alerta_compras(self, reporte):
-        """Muestra alerta visual para el departamento de compras"""
-        try:
-            total = reporte.get('total', 0)
-            if total == 0:
-                return
-            
-            por_rotacion = reporte.get('por_rotacion', {})
-            por_nivel = reporte.get('por_nivel', {})
-            
-            # Construir mensaje de alerta
-            mensaje_titulo = f"⚠️ ALERTA CRÍTICA: {total} Producto(s) sin Stock"
-            
-            detalles = []
-            detalles.append(f"Total productos críticos: {total}")
-            
-            if por_rotacion:
-                detalles.append("\nPor Rotación:")
-                for rotacion, cantidad in por_rotacion.items():
-                    detalles.append(f"  • {rotacion}: {cantidad}")
-            
-            if por_nivel:
-                detalles.append("\nPor Nivel de Alerta:")
-                for nivel, cantidad in por_nivel.items():
-                    detalles.append(f"  • {nivel}: {cantidad}")
-            
-            mensaje = "\n".join(detalles)
-            
-            # Mostrar alerta
-            self.log(f"🚨 {mensaje_titulo} - {total} productos", "ERROR")
-            
-            # Toast notification (si disponible)
-            try:
-                if hasattr(self, 'toaster'):
-                    self.toaster.show_toast(
-                        "ALERTA DE COMPRAS",
-                        f"{total} producto(s) de alta/media rotación sin stock",
-                        duration=15,
-                        threaded=False
-                    )
-            except Exception:
-                pass
-        
-        except Exception as e:
-            self.log(f"Error mostrando alerta de compras: {e}", "ERROR")
-
-
-    def mostrar_notificacion(self, codigo, stock, nivel):
+    def monitorear_quiebres_stock(self):
         """
-        Muestra un toast con el nivel de alerta en el depósito principal
-        y las existencias en las ubicaciones de transferencia.
+        Detecta quiebres de stock (Stock 0 en almacenes tratables para productos de alta rotación)
+        usando la lógica directa de ventas después de última compra.
         """
-        from pal.services.stock import get_existencias_por_ubicacion
-        # Base del mensaje
-        mensaje = f"Código:{codigo}| Stock actual:{stock}|Nivel:{nivel} "
+        try:
+            from pal.ui.stock_break_popup import show_stock_break_popup
+            
+            sedes_config = self.config_manager.get_sedes_config()
+            quiebres_consolidados = {}
+            found_new_quiebre = False
+            
+            # Revisar por cada sede configurada
+            for sede_name, config in sedes_config.items():
+                depositos = config.get('almacenes_tratables', [])
+                if not depositos:
+                    continue
+                
+                # Mapear nombre de sede a código (ej. 'Cabudare' -> '0301') si es posible, 
+                # o usar la sede_name como contexto de rotación.
+                # Nota: El monitor usa 365 días por defecto para determinar importancia.
+                quiebres = self.db_manager.obtener_quiebres_directos(depositos, solo_alta_rotacion=True, sede_context=sede_name, dias_context=365)
+                
+                if quiebres:
+                    quiebres_consolidados[sede_name] = quiebres
+                    
+                    # Verificar si hay alguno nuevo para disparar el popup
+                    for q in quiebres:
+                        # La llave ahora incluye sede para notificar individualmente por ocurrencia
+                        notif_key = f"QUIEBRE_{q['codigo']}_{sede_name}"
+                        if notif_key not in self.ultimas_notificaciones:
+                            self.log(f"⚠️ ¡QUIEBRE! {q['codigo']} ({q['descripcion']}) - Sede: {sede_name} | Perdidas: {int(q['unidades_perdidas'])}", "WARNING")
+                            self.ultimas_notificaciones.add(notif_key)
+                            # Mostrar notificación tipo toast individual
+                            self.mostrar_notificacion_quiebre(q['codigo'], q['descripcion'], sede_name)
+                            found_new_quiebre = True
+                
+        except Exception as e:
+            self.log(f"Error en monitoreo de quiebres: {str(e)}", "DEBUG")
+                
+# Los métodos legacy _detectar_y_notificar_criticos y _mostrar_alerta_compras fueron eliminados.
 
-        # Para cada grupo de transferencia, consultar existencias vía servicio
-        for region, deps in LOCATION_GROUPS.items():
-            try:
-                existencias = get_existencias_por_ubicacion(self.db_manager, codigo, deps)
-                mensaje += f"{region}:{existencias} "
-            except Exception:
-                mensaje += f"{region}: error al consultar\n"
 
-        # Mostrar toast
-        self.toaster.show_toast(
-            "CASAPRO STOCK",
-            mensaje,
-            duration=10,
-            threaded=False
-        )
+
+    def mostrar_notificacion_quiebre(self, codigo, desc, sede_name):
+        """Muestra un toast para quiebre de stock en una sede específica."""
+        mensaje = f"Código: {codigo} | Sede: {sede_name}\nDescripción: {desc}"
+        
+        try:
+            if hasattr(self, 'toaster'):
+                self.toaster.show_toast(
+                    "QUIEBRE DE STOCK DETECTADO",
+                    mensaje,
+                    duration=10,
+                    threaded=False
+                )
+        except Exception as e:
+            self.log(f"Error en toast de quiebre: {e}", "DEBUG")
+
 
     
     def exportar_tra_excel(self):
@@ -2450,7 +2481,7 @@ class DatabaseApp:
         self.root.bind_all("<Control-Shift-D>", lambda e: (self.debug_console.toggle() or 0))
 
     def setup_modern_ui(self):   
-        self.root.title("Gestión de Clientes - Corporativo")
+        self.root.title("Casapro - Nexus")
         self.root.geometry("1200x800")
         self.root.minsize(1000, 600)
         
@@ -2467,6 +2498,9 @@ class DatabaseApp:
 
     def load_stock_filters(self):
         """Puebla Combobox tras conectar a BD usando descripciones como identificador visible"""
+        if not hasattr(self, 'dept_combo') or not self.dept_combo.winfo_exists():
+            return
+            
         try:
             deps = self.db_manager.fetch_data(
                 "SELECT C_CODIGO, C_DESCRIPCIO FROM MA_DEPARTAMENTOS"
@@ -2477,15 +2511,18 @@ class DatabaseApp:
         except Exception as e:
             print("Error cargando departamentos:", e)
             self.dept_dict = {}
-            self.dept_combo['values'] = ['Todos']
+            if hasattr(self, 'dept_combo'):
+                self.dept_combo['values'] = ['Todos']
         self.dept_var.set('Todos')
 
         self.group_dict = {}
-        self.group_combo['values'] = ['Todos']
+        if hasattr(self, 'group_combo'):
+            self.group_combo['values'] = ['Todos']
         self.group_var.set('Todos')
 
         self.sub_dict = {}
-        self.sub_combo['values'] = ['Todos']
+        if hasattr(self, 'sub_combo'):
+            self.sub_combo['values'] = ['Todos']
         self.sub_var.set('Todos')
         
         # Cargar depósitos y preferencias
@@ -2736,88 +2773,176 @@ class DatabaseApp:
         except Exception:
             pass
 
-    def aplicar_filtro_stock(self):
-        # Asegurar datos base
-        if not hasattr(self, 'cached_alertas') or not self.cached_alertas:
-            self.actualizar_alertas_stock(force_refresh=True)
+    def load_stock_filters(self):
+        """Carga los departamentos, grupos y subgrupos para el módulo de Stock utilizando la jerarquía unificada."""
+        if not hasattr(self, 'stock_dept_combo'): return
         
-        # Asegurar que existe la vista efectiva (sin departamentos excluidos)
-        if not hasattr(self, 'cached_alertas_effective'):
-            self._rebuild_effective_views()
-        
-        # Verificar y manejar jerarquía de productos
-        if not hasattr(self, 'producto_jerarquia'):
-            self.producto_jerarquia = {}
-        
-        # DEBUG: Verificar estado de jerarquía
-        jerarquia_count = len(self.producto_jerarquia)
-        alertas_count = len(getattr(self, 'cached_alertas_effective', []))
-        self.stock_debug_log(f"Filtro Stock - Jerarquía: {jerarquia_count} productos, Alertas: {alertas_count}")
-        
-        # Filtros actuales (robustos aunque aún no se hayan cargado dicts)
-        dept_dict = getattr(self, 'dept_dict', {}) or {}
-        group_dict = getattr(self, 'group_dict', {}) or {}
-        sub_dict = getattr(self, 'sub_dict', {}) or {}
-        dept_val = self.dept_var.get() if hasattr(self, 'dept_var') else None
-        group_val = self.group_var.get() if hasattr(self, 'group_var') else None
-        sub_val = self.sub_var.get() if hasattr(self, 'sub_var') else None
-        dept_code = dept_dict.get(dept_val)
-        group_code = group_dict.get(group_val)
-        sub_code = sub_dict.get(sub_val)
-        texto_busqueda = (self.search_var.get() if hasattr(self, 'search_var') else '' ).strip()
-        filtro_nivel = (self.filter_var.get() if hasattr(self, 'filter_var') else 'TODAS').upper()
-        favoritos = self._get_favoritos_local()
-        
-        # DEBUG: Log de filtros aplicados
-        filtros_activos = []
-        if dept_code:
-            filtros_activos.append(f"Dept: {self.dept_var.get()}")
-        if group_code:
-            filtros_activos.append(f"Group: {self.group_var.get()}")
-        if sub_code:
-            filtros_activos.append(f"Sub: {self.sub_var.get()}")
-        if texto_busqueda:
-            filtros_activos.append(f"Texto: {texto_busqueda}")
-        if filtro_nivel != 'TODAS':
-            filtros_activos.append(f"Nivel: {filtro_nivel}")
-        
-        self.stock_debug_log(f"Filtros activos: {', '.join(filtros_activos) if filtros_activos else 'Ninguno'}")
-        
-        # Si hay filtros jerárquicos pero no hay jerarquía, intentar cargarla
-        if any([dept_code, group_code, sub_code]) and jerarquia_count == 0:
-            self.stock_debug_log("Detectados filtros jerárquicos pero jerarquía vacía - intentando recargar")
-            try:
-                # Intentar cargar jerarquía de productos de forma síncrona rápida
-                from pal.services.stock import load_all_jerarquia, build_producto_jerarquia
-                if hasattr(self, 'all_jerarquia') and self.all_jerarquia:
-                    # Si tenemos all_jerarquia, crear producto_jerarquia filtrado
-                    # Normalizar códigos antes de construir - usar vista efectiva
-                    alertas_to_use = getattr(self, 'cached_alertas_effective', self.cached_alertas)
-                    codigos_en_alerta = {str(r[0]).strip() for r in alertas_to_use}
-                    self.producto_jerarquia = build_producto_jerarquia(self.all_jerarquia, codigos_en_alerta)
-                    self.stock_debug_log(f"Jerarquía reconstruida desde all_jerarquia: {len(self.producto_jerarquia)} productos")
-                else:
-                    # Cargar desde BD de forma rápida (solo para filtro actual)
-                    self.log("⚠️ Jerarquía vacía detectada - cargando para filtros", "WARNING")
-                    threading.Thread(target=self._init_jerarquia_async, daemon=True).start()
-            except Exception as e:
-                self.stock_debug_log(f"Error intentando recargar jerarquía: {e}")
+        # IMPORTANTE: No llamar a cargar_jerarquia_unificada aquí para evitar bucles infinitos
+        # Si no hay datos, simplemente salimos; el proceso unificado se encargará de llamarnos cuando esté listo
+        if not hasattr(self, 'tra_dept_dict') or not self.tra_dept_dict:
+            return
 
-        from pal.services.stock import filter_alertas, paginate
-        # Usar vista efectiva (sin departamentos excluidos)
-        alertas_to_filter = getattr(self, 'cached_alertas_effective', self.cached_alertas)
+        try:
+            # Reutilizar los diccionarios de la jerarquía unificada para poblar los filtros de stock
+            # 1. Departamentos
+            self.stock_dept_map = self.tra_dept_dict.copy()
+            depts = sorted(list(self.stock_dept_map.keys()))
+            self.stock_dept_combo['values'] = ['Todos'] + depts
+            
+            # Mantener valor actual si es válido, sino 'Todos'
+            if self.stock_dept_var.get() not in self.stock_dept_combo['values']:
+                self.stock_dept_var.set('Todos')
+            
+            # 2. Inicializar grupos y subgrupos
+            self.stock_group_dict = {} # dept_desc -> set of group_desc
+            self.stock_subgroup_dict = {} # (dept_desc, group_desc) -> set of sub_desc
+            
+            # Mapeos para filtros lógicos (usados en aplicar_filtro_stock)
+            self.stock_group_map = {} 
+            self.stock_subgroup_map = {} 
+            
+            # Invertir tra_dept_dict para mapear dept_code -> dept_desc
+            dept_rev = {code: name for name, code in self.tra_dept_dict.items()}
+            
+            # Poblar stock_group_dict desde tra_group_dict
+            if hasattr(self, 'tra_group_dict'):
+                for dept_code, groups in self.tra_group_dict.items():
+                    dept_desc = dept_rev.get(dept_code)
+                    if dept_desc:
+                        self.stock_group_dict[dept_desc] = set(groups.keys())
+                        for g_name, g_code in groups.items():
+                            self.stock_group_map[g_name] = g_code
+                            
+            # Poblar stock_subgroup_dict desde tra_sub_dict
+            if hasattr(self, 'tra_sub_dict'):
+                for key, subs in self.tra_sub_dict.items():
+                    if '|' in key:
+                        d_code, g_code = key.split('|')
+                        d_desc = dept_rev.get(d_code)
+                        # Encontrar el nombre del grupo para este departamento
+                        g_desc = None
+                        if d_code in self.tra_group_dict:
+                            # g_rev: code -> name
+                            g_rev = {code: name for name, code in self.tra_group_dict[d_code].items()}
+                            g_desc = g_rev.get(g_code)
+                        
+                        if d_desc and g_desc:
+                            self.stock_subgroup_dict[(d_desc, g_desc)] = set(subs.keys())
+                            for s_name, s_code in subs.items():
+                                self.stock_subgroup_map[s_name] = s_code
+            
+            # Si no hay selección, asegurar 'Todos'
+            if self.stock_group_var.get() == '': self.stock_group_var.set('Todos')
+            if self.stock_subgroup_var.get() == '': self.stock_subgroup_var.set('Todos')
+            
+            self.log(f"✅ Filtros de stock cargados: {len(depts)} departamentos", "SUCCESS")
+            
+        except Exception as e:
+            self.log(f"Error procesando filtros stock: {e}", "ERROR")
+
+    def on_stock_dept_selected(self, event=None):
+        """Maneja el cambio de departamento en los filtros de stock"""
+        dept_desc = self.stock_dept_var.get()
+        if dept_desc == 'Todos':
+            self.stock_group_combo['values'] = ['Todos']
+            self.stock_group_var.set('Todos')
+            self.stock_subgroup_combo['values'] = ['Todos']
+            self.stock_subgroup_var.set('Todos')
+        else:
+            grupos_desc = sorted(list(self.stock_group_dict.get(dept_desc, set())))
+            self.stock_group_combo['values'] = ['Todos'] + grupos_desc
+            self.stock_group_var.set('Todos')
+            self.stock_subgroup_combo['values'] = ['Todos']
+            self.stock_subgroup_var.set('Todos')
+        self.aplicar_filtro_stock()
+
+    def on_stock_group_selected(self, event=None):
+        """Maneja el cambio de grupo en los filtros de stock"""
+        dept_desc = self.stock_dept_var.get()
+        group_desc = self.stock_group_var.get()
         
-        # Filtrar y ordenar
-        filtrados = filter_alertas(
-            alertas=alertas_to_filter,
-            producto_jerarquia=self.producto_jerarquia,
-            dept_code=dept_code,
-            group_code=group_code,
-            sub_code=sub_code,
-            search_text=texto_busqueda,
-            filter_level=filtro_nivel,
-            favoritos=favoritos,
-        )
+        if group_desc == 'Todos':
+            self.stock_subgroup_combo['values'] = ['Todos']
+            self.stock_subgroup_var.set('Todos')
+        else:
+            subgrupos_desc = sorted(list(self.stock_subgroup_dict.get((dept_desc, group_desc), set())))
+            self.stock_subgroup_combo['values'] = ['Todos'] + subgrupos_desc
+            self.stock_subgroup_var.set('Todos')
+        self.aplicar_filtro_stock()
+
+    def cambiar_pagina_stock(self, delta):
+        """Cambia la página actual de la vista de stock"""
+        if not hasattr(self, 'stock_current_page'): self.stock_current_page = 1
+        self.stock_current_page += delta
+        self.aplicar_filtro_stock()
+
+    def aplicar_filtro_stock(self):
+        """Actualiza la vista del treeview de quiebres aplicando filtros y paginación"""
+        if not hasattr(self, 'stock_tree') or not hasattr(self, 'cached_alertas'):
+            return
+            
+        try:
+            from pal.services.stock import filter_alertas, paginate
+            
+            # Obtener valores de los nuevos filtros (y convertirlos a códigos si es necesario)
+            dept_desc = self.stock_dept_var.get() if hasattr(self, 'stock_dept_var') else 'Todos'
+            group_desc = self.stock_group_var.get() if hasattr(self, 'stock_group_var') else 'Todos'
+            subgroup_desc = self.stock_subgroup_var.get() if hasattr(self, 'stock_subgroup_var') else 'Todos'
+            search_text = self.stock_search_var.get() if hasattr(self, 'stock_search_var') else ''
+            favoritos = getattr(self, 'favoritos', set())
+
+            # Convertir descripciones a códigos para el filtro lógico
+            dept_code = self.stock_dept_map.get(dept_desc) if dept_desc != 'Todos' else None
+            group_code = self.stock_group_map.get(group_desc) if group_desc != 'Todos' else None
+            subgroup_code = self.stock_subgroup_map.get(subgroup_desc) if subgroup_desc != 'Todos' else None
+            
+            # Usar vista efectiva (sin departamentos excluidos)
+            alertas_base = getattr(self, 'cached_alertas_effective', self.cached_alertas)
+            
+            # Filtrar
+            filtrados = filter_alertas(
+                alertas=alertas_base,
+                producto_jerarquia=getattr(self, 'all_jerarquia', {}),
+                dept_code=dept_code,
+                group_code=group_code,
+                subgroup_code=subgroup_code,
+                search_text=search_text,
+                favoritos=favoritos
+            )
+            
+            # Paginación
+            page_data, total_pages, current = paginate(
+                filtrados, 
+                getattr(self, 'stock_current_page', 1), 
+                getattr(self, 'stock_page_size', 250)
+            )
+            
+            self.stock_current_page = current
+            if hasattr(self, 'stock_pagination_label'):
+                self.stock_pagination_label.config(text=f"Página {current}/{total_pages}")
+            
+            # Limpiar y llenar treeview
+            self.stock_tree.delete(*self.stock_tree.get_children())
+            
+            for q in page_data:
+                # q: (codigo, descripcion, sede, unid_perd, dias, ult_compra, ult_venta)
+                codigo = str(q[0])
+                is_fav = "⭐" if codigo in favoritos else "☆"
+                
+                # Formatear unidades para visualización (entero redondeado)
+                try:
+                    u_display = int(round(float(q[3])))
+                except (ValueError, TypeError):
+                    u_display = 0
+                
+                # Crear nueva tupla para visualización con el valor redondeado
+                row_values = (is_fav, q[0], q[1], q[2], u_display, q[4], q[5], q[6])
+                
+                tags = ('favorito',) if codigo in favoritos else ('quiebre',)
+                self.stock_tree.insert("", tk.END, values=row_values, tags=tags)
+                
+        except Exception as e:
+            self.log(f"Error filtrando quiebres stock: {e}", "DEBUG")
         # Diagnóstico: distribución tras aplicar filtro seleccionado (solo en modo debug)
         # Comentado para reducir spam en logs
         # try:
@@ -2839,15 +2964,19 @@ class DatabaseApp:
         #     )
         # except Exception:
         #     pass
-        # Sanitizar filas con longitud incorrecta y tipos esperados
+        # Sanitizar filas (ahora con 7 elementos)
         filtrados_clean = []
         for r in filtrados:
             try:
+                if len(r) < 7: continue 
                 codigo = str(r[0])
                 desc = str(r[1])
-                stock_val = int(r[2]) if r[2] is not None else 0
-                nivel_val = str(r[3]) if len(r) > 3 else ''
-                filtrados_clean.append((codigo, desc, stock_val, nivel_val))
+                sede = str(r[2])
+                unid_perd = float(r[3])
+                dias = int(r[4])
+                ult_compra = r[5]
+                ult_venta = r[6]
+                filtrados_clean.append((codigo, desc, sede, unid_perd, dias, ult_compra, ult_venta))
             except Exception:
                 continue
         # Paginación
@@ -2969,9 +3098,13 @@ class DatabaseApp:
         
     def actualizar_controles_paginacion(self, total_paginas):
         """Actualiza los controles de paginación"""
+        if not hasattr(self, 'pagination_label'):
+            return
         self.pagination_label.config(text=f"Página {self.current_page}/{total_paginas}")
-        self.btn_prev['state'] = 'normal' if self.current_page > 1 else 'disabled'
-        self.btn_next['state'] = 'normal' if self.current_page < total_paginas else 'disabled'    
+        if hasattr(self, 'btn_prev'):
+            self.btn_prev['state'] = 'normal' if self.current_page > 1 else 'disabled'
+        if hasattr(self, 'btn_next'):
+            self.btn_next['state'] = 'normal' if self.current_page < total_paginas else 'disabled'
     
     def load_depositos_stock(self):
         """Carga lista de depósitos desde la base de datos y aplica sedes personalizadas (opcional)"""
@@ -3496,13 +3629,13 @@ class DatabaseApp:
 
             # Stock
             if self.modules_enabled.get("stock", False):
-                from pal.ui.toast import ToastNotifier
+                from win10toast import ToastNotifier
                 # Inicializar el notificador antes de iniciar el hilo que lo usa
                 self.toaster = ToastNotifier()
-                self.monitor_thread = threading.Thread(target=self.monitorear_favoritos, daemon=True)
+                self.monitor_thread = threading.Thread(target=self.monitorear_favoritos, daemon=True, name="MonitorStock")
                 self.monitor_thread.start()
                 self.programar_actualizaciones_stock()
-                self.log("  ✓ Monitor de stock activo", "DEBUG")
+                self.log("  ✓ Monitor de stock y quiebres activo", "DEBUG")
 
             # TRA / MBRP (Inicialización de estructuras si no existen)
             if self.modules_enabled.get("tra", False):
@@ -3568,6 +3701,8 @@ class DatabaseApp:
 
     def on_favorito_click(self, event):
         """Manejar clic en la columna de favoritos usando cache local"""
+        if not hasattr(self, 'stock_tree'):
+            return
         try:
             region = self.stock_tree.identify_region(event.x, event.y)
             if region == "cell":
@@ -3585,18 +3720,8 @@ class DatabaseApp:
         
 
     def _update_stock_extra_columns_headings(self):
-        """Actualiza los encabezados de las columnas 'Stock Sede 1' y 'Stock Sede 2' según la localidad actual"""
-        try:
-            localidad = getattr(self, 'stock_localidad_actual', 'Cabudare')
-            sedes = ['Cabudare', 'Barinas', 'Guanare']
-            if localidad not in sedes:
-                localidad = 'Cabudare'
-            otras = [s for s in sedes if s != localidad]
-            self.stock_tree.heading('Stock', text=f"Stock {localidad}")
-            self.stock_tree.heading('Stock Sede 1', text=f"Stock {otras[0]}")
-            self.stock_tree.heading('Stock Sede 2', text=f"Stock {otras[1]}")
-        except Exception:
-            pass
+        """Ya no es necesario con las columnas estáticas por sede"""
+        pass
 
     def _build_existencias_sedes_map(self, codigos):
         """Devuelve map {codigo: {sede_name: total}} usando SOLO los depósitos seleccionados por sede (visibilidad)."""
@@ -3674,36 +3799,50 @@ class DatabaseApp:
 
     def mostrar_alertas_paginadas(self, datos):
         """Mostrar datos con estado de favoritos y filas alternadas, incluyendo columnas por sede"""
+        if not hasattr(self, 'stock_tree') or not self.stock_tree.winfo_exists():
+            return
         self.stock_tree.delete(*self.stock_tree.get_children())
         favoritos = self._get_favoritos_local()
         
-        # Preparar mapa de existencias por sede para los códigos de la página
-        codigos = [r[0] for r in datos]
-        sede_map = self._build_existencias_sedes_map(codigos)
-        localidad = getattr(self, 'stock_localidad_actual', 'Cabudare')
-        sedes = ['Cabudare', 'Barinas', 'Guanare']
-        if localidad not in sedes:
-            localidad = 'Cabudare'
-        otras = [s for s in sedes if s != localidad]
-        self._update_stock_extra_columns_headings()
+        # Crear mapeo de códigos de depósito a nombres de sede
+        sede_name_map = {}
+        try:
+            sedes_config = self.config_manager.get_sedes_config()
+            for sede_name, config in sedes_config.items():
+                almacenes = config.get('almacenes_tratables', [])
+                for almacen in almacenes:
+                    sede_name_map[almacen] = sede_name
+        except Exception:
+            # Fallback a mapeo manual si falla la configuración
+            sede_name_map = {
+                '0301': 'Cabudare',
+                '0401': 'Guanare',
+                '0101': 'Barinas'
+            }
         
-        for idx, (codigo, desc, stock_total, nivel) in enumerate(datos):
+        for idx, (codigo, desc, sede_codigo, unid_perd, dias, ult_compra, ult_venta) in enumerate(datos):
             es_favorito = codigo in favoritos
             estado = "✓" if es_favorito else "☐"
 
-            # Determinar stocks por sede según columnas actuales
-            sede_vals = sede_map.get(codigo, {})
-            sede_order = getattr(self, '_stock_sedes_order', [])
-            cols_stocks = [int(sede_vals.get(s, 0)) for s in sede_order]
-            
             # Tags
             if es_favorito:
                 tags = ('favorito',)
             else:
-                nivel_base = str(nivel).lower().replace('ítica', 'itica')
-                tags = ((nivel_base,) if idx % 2 == 0 else (f"{nivel_base}_alt",))
+                tags = ('quiebre',) if idx % 2 == 0 else ()
             
-            row_values = [estado, codigo, desc] + cols_stocks + [nivel]
+            # Formatear fechas
+            def fmt_date(d):
+                if not d or str(d).lower() == 'none': return "N/A"
+                if isinstance(d, datetime): return d.strftime("%d/%m/%Y")
+                return str(d)
+
+            compra_str = fmt_date(ult_compra)
+            venta_str = fmt_date(ult_venta)
+            
+            # Convertir código de sede a nombre
+            sede_nombre = sede_name_map.get(sede_codigo, sede_codigo)
+
+            row_values = [estado, codigo, desc, sede_nombre, int(unid_perd), int(dias), compra_str, venta_str]
             self.stock_tree.insert(
                 "", tk.END, 
                 values=tuple(row_values),
@@ -3713,7 +3852,11 @@ class DatabaseApp:
         self.current_filter = self.filter_var.get()
         self.current_page = 1
         # Limpiar selección antes de actualizar
-        self.stock_tree.selection_remove(self.stock_tree.selection())
+        if hasattr(self, 'stock_tree'):
+            try:
+                self.stock_tree.selection_remove(self.stock_tree.selection())
+            except Exception:
+                pass
         self.actualizar_alertas_stock()
 
     def cambiar_pagina(self, delta):
@@ -3799,80 +3942,29 @@ class DatabaseApp:
         # Alerta de stock Supervisores
         if self.modules_enabled.get("stock", False):
             self.stock_tab = ttk.Frame(self.main_notebook)
-            self.main_notebook.add(self.stock_tab, text="🚨 Alertas Stock")
+            self.main_notebook.add(self.stock_tab, text="⚠️ Quiebre de Stock")
             from pal.ui.tabs.stock import setup_stock_tab as setup_stock_tab_ui
             setup_stock_tab_ui(self)
         
-        # Pestaña de Administración (solo si ADMIN habilitado)
+        # Pestaña de Administración (Configuraciones Globales)
         if self.modules_enabled.get("admin", False):
             self.admin_tab = ttk.Frame(self.main_notebook)
-            self.main_notebook.add(self.admin_tab, text="🔓 Administración")
+            self.main_notebook.add(self.admin_tab, text="⚙️ Config. Global")
 
-            admin_nb = ttk.Notebook(self.admin_tab)
-            admin_nb.pack(fill=tk.BOTH, expand=True)
-
-            # Tab: Usuarios (visible si permiso admin.usuarios o admin)
-            show_users = False
-            try:
-                if hasattr(self, 'permissions') and self.current_user:
-                    show_users = self.permissions.tiene_permiso(self.current_user['id'], 'ADMIN', 'usuarios')
-                if self.current_user and self.current_user.get('username', '').lower() == 'admin':
-                    show_users = True
-            except Exception:
-                show_users = self.current_user and self.current_user.get('username', '').lower() == 'admin'
-
-            if show_users:
-                admin_users_frame = ttk.Frame(admin_nb)
-                admin_nb.add(admin_users_frame, text="Usuarios")
-                self._create_admin_users_tab(admin_users_frame)
-
-            # Tab: Roles y Permisos (visible si admin o tiene permiso admin.roles)
-            show_roles = False
-            try:
-                if hasattr(self, 'permissions') and self.current_user:
-                    show_roles = (
-                        self.current_user.get('username', '').lower() == 'admin' or
-                        self.permissions.tiene_permiso(self.current_user['id'], 'ADMIN', 'roles')
-                    )
-            except Exception:
-                show_roles = self.current_user and self.current_user.get('username', '').lower() == 'admin'
-
-            if show_roles:
-                roles_frame = ttk.Frame(admin_nb)
-                admin_nb.add(roles_frame, text="Roles y Permisos")
-                self._create_roles_permissions_tab(roles_frame)
-
-            # Tab: Exclusiones (visible si admin o tiene permiso admin.exclusiones)
-            # TODO: Añadir permiso granular 'admin.exclusiones'
-            show_exclusions = self.current_user and self.current_user.get('username', '').lower() == 'admin'
+            from pal.ui.admin_menu import AdminMenu
+            self.admin_menu_view = AdminMenu(self.admin_tab, controller=self)
             
-            if show_exclusions:
-                exclusions_frame = ttk.Frame(admin_nb)
-                admin_nb.add(exclusions_frame, text="Exclusiones")
-                self._create_admin_exclusions_tab(exclusions_frame)
+            # Inicializar los frames de las subvistas como None
+            self.sedes_servidores_view = None
+            self.sedes_almacenes_view = None
+            self.admin_users_view = None
+            self.admin_roles_view = None
+            self.admin_exclusions_view = None
+            self.admin_audit_view = None
+            self.admin_sedes_tradicional_view = None
 
-            # Tab: Sedes (visible si es admin)
-            show_sedes = self.current_user and self.current_user.get('username', '').lower() == 'admin'
-            if show_sedes:
-                sedes_frame = ttk.Frame(admin_nb)
-                admin_nb.add(sedes_frame, text="Sedes")
-                self._create_admin_sedes_tab(sedes_frame)
-
-            # Tab: Auditoría (visible si admin o permiso admin.auditoria)
-            show_audit = False
-            try:
-                if hasattr(self, 'permissions') and self.current_user:
-                    show_audit = (
-                        self.current_user.get('username', '').lower() == 'admin' or
-                        self.permissions.tiene_permiso(self.current_user['id'], 'ADMIN', 'auditoria')
-                    )
-            except Exception:
-                show_audit = self.current_user and self.current_user.get('username', '').lower() == 'admin'
-
-            if show_audit:
-                audit_frame = ttk.Frame(admin_nb)
-                admin_nb.add(audit_frame, text="Auditoría")
-                self._create_audit_tab(audit_frame)
+            # Mostrar el menú inicial
+            self.show_admin_sub_view('menu')
     
     def mostrar_tra_filtrado(self, datos_filtrados):
         """Muestra datos filtrados TRA en el Treeview con colores, stock actual e ideal, y días restantes"""
@@ -4615,85 +4707,22 @@ class DatabaseApp:
         # Usar el cache para obtener el stock
         stock_map = {cod: self._stock_cache.get(cod, 0) for cod in codigos}
         
-        # Identificar productos con stock cero o negativo para consulta de fechas críticas
-        codigos_criticos = [str(cod).strip() for cod in codigos if float(stock_map.get(cod, 0) or 0) <= 0]
-        fechas_criticas = {}
-        if codigos_criticos:
-            fechas_criticas = self.db_manager.obtener_fechas_criticas_tra(codigos_criticos, sede)
-            self.tra_debug_log(f"Fechas críticas obtenidas para {len(fechas_criticas)} productos (Stock <= 0)")
-        
-        # Obtener códigos en alerta de stock
-        alertas_stock = getattr(self, 'cached_alertas', [])
-        codigos_alerta = {str(alerta[0]).strip() for alerta in alertas_stock}
-        
         for idx, fila in enumerate(datos):
             try:
-                # Manejo robusto para diferentes longitudes de tupla
-                if len(fila) >= 10:
-                    codigo = fila[0]
-                    desc = fila[1]
-                    neto = fila[5]
-                    rotacion = fila[6]
-                    precio = fila[7]
-                    impuesto1 = fila[8]
-                    costo = fila[9]
-                elif len(fila) >= 6:
-                    codigo, desc, _, _, _, neto = fila[:6]
-                    rotacion = fila[6] if len(fila) > 6 else "SIN CLASIFICAR"
-                    precio = fila[7] if len(fila) > 7 else 0
-                    impuesto1 = fila[8] if len(fila) > 8 else 0
-                    costo = 0
-                else:
-                    continue
-
-                stock_actual = int(stock_map.get(codigo, 0) or 0)
+                # Extraer valores de la fila
+                codigo = fila[0]
+                desc = fila[1]
+                dept_cod = str(fila[2]) if len(fila) > 2 else ""
+                group_cod = str(fila[3]) if len(fila) > 3 else ""
+                sub_cod = str(fila[4]) if len(fila) > 4 else ""
+                neto = fila[5] if len(fila) > 5 else 0
+                rotacion = fila[6] if len(fila) > 6 else None
+                precio = fila[7] if len(fila) > 7 else 0
+                impuesto1 = fila[8] if len(fila) > 8 else 0
+                
+                # Obtener stock
+                stock_actual = float(stock_map.get(codigo, 0) or 0)
                 porcentaje = getattr(self, 'tra_porcentajes_map', {}).get(str(codigo), 0.0)
-                
-                # --- LÓGICA DE VENTAS PERDIDAS ---
-                is_lost_sale = False
-                lost_sales_msg = ""
-                dias_fuera_msg = ""
-                ult_compra_msg = ""
-                ult_venta_msg = ""
-                
-                # CASO 1: VENTAS PERDIDAS (Solo Stock == 0 y Rotación ALTA)
-                current_codigo_str = str(codigo).strip()
-                rotacion_norm = str(rotacion or "").strip().upper()
-                
-                if stock_actual == 0 and rotacion_norm == "ALTA" and current_codigo_str in fechas_criticas:
-                    update_date, last_ven, total_sales_since_uc = fechas_criticas[current_codigo_str]
-                    if update_date and last_ven:
-                        today = datetime.now()
-                        try:
-                            if isinstance(update_date, str):
-                                update_date = datetime.strptime(update_date[:19].replace('T', ' '), '%Y-%m-%d %H:%M:%S')
-                            if isinstance(last_ven, str):
-                                last_ven = datetime.strptime(last_ven[:19].replace('T', ' '), '%Y-%m-%d %H:%M:%S')
-                            
-                            dias_activo = (last_ven - update_date).days + 1
-                            dias_activo = max(1, dias_activo)
-                            days_out = (today - last_ven).days
-                            
-                            if days_out > 0:
-                                is_lost_sale = True
-                                rate = total_sales_since_uc / dias_activo
-                                lost_units = rate * days_out
-                                
-                                mostrar_dolares = getattr(self, 'tra_mostrar_dolares_var', tk.BooleanVar()).get()
-                                precio_real = float(precio or 0) * (1 + float(impuesto1 or 0) / 100)
-                                if mostrar_dolares and precio_real > 0:
-                                    lost_sales_msg = f"PERDIDA: ${lost_units * precio_real:,.2f}"
-                                else:
-                                    lost_sales_msg = f"PERDIDA: {lost_units:.0f} UNID"
-                                
-                                dias_fuera_msg = f"FUERA: {days_out} DÍAS"
-                                ult_compra_msg = f"UC: {update_date.strftime('%d/%m/%y')}"
-                                ult_venta_msg = f"UV: {last_ven.strftime('%d/%m/%y')}"
-                                
-                                if days_out > 180 and total_sales_since_uc == 0:
-                                    ult_venta_msg = "ESTANCADO"
-                        except Exception as date_err:
-                            self.tra_debug_log(f"Error procesando fechas para {codigo}: {date_err}", level="DEBUG")
 
                 # Calcular stock ideal y días restantes
                 stock_ideal = self.calcular_stock_ideal_producto(neto)
@@ -4715,45 +4744,26 @@ class DatabaseApp:
                         else: estado_stock = "Sobre Stock"
                     except: pass
 
-                # Determinar tag de color
+                # Determinar tag de color (solo por rotación)
                 tag_base = (str(rotacion).lower() if rotacion else "sin_clasificar")
                 tag_rotacion = tag_base if idx % 2 == 0 else f"{tag_base}_alt"
 
-                # Formatear valores finales
-                if is_lost_sale:
-                    values = (
-                        codigo,
-                        desc,
-                        rotacion or "SIN CLASIFICAR",
-                        lost_sales_msg,
-                        dias_fuera_msg,
-                        0,
-                        ult_compra_msg,
-                        "N/A",
-                        ult_venta_msg
-                    )
-                    inserted_tags = ("lost_sales_row",)
-                else:
-                    neto_valor = float(neto or 0)
-                    mostrar_dolares = getattr(self, 'tra_mostrar_dolares_var', tk.BooleanVar()).get()
-                    precio_real = float(precio or 0) * (1 + float(impuesto1 or 0) / 100)
-                    ventas_display = f"{neto_valor * precio_real:.2f}" if mostrar_dolares and precio_real > 0 else f"{neto_valor:.0f}"
-                    
-                    values = (
-                        codigo, desc, rotacion or "SIN CLASIFICAR",
-                        ventas_display, f"{porcentaje:.2f}%",
-                        stock_actual, stock_ideal,
-                        f"{dias_restantes:.0f}" if dias_restantes is not None else "N/A",
-                        estado_stock
-                    )
-                    inserted_tags = (tag_rotacion,)
+                # Formatear valores finales (sin información de quiebre de stock)
+                neto_valor = float(neto or 0)
+                mostrar_dolares = getattr(self, 'tra_mostrar_dolares_var', tk.BooleanVar()).get()
+                precio_real = float(precio or 0) * (1 + float(impuesto1 or 0) / 100)
+                ventas_display = f"{neto_valor * precio_real:.2f}" if mostrar_dolares and precio_real > 0 else f"{neto_valor:.0f}"
                 
-                # Insertar en el treeview
-                item_id = self.tra_tree.insert("", tk.END, values=values, tags=inserted_tags)
+                values = (
+                    codigo, desc, rotacion or "SIN CLASIFICAR",
+                    ventas_display, f"{porcentaje:.2f}%",
+                    int(stock_actual), int(stock_ideal),
+                    f"{dias_restantes:.0f}" if dias_restantes is not None else "N/A",
+                    estado_stock
+                )
                 
-                # Aplicar tag adicional si está en alerta de stock (y no es lost sale ya resaltado)
-                if not is_lost_sale and str(codigo).strip() in codigos_alerta:
-                    self.tra_tree.item(item_id, tags=(tag_rotacion, "stock_alert"))
+                # Insertar en el treeview con tag de rotación únicamente
+                item_id = self.tra_tree.insert("", tk.END, values=values, tags=(tag_rotacion,))
             
             except Exception as e:
                 self.log(f"Error procesando fila TRA {fila}: {str(e)}", "ERROR")
@@ -5281,6 +5291,25 @@ class DatabaseApp:
             self.cargar_jerarquia_tra()
             self.cargar_jerarquia_mbrp()
     
+        # Vincular evento de cambio de pestaña para automatizaciones
+        self.main_notebook.bind("<<NotebookTabChanged>>", self._on_main_tab_changed)
+        
+        # Carga inicial automática de quiebres (silenciosa al inicio)
+        if self.modules_enabled.get("stock", False):
+            self.root.after(3000, lambda: self.actualizar_alertas_stock(force_refresh=False))
+
+    def _on_main_tab_changed(self, event):
+        """Maneja la automatización al cambiar de pestaña"""
+        try:
+            selected_tab = self.main_notebook.select()
+            tab_text = self.main_notebook.tab(selected_tab, "text")
+            
+            # Si entra a Quiebre de Stock, actualizar automáticamente
+            if "Quiebre de Stock" in tab_text:
+                self.actualizar_alertas_stock(force_refresh=True)
+        except Exception as e:
+            self.log(f"Error en cambio de pestaña: {e}", "DEBUG")
+
     def _update_hierarchy_combos(self):
         """Actualiza los combos de jerar quía para ambos módulos"""
         try:
@@ -5379,6 +5408,15 @@ class DatabaseApp:
                 except (tk.TclError, AttributeError):
                     # Widget destruido o no accesible
                     pass
+
+            # STOCK combos - Nuevo bloque para sincronizar quiebres de stock
+            if hasattr(self, 'stock_dept_combo') and hasattr(self, 'stock_dept_var'):
+                try:
+                    if self.stock_dept_combo.winfo_exists():
+                        # Llamar a load_stock_filters que ahora es eficiente
+                        self.load_stock_filters()
+                except Exception:
+                    pass
             
             # Log consolidado - solo una línea
             if tra_actualizado or mbrp_actualizado:
@@ -5474,22 +5512,41 @@ class DatabaseApp:
             raise Exception(f"Error cargando filtros stock: {e}")
     
     def _load_stock_alerts_parallel(self):
-        """Carga alertas iniciales de stock en hilo paralelo"""
+        """Carga quiebres iniciales de stock en hilo paralelo"""
         try:
             # Ensure connection is valid before loading alerts
             if not self.db_manager.ensure_connection():
                 raise Exception("No hay conexión válida a la base de datos")
             
-            # Use a smaller, safer initial load
-            alertas = self.db_manager.obtener_alertas_stock(limit=50)
-            if alertas:
-                self.cached_alertas = alertas
-                self.last_refresh = datetime.now()
-                self.log(f"Alertas stock cargadas: {len(alertas)} registros", "SUCCESS")
+            # Get configured warehouses from all sedes
+            sedes_config = self.config_manager.get_sedes_config()
+            all_warehouses = []
+            for sede_name, config in sedes_config.items():
+                depositos = config.get('almacenes_tratables', [])
+                all_warehouses.extend(depositos)
             
-            return {"alerts_loaded": True, "count": len(alertas) if alertas else 0}
+            if not all_warehouses:
+                self.log("No hay almacenes configurados para stock", "WARNING")
+                return {"alerts_loaded": False, "error": "No warehouses configured"}
+            
+            # Use new quiebre detection logic
+            quiebres = self.db_manager.obtener_quiebres_directos(all_warehouses)
+            if quiebres:
+                # Convert dict format to tuple format for compatibility
+                self.cached_alertas = [
+                    (q['codigo'], q['descripcion'], q['sede'], q['unidades_perdidas'], 
+                     q['dias_quiebre'], q['ultima_compra'], q['ultima_venta'])
+                    for q in quiebres
+                ]
+                self.last_refresh = datetime.now()
+                self.log(f"Quiebres stock cargados: {len(quiebres)} registros", "SUCCESS")
+            else:
+                self.cached_alertas = []
+                self.last_refresh = datetime.now()
+            
+            return {"alerts_loaded": True, "count": len(quiebres) if quiebres else 0}
         except Exception as e:
-            self.log(f"Error cargando alertas stock: {e}", "ERROR")
+            self.log(f"Error cargando quiebres stock: {e}", "ERROR")
             # Don't raise - allow app to continue without initial alerts
             return {"alerts_loaded": False, "error": str(e)}
     
@@ -6110,6 +6167,11 @@ class DatabaseApp:
     def show_records_view(self):
         self.main_notebook.select(self.records_tab)
 
+    def show_admin_view(self):
+        """Muestra la pestaña de administración."""
+        if hasattr(self, 'admin_tab'):
+            self.main_notebook.select(self.admin_tab)
+
     def show_messaging_view(self):
         self.main_notebook.select(self.messaging_tab)
 
@@ -6382,6 +6444,19 @@ class DatabaseApp:
         self.api_status = ttk.Label(status_frame, text="API: Inactiva", foreground="orange")
         self.api_status.pack(side=tk.LEFT)
         
+        # Anuncio de Alerta (Parpadeante) - Ubicado al lado de API
+        self.stock_alert_label = tk.Label(
+            status_frame,
+            text="🚨 Alerta: Quiebres de stock",
+            font=("Segoe UI", 9, "bold"),
+            foreground="#D32F2F",
+            cursor="hand2",
+            padx=10
+        )
+        # Oculto por defecto
+        self.stock_alert_label.pack_forget()
+        self.stock_alert_label.bind("<Button-1>", lambda e: self.abrir_popup_quiebres())
+        
         # Menú de usuario (Cerrar sesión, Configuración solo para admin)
         self.user_menu = ttk.Menubutton(status_frame, text="Usuario")
         user_menu_popup = tk.Menu(self.user_menu, tearoff=0)
@@ -6430,7 +6505,7 @@ class DatabaseApp:
     
         notebook = ttk.Notebook(self.settings_window)
         notebook.pack(fill=tk.BOTH, expand=True)
-        
+
         # Pestaña de Conexión
         conn_frame = ttk.Frame(notebook)
         notebook.add(conn_frame, text="Conexión BD")
@@ -7552,192 +7627,74 @@ class DatabaseApp:
                 self.clientes_estadisticas_view = ClientesEstadisticasTab(self.clientes_tab, self)
             self.clientes_estadisticas_view.pack(fill=tk.BOTH, expand=True)
 
+    def show_admin_sub_view(self, view_name):
+        """Gestiona la navegación entre subvistas dentro de la pestaña de Administración (Config. Global)."""
+        # Ocultar todas las subvistas
+        views = [
+            'admin_menu_view', 'sedes_servidores_view', 'sedes_almacenes_view',
+            'admin_users_view', 'admin_roles_view', 'admin_exclusions_view',
+            'admin_audit_view'
+        ]
+        for v in views:
+            if hasattr(self, v) and getattr(self, v) and getattr(self, v).winfo_exists():
+                getattr(self, v).pack_forget()
+
+        # Mostrar la vista solicitada
+        if view_name == 'menu':
+            self.admin_menu_view.pack(fill=tk.BOTH, expand=True)
+            
+        elif view_name == 'sedes_servidores':
+            if not self.sedes_servidores_view or not self.sedes_servidores_view.winfo_exists():
+                from pal.ui.tabs.sedes_servidores import SedesServidoresTab
+                self.sedes_servidores_view = SedesServidoresTab(self.admin_tab, self)
+            self.sedes_servidores_view.pack(fill=tk.BOTH, expand=True)
+            
+        elif view_name == 'sedes_almacenes':
+            if not self.sedes_almacenes_view or not self.sedes_almacenes_view.winfo_exists():
+                from pal.ui.tabs.sedes_config import SedesAlmacenesTab
+                self.sedes_almacenes_view = SedesAlmacenesTab(self.admin_tab, self)
+            self.sedes_almacenes_view.pack(fill=tk.BOTH, expand=True)
+            
+        elif view_name == 'exclusiones':
+            if not self.admin_exclusions_view or not self.admin_exclusions_view.winfo_exists():
+                self.admin_exclusions_view = ttk.Frame(self.admin_tab)
+                self._create_admin_exclusions_tab(self.admin_exclusions_view)
+            self.admin_exclusions_view.pack(fill=tk.BOTH, expand=True)
+            
+        elif view_name == 'usuarios':
+            if not self.admin_users_view or not self.admin_users_view.winfo_exists():
+                self.admin_users_view = ttk.Frame(self.admin_tab)
+                self._create_admin_users_tab(self.admin_users_view)
+            self.admin_users_view.pack(fill=tk.BOTH, expand=True)
+            
+        elif view_name == 'roles':
+            if not self.admin_roles_view or not self.admin_roles_view.winfo_exists():
+                self.admin_roles_view = ttk.Frame(self.admin_tab)
+                self._create_roles_permissions_tab(self.admin_roles_view)
+            self.admin_roles_view.pack(fill=tk.BOTH, expand=True)
+            
+        elif view_name == 'auditoria':
+            if not self.admin_audit_view or not self.admin_audit_view.winfo_exists():
+                self.admin_audit_view = ttk.Frame(self.admin_tab)
+                self._create_audit_tab(self.admin_audit_view)
+            self.admin_audit_view.pack(fill=tk.BOTH, expand=True)
+
+        # Botón de volver al menú (excepto si ya estamos en el menú)
+        if view_name != 'menu':
+            # Solo agregar si no existe
+            if not hasattr(self, 'btn_admin_back') or not self.btn_admin_back or not self.btn_admin_back.winfo_exists():
+                self.btn_admin_back = ttk.Button(self.admin_tab, text="◀ Volver al Config. Global", 
+                                               command=lambda: self.show_admin_sub_view('menu'))
+            self.btn_admin_back.pack(side=tk.BOTTOM, pady=10, anchor="e", padx=20)
+        else:
+            if hasattr(self, 'btn_admin_back') and self.btn_admin_back and self.btn_admin_back.winfo_exists():
+                self.btn_admin_back.pack_forget()
+
 
     def _create_admin_sedes_tab(self, parent):
-        # --- Variables ---
-        self.admin_sedes_vars = {
-            'id': tk.StringVar(),
-            'nombre_sede': tk.StringVar(),
-            'ip_servidor': tk.StringVar(),
-            'nombre_bd': tk.StringVar(value='VAD20'),
-            'usuario_bd': tk.StringVar(),
-            'password_bd': tk.StringVar(),
-            'activa': tk.BooleanVar(value=True)
-        }
-
-        # --- Layout ---
-        main_frame = ttk.Frame(parent, padding=10)
-        main_frame.pack(fill=tk.BOTH, expand=True)
-        main_frame.rowconfigure(0, weight=1)
-        main_frame.columnconfigure(0, weight=3) # Treeview más grande
-        main_frame.columnconfigure(1, weight=2) # Formulario más pequeño
-
-        # --- Treeview para listar sedes ---
-        tree_frame = ttk.Frame(main_frame)
-        tree_frame.grid(row=0, column=0, sticky='nsew', padx=(0, 10))
-        tree_frame.rowconfigure(0, weight=1)
-        tree_frame.columnconfigure(0, weight=1)
-        
-        self.sedes_tree = ttk.Treeview(tree_frame, columns=('nombre', 'ip', 'db', 'user', 'activa'), show='headings')
-        self.sedes_tree.heading('nombre', text='Nombre Sede')
-        self.sedes_tree.heading('ip', text='IP Servidor')
-        self.sedes_tree.heading('db', text='Base de Datos')
-        self.sedes_tree.heading('user', text='Usuario')
-        self.sedes_tree.heading('activa', text='Activa')
-        self.sedes_tree.grid(row=0, column=0, sticky='nsew')
-        
-        scrollbar = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.sedes_tree.yview)
-        scrollbar.grid(row=0, column=1, sticky='ns')
-        self.sedes_tree.configure(yscrollcommand=scrollbar.set)
-        
-        self.sedes_tree.bind('<<TreeviewSelect>>', self._on_sede_select)
-
-        # --- Formulario para editar/crear ---
-        form_frame = ttk.LabelFrame(main_frame, text='Detalles de la Sede', padding=10)
-        form_frame.grid(row=0, column=1, sticky='nsew')
-        form_frame.columnconfigure(1, weight=1)
-
-        fields = [
-            ('Nombre Sede:', 'nombre_sede'), ('IP Servidor:', 'ip_servidor'), 
-            ('Nombre BD:', 'nombre_bd'), ('Usuario BD:', 'usuario_bd'),
-            ('Contraseña:', 'password_bd')
-        ]
-        
-        for i, (text, var_name) in enumerate(fields):
-            ttk.Label(form_frame, text=text).grid(row=i, column=0, sticky='w', pady=5, padx=5)
-            show_opt = "*" if var_name == 'password_bd' else None
-            ttk.Entry(form_frame, textvariable=self.admin_sedes_vars[var_name], show=show_opt).grid(row=i, column=1, sticky='ew', pady=5)
-        
-        ttk.Checkbutton(form_frame, text='Sede Activa', variable=self.admin_sedes_vars['activa']).grid(row=len(fields), column=0, columnspan=2, pady=10)
-
-        # --- Botones ---
-        btn_frame = ttk.Frame(form_frame)
-        btn_frame.grid(row=len(fields) + 1, column=0, columnspan=2, pady=10)
-        
-        ttk.Button(btn_frame, text="Guardar", command=self._save_sede).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="Nuevo", command=self._clear_sede_form).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="Eliminar", command=self._delete_sede).pack(side=tk.LEFT, padx=5)
-
-        # Carga inicial
-        self._load_sedes_to_treeview()
-
-    def _load_sedes_to_treeview(self):
-        """Carga o recarga las sedes desde la BD al Treeview."""
-        for i in self.sedes_tree.get_children():
-            self.sedes_tree.delete(i)
-        
-        try:
-            sedes = self.db_manager.get_sedes_config()
-            for sede in sedes:
-                self.sedes_tree.insert('', tk.END, iid=sede['id'], values=(
-                    sede['nombre_sede'], sede['ip_servidor'], sede['nombre_bd'],
-                    sede['usuario_bd'], 'Sí' if sede['activa'] else 'No'
-                ))
-        except Exception as e:
-            messagebox.showerror("Error", f"No se pudieron cargar las sedes: {e}", parent=self.root)
-
-    def _on_sede_select(self, event):
-        """Puebla el formulario cuando se selecciona una sede en el Treeview."""
-        selected_items = self.sedes_tree.selection()
-        if not selected_items:
-            return
-        
-        item_id = selected_items[0]
-        try:
-            # Re-fetch data for the selected item to get encrypted pass
-            sedes = self.db_manager.get_sedes_config()
-            sede_data = next((s for s in sedes if s['id'] == int(item_id)), None)
-
-            if sede_data:
-                self.admin_sedes_vars['id'].set(sede_data['id'])
-                self.admin_sedes_vars['nombre_sede'].set(sede_data['nombre_sede'])
-                self.admin_sedes_vars['ip_servidor'].set(sede_data['ip_servidor'])
-                self.admin_sedes_vars['nombre_bd'].set(sede_data['nombre_bd'])
-                self.admin_sedes_vars['usuario_bd'].set(sede_data['usuario_bd'])
-                self.admin_sedes_vars['password_bd'].set('') # No mostrar la contraseña
-                self.admin_sedes_vars['activa'].set(sede_data['activa'])
-        except Exception as e:
-            messagebox.showerror("Error", f"No se pudo cargar el detalle de la sede: {e}", parent=self.root)
-            self._clear_sede_form()
-
-    def _save_sede(self):
-        """Guarda una sede (nueva o existente)."""
-        sede_id = self.admin_sedes_vars['id'].get()
-        nombre_sede = self.admin_sedes_vars['nombre_sede'].get().strip()
-
-        if not nombre_sede:
-            messagebox.showwarning("Campo Requerido", "El nombre de la sede no puede estar vacío.", parent=self.root)
-            return
-
-        sede_data = {
-            'nombre_sede': nombre_sede,
-            'ip_servidor': self.admin_sedes_vars['ip_servidor'].get().strip(),
-            'nombre_bd': self.admin_sedes_vars['nombre_bd'].get().strip(),
-            'usuario_bd': self.admin_sedes_vars['usuario_bd'].get().strip(),
-            'activa': self.admin_sedes_vars['activa'].get()
-        }
-
-        password = self.admin_sedes_vars['password_bd'].get()
-        if password: # Si se ingresó una nueva contraseña, encriptarla
-            try:
-                sede_data['password_bd_enc'] = self.cred_manager.encrypt(password)
-            except Exception as e:
-                messagebox.showerror("Error de Encriptación", f"No se pudo encriptar la contraseña: {e}", parent=self.root)
-                return
-        else: # Si se deja en blanco, se mantiene la existente (en caso de edición)
-            sede_data['password_bd_enc'] = None
-            if sede_id:
-                try:
-                    sedes = self.db_manager.get_sedes_config()
-                    existing_sede = next((s for s in sedes if s['id'] == int(sede_id)), None)
-                    if existing_sede:
-                        sede_data['password_bd_enc'] = existing_sede['password_bd_enc']
-                except Exception:
-                    pass
-
-        try:
-            if sede_id: # Actualizar
-                self.db_manager.update_sede(int(sede_id), sede_data)
-                messagebox.showinfo("Éxito", "Sede actualizada correctamente.", parent=self.root)
-            else: # Crear
-                self.db_manager.add_sede(sede_data)
-                messagebox.showinfo("Éxito", "Sede creada correctamente.", parent=self.root)
-            
-            self._clear_sede_form()
-            self._load_sedes_to_treeview()
-        except Exception as e:
-            messagebox.showerror("Error al Guardar", f"No se pudo guardar la sede: {e}", parent=self.root)
-
-    def _clear_sede_form(self):
-        """Limpia el formulario."""
-        for var in self.admin_sedes_vars.values():
-            if isinstance(var, tk.BooleanVar):
-                var.set(True)
-            else:
-                var.set('')
-        self.admin_sedes_vars['nombre_bd'].set('VAD20') # Valor por defecto
-        self.sedes_tree.selection_remove(self.sedes_tree.selection())
-
-    def _delete_sede(self):
-        """Elimina la sede seleccionada."""
-        selected_items = self.sedes_tree.selection()
-        if not selected_items:
-            messagebox.showwarning("Sin Selección", "Por favor, seleccione una sede de la lista para eliminar.", parent=self.root)
-            return
-
-        sede_id = selected_items[0]
-        nombre_sede = self.sedes_tree.item(sede_id, 'values')[0]
-        
-        if not messagebox.askyesno("Confirmar Eliminación", f"¿Está seguro de que desea eliminar la sede '{nombre_sede}'?", parent=self.root):
-            return
-            
-        try:
-            self.db_manager.delete_sede(int(sede_id))
-            messagebox.showinfo("Éxito", "Sede eliminada correctamente.", parent=self.root)
-            self._clear_sede_form()
-            self._load_sedes_to_treeview()
-        except Exception as e:
-            messagebox.showerror("Error al Eliminar", f"No se pudo eliminar la sede: {e}", parent=self.root)
+        """Crea la pestaña de configuración de sedes y stock."""
+        from pal.ui.tabs.sedes_config import create_sedes_almacenes_tab
+        create_sedes_almacenes_tab(parent, self)
 
     def _save_debug_config(self):
         try:
@@ -8983,158 +8940,14 @@ class DatabaseApp:
         
         
     def _background_load_alertas_stock(self):
-        """Carga todas las alertas en segundo plano, en bloques, y refresca UI al llegar datos.
-        Usa chunks adaptativos para optimizar latencia y rendimiento.
-        Soporta múltiples depósitos seleccionados.
-        """
-        # Evitar múltiples ejecuciones simultáneas
-        if getattr(self, '_stock_loading_in_progress', False):
-            self.stock_debug_log("⚠️ Carga de stock ya en progreso, ignorando nueva solicitud")
-            return
-        
-        self._stock_loading_in_progress = True
-        
+        """Mantiene compatibilidad pero deshabilitado ya que quiebres se cargan síncronamente."""
         try:
-            from pal.core.chunks import AdaptiveChunkController
-            total_loaded = 0
-            chunk_count = 0
-            load_start_time = time.perf_counter()
-            
-            # Usar SOLO depósitos de la localidad actual para la carga y el ordenamiento
-            # Usar SOLO depósitos de la localidad actual para la carga y el ordenamiento
-            localidad = getattr(self, 'stock_localidad_actual', 'Cabudare')
-            locs = getattr(self, 'stock_localidades', {}) or {}
-            deps_loc = [d['codigo'] for d in locs.get(localidad, [])]
-            depositos = deps_loc if deps_loc else (getattr(self, 'stock_depositos_seleccionados', ['0301']) or ['0301'])
-            
-            self.stock_debug_log(f"Cargando alertas para depósitos: {', '.join(depositos)}")
-            
-            start = 1
-            controller = AdaptiveChunkController(initial=500, min_size=100, max_size=2000, target_latency=2.0)
-            # Usar dict para evitar duplicados por código
-            existentes = {r[0]: r for r in (self.cached_alertas or [])}
-            initial_count = len(existentes)
-            
-            self.stock_debug_log(f"Iniciando carga paralela de stock con {initial_count} registros existentes")
-            
-            consecutive_failures = 0
-            max_consecutive_failures = 3
-            
-            while True:
-                chunk_size = controller.size
-                chunk_start_time = time.perf_counter()
-                # Usar función para múltiples depósitos
-                rows = self.db_manager.obtener_alertas_stock_multiples(start_row=start, fetch_size=chunk_size, depositos=depositos)
-                chunk_query_time = time.perf_counter() - chunk_start_time
-                
-                if not rows:
-                    consecutive_failures += 1
-                    self.stock_debug_log(f"Chunk {chunk_count + 1}: Sin datos (fallo {consecutive_failures}/{max_consecutive_failures}) - consulta en {chunk_query_time:.2f}s")
-                    
-                    if consecutive_failures >= max_consecutive_failures:
-                        self.stock_debug_log(f"Deteniendo carga tras {consecutive_failures} fallos consecutivos")
-                        break
-                    
-                    # Incrementar start para saltar posibles huecos
-                    start += chunk_size
-                    time.sleep(1)  # Pausa más larga tras error
-                    continue
-                else:
-                    consecutive_failures = 0  # Reset counter on success
-                
-                chunk_count += 1
-                new_records = 0
-                duplicates = 0
-                
-                for r in rows:
-                    codigo_str = str(r[0])
-                    if codigo_str in existentes:
-                        duplicates += 1
-                    else:
-                        new_records += 1
-                    existentes[codigo_str] = r
-                
-                self.cached_alertas = list(existentes.values())
-                # Reconstruir vistas efectivas cada vez que se actualiza el cache
-                try:
-                    self._rebuild_effective_views()
-                except Exception:
-                    pass
-                total_loaded += len(rows)
-                
-                # Log detallado del chunk
-                chunk_time = time.perf_counter() - chunk_start_time
-                total_time = time.perf_counter() - load_start_time
-                records_per_sec = total_loaded / total_time if total_time > 0 else 0
-                
-                self.stock_debug_log(
-                    f"Chunk {chunk_count}: {len(rows)} filas | "
-                    f"Nuevos: {new_records} | Duplicados: {duplicates} | "
-                    f"Total acum: {len(existentes)} | "
-                    f"Tiempo: {chunk_time:.2f}s | "
-                    f"Velocidad: {records_per_sec:.1f} reg/s"
-                )
-                
-                # Refrescar vista en hilo principal cada 3 chunks o al final
-                if chunk_count % 3 == 0 or len(rows) < chunk_size:
-                    try:
-                        self.root.after(0, self._update_ui_after_chunk, len(existentes), chunk_count)
-                    except Exception as e:
-                        self.stock_debug_log(f"Error actualizando UI: {e}")
-                
-                # Avanzar ventana
-                start += len(rows)
-                
-                # Ajuste adaptativo del tamaño del próximo chunk
-                controller.update(chunk_query_time, len(rows))
-                
-                # Pausa adaptativa breve
-                time.sleep(controller.recommend_sleep(chunk_query_time))
-                
-                # Si el chunk es menor que el tamaño esperado, probablemente sea el último
-                if len(rows) < chunk_size:
-                    self.stock_debug_log(f"Último chunk detectado ({len(rows)} < {chunk_size})")
-                    break
-            
-            # Estadísticas finales
-            total_time = time.perf_counter() - load_start_time
-            avg_time_per_chunk = total_time / chunk_count if chunk_count > 0 else 0
-            final_count = len(existentes)
-            net_new = final_count - initial_count
-            
-            # Verificar si la carga fue exitosa
-            if final_count < 1000:  # Menos de 1000 registros indica problema
-                self.log(
-                    f"Carga incompleta detectada: solo {final_count} registros. Reintentando en 30 segundos...",
-                    "WARNING"
-                )
-                # Programar reintento automático
-                threading.Timer(30.0, self._retry_stock_loading).start()
-            else:
-                self.log(
-                    f"✅ [DEBUG] Carga paralela completada: "
-                    f"{chunk_count} chunks | "
-                    f"{final_count} registros totales | "
-                    f"{net_new} nuevos | "
-                    f"Tiempo total: {total_time:.2f}s | "
-                    f"Promedio/chunk: {avg_time_per_chunk:.2f}s", 
-                    "SUCCESS"
-                )
-            
-            # Actualización final de UI
-            try:
-                self.root.after(0, self._finalize_stock_loading, final_count)
-            except Exception as e:
-                self.log(f"Error en actualización final: {e}", "ERROR")
-            
+            self.stock_debug_log("Carga paralela de quiebres saltada (datos ya consolidados)")
         except Exception as e:
-            self.log(f"❌ [DEBUG] Error en carga paralela de alertas: {e}", "ERROR")
-            # Log adicional para debugging
-            import traceback
-            self.log(f"❌ [DEBUG] Traceback: {traceback.format_exc()}", "ERROR")
+            self.stock_debug_log(f"Error en monitoreo: {e}")
         finally:
-            # Liberar el bloqueo para permitir futuras cargas
             self._stock_loading_in_progress = False
+            self.stock_full_loading_started = False
     
     def _update_ui_after_chunk(self, total_records, chunk_number):
         """Actualiza la UI después de cargar un chunk de datos"""
@@ -9188,18 +9001,31 @@ class DatabaseApp:
     def _get_total_stock_count(self):
         """Obtiene el total de registros de alertas disponibles en la BD para debug"""
         try:
-            query = """
+            # Obtener depósitos tratables para el conteo de debug
+            sedes_config = self.config_manager.get_sedes_config()
+            all_deps = []
+            for cfg in sedes_config.values():
+                all_deps.extend(cfg.get('almacenes_tratables', []))
+            
+            if not all_deps:
+                self.log("No hay depósitos para conteo de debug", "DEBUG")
+                return 0
+            
+            all_deps = list(dict.fromkeys(all_deps))
+            placeholders = ','.join(['?' for _ in all_deps])
+            
+            query = f"""
                 SELECT COUNT(*) as total
                 FROM (
                     SELECT c_codarticulo
-                    FROM MA_DEPOPROD d
+                    FROM MA_DEPOPROD d WITH (NOLOCK)
                         INNER JOIN MA_PRODUCTOS p ON d.c_codarticulo = p.C_CODIGO
-                        WHERE c_coddeposito = '0301'
+                        WHERE c_coddeposito IN ({placeholders})
                         GROUP BY c_codarticulo
                         HAVING SUM(n_cantidad) < 21
                 ) as subquery
             """
-            result = self.db_manager.fetch_data(query)
+            result = self.db_manager.fetch_data(query, all_deps)
             return result[0][0] if result and result[0] else 0
         except Exception as e:
             self.log(f"Error obteniendo total de registros: {e}", "ERROR")
@@ -9230,14 +9056,45 @@ class DatabaseApp:
             self.log(f"❌ [AUTO-RETRY] Error en reintento automático: {e}", "ERROR")
     
     def _background_load_ventas_tra(self):
-        """Carga todas las ventas TRA en segundo plano, de forma incremental y con chunk adaptativo.
-        Realiza actualizaciones mínimas de UI mediante root.after para mantener la app responsiva.
-        """
+        """Carga ventas TRA en segundo plano con soporte para Nodo Maestro (ICH incluido)"""
+        load_start_time = time.perf_counter()
         try:
-            if not hasattr(self, 'tra_fecha_inicio') or not hasattr(self, 'tra_fecha_fin') or not hasattr(self, 'tra_sede_codigo'):
-                self.log("Faltan parámetros para carga TRA, cancelando carga paralela", "WARNING")
-                return
-
+            # Normalizar sede para persistencia (00/% -> ICH)
+            sede_p = self.tra_sede_codigo
+            if sede_p in ('00', '%', 'ALL'):
+                sede_p = 'ICH'
+                
+            # ATAJO CRÍTICO: Si ya hay persistencia, no calcular nada
+            from pal.services.tra import get_persisted_rotation
+            dias_context = (self.tra_fecha_fin - self.tra_fecha_inicio).days or 365
+            
+            # Verificar si existe persistencia y si está fresca (TTL de 1 hora)
+            # Nota: get_persisted_rotation devuelve el objeto con el timestamp para verificar frescura
+            persisted_info = get_persisted_rotation(self.db_manager, sede=sede_p, dias_rango=dias_context)
+            if persisted_info:
+                self.log(f"🚀 TRA: Usando datos de rotación persistidos para '{sede_p}' (Rango: {dias_context}d)", "SUCCESS")
+                datos = self.db_manager.obtener_ventas_persisted_tra(sede=sede_p, dias_rango=dias_context)
+                if datos:
+                    self.cached_ventas_tra = [tuple(r) for r in datos]
+                    # Simular resumen para _ui_finish
+                    total_neto = sum(float(r[5] or 0) for r in self.cached_ventas_tra)
+                    self.tra_total_neto_scaneado = total_neto
+                    
+                    def _ui_fast_finish():
+                        self._rebuild_effective_views()
+                        self.aplicar_filtro_tra()
+                        self.log(f"Carga instantánea TRA completada: {len(self.cached_ventas_tra)} registros", "SUCCESS")
+                        self.api_status.config(text="API: Lista", foreground="green")
+                        self.global_progress.stop()
+                        self.global_progress.pack_forget()
+                    
+                    self.root.after(0, _ui_fast_finish)
+                    self.tra_debug_log("🚀 [TRA] Datos persistidos cargados con éxito, finalizando hilo de carga.")
+                    return # SALIR DE LA FUNCIÓN, NO CALCULAR
+            
+            # Si no hay persistencia o no está fresca, proceder con el cálculo paralelo
+            self.log(f"🔄 TRA: Iniciando cálculo paralelo para '{sede_p}' (Rango: {dias_context}d)...", "INFO")
+            
             # Parámetros de chunk adaptativo
             chunk_size = 1000
             min_chunk = 200
@@ -9272,7 +9129,8 @@ class DatabaseApp:
                     sede_codigo=self.tra_sede_codigo,
                     start_row=start,
                     fetch_size=int(chunk_size),
-                    include_zero_sales=getattr(self, 'tra_include_zero_sales', False)
+                    include_zero_sales=getattr(self, 'tra_include_zero_sales', False),
+                    exclude_depts=getattr(self, 'excluded_depts', [])
                 )
                 dt_ms = (time.perf_counter() - t0) * 1000.0
 
@@ -9389,6 +9247,29 @@ class DatabaseApp:
                     # Log de cierre con resumen de escaneo
                     self.tra_debug_log(f"TRA: Escaneadas {scanned} filas | Neto total escaneado: {neto:.2f}")
                     self.log(f"Carga paralela de ventas TRA completada: {total} registros | Neto total escaneado: {neto:.2f}", "SUCCESS")
+                    
+                    # GUARDAR PERSISTENCIA (Actuar como Nodo Maestro) - En hilo separado para evitar freeze
+                    def _bg_save_persistence_parallel():
+                        try:
+                            from pal.services.tra import save_rotation_persistence
+                            user_nodo = self.current_user['username'] if self.current_user else "SISTEMA"
+                            # Obtener fechas del objeto si están disponibles
+                            f_inicio = getattr(self, 'tra_fecha_inicio', datetime.now())
+                            f_fin = getattr(self, 'tra_fecha_fin', datetime.now())
+                            dias = (f_fin - f_inicio).days or 365
+                            
+                            # Normalizar sede para persistencia (00/% -> ICH)
+                            sede_save = self.tra_sede_codigo
+                            if sede_save in ('00', '%', 'ALL'):
+                                sede_save = 'ICH'
+                                
+                            save_rotation_persistence(self.db_manager, self.cached_ventas_tra, sede_save, dias, user_nodo)
+                        except Exception as e:
+                            self.log(f"Error guardando persistencia RI: {e}", "DEBUG")
+                    
+                    import threading
+                    threading.Thread(target=_bg_save_persistence_parallel, daemon=True, name="RI_Persistence_Parallel").start()
+
                     try:
                         self.api_status.config(text="API: Lista", foreground="green")
                     except Exception:
@@ -10187,6 +10068,7 @@ class DatabaseApp:
                     sede_codigo=self.mbrp_sede_codigo,
                     start_row=start,
                     fetch_size=chunk_size,
+                    exclude_depts=getattr(self, 'excluded_depts', [])
                 )
                 chunk_time = time.perf_counter() - chunk_t0
                 if not rows:

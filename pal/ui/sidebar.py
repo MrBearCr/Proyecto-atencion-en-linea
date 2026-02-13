@@ -11,6 +11,7 @@ def create_sidebar(app):
     
     # Construcción dinámica según módulos habilitados
     nav_items = [
+        ('📊 Quiebre de Stock', app.show_stock_tab),
         ('📋 Registros', app.show_records_view),
     ]
     
@@ -21,6 +22,12 @@ def create_sidebar(app):
     # Configuración siempre visible
     nav_items.append(('⚙ Configuración', app.show_settings))
     
+    
+    # Administración (solo si es admin o tiene permiso)
+    # Se valida contra módulo 'admin' que se habilita en app.py si el usuario es admin
+    if app.modules_enabled.get('admin', False):
+         nav_items.append(('🔓 Administración', app.show_admin_view))
+
     for text, cmd in nav_items:
         btn = ttk.Button(sidebar, text=text, style="Nav.TButton", command=cmd)
         btn.pack(fill=tk.X, pady=2)

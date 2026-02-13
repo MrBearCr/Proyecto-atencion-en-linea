@@ -37,18 +37,7 @@ def filter_ventas_tra(ventas, dept_code=None, group_code=None, sub_code=None,
     # Crear sets para búsqueda rápida de stock crítico
     stocks_cero = set()
     stocks_negativos = set()
-    if alertas_stock:
-        for a in alertas_stock:
-            try:
-                # alerta = (codigo, descripcion, stock, nivel_alerta)
-                s = float(a[2] or 0)
-                cod = str(a[0]).strip()
-                if s == 0:
-                    stocks_cero.add(cod)
-                elif s < 0:
-                    stocks_negativos.add(cod)
-            except:
-                pass
+    # Lógica de stock removida de TRA para centralizar en Quiebre de Stock
     
     # Filtro jerárquico unificado (lee jerarquía desde el propio registro: idx 2,3,4)
     datos_filtrados = filter_by_hierarchy(
@@ -73,17 +62,7 @@ def filter_ventas_tra(ventas, dept_code=None, group_code=None, sub_code=None,
             )
         ]
     
-    # Crear set para búsqueda rápida de stock cero (Ventas Perdidas)
-    stocks_cero = set()
-    if alertas_stock:
-        for a in alertas_stock:
-            try:
-                # alerta = (codigo, descripcion, stock, nivel_alerta)
-                s = float(a[2] or 0)
-                if s == 0:
-                    stocks_cero.add(str(a[0]).strip())
-            except:
-                pass
+    # Lógica de stock removida de TRA para centralizar en Quiebre de Stock
     
     # Filtro de rotación (si se implementa en el futuro)
     if filter_rotacion != "TODAS":
@@ -104,15 +83,11 @@ def filter_ventas_tra(ventas, dept_code=None, group_code=None, sub_code=None,
         except:
             return 3
     
-    # Ordenar con prioridad: 
-    # 1. Ventas Perdidas (Stock == 0 Y Rotación ALTA)
-    # 2. Representación (Neto descendente)
+    # Ordenar por: Favoritos primero, luego Representación (Neto descendente)
     datos_ordenados = sorted(
         datos_filtrados,
         key=lambda x: (
-            # 1. Ventas Perdidas (Stock 0 + ALTA) -> True=0, False=1.
-            not (str(x[0]).strip() in stocks_cero and _get_rotacion_val(x) == 0),
-            # 2. Representación (Neto descendente)
+            not (str(x[0]).strip() in favoritos),
             -_get_tra_neto(x)
         )
     )
@@ -372,95 +347,97 @@ def obtener_stock_ideal_tra(neto_ventas, dias_periodo=365, dias_buffer=30):
         return 0
 
 
-def detectar_alertas_rotacion_alta(ventas_clasificadas, alertas_stock, rotaciones_objetivo=["ALTA", "MEDIA"]):
-    """
-    Detecta productos de alta/media rotación que tienen alerta de stock
-    Para alertar al departamento de compras sobre productos críticos sin stock
-    
-    Args:
-        ventas_clasificadas: Lista de ventas con clasificación de rotación
-        alertas_stock: Diccionario {codigo: (descripcion, stock, nivel_alerta)}
-        rotaciones_objetivo: Lista de rotaciones a monitorear (default: ALTA, MEDIA)
-        
-    Returns:
-        list: Lista de productos críticos [(codigo, descripcion, stock, nivel, rotacion), ...]
-    """
-    try:
-        productos_criticos = []
-        
-        # Crear mapa de alertas para búsqueda rápida
-        alertas_map = {str(r[0]).strip(): r for r in alertas_stock} if alertas_stock else {}
-        
-        for venta in ventas_clasificadas:
-            if not venta or len(venta) < 7:
-                continue
-                
-            codigo = str(venta[0]).strip()
-            descripcion = str(venta[1]) if len(venta) > 1 else ""
-            rotacion = str(venta[6]) if len(venta) > 6 else "BAJA"
-            
-            # Si el producto tiene rotación objetivo y está en alertas
-            if rotacion in rotaciones_objetivo and codigo in alertas_map:
-                alerta = alertas_map[codigo]
-                # alerta = (codigo, descripcion, stock, nivel_alerta)
-                if len(alerta) >= 4:
-                    stock = alerta[2]
-                    nivel_alerta = alerta[3]
-                    productos_criticos.append({
-                        'codigo': codigo,
-                        'descripcion': descripcion,
-                        'stock': stock,
-                        'nivel': nivel_alerta,
-                        'rotacion': rotacion
-                    })
-        
-        return productos_criticos
-        
-    except Exception as e:
-        logger.error(f"Error detectando alertas de rotación: {e}")
-        return []
-
-
-def generar_reporte_critico_rotacion(productos_criticos):
-    """
-    Genera un reporte resumido para el departamento de compras
-    
-    Args:
-        productos_criticos: Lista de productos críticos
-        
-    Returns:
-        dict: Reporte con estadísticas y listado
-    """
-    try:
-        if not productos_criticos:
-            return {
-                'total': 0,
-                'por_rotacion': {},
-                'por_nivel': {},
-                'productos': []
-            }
-        
-        reporte = {
-            'total': len(productos_criticos),
-            'por_rotacion': {},
-            'por_nivel': {},
-            'productos': productos_criticos
-        }
-        
-        # Contar por rotación
-        for p in productos_criticos:
-            rotacion = p.get('rotacion', 'DESCONOCIDO')
-            reporte['por_rotacion'][rotacion] = reporte['por_rotacion'].get(rotacion, 0) + 1
-            
-            nivel = p.get('nivel', 'DESCONOCIDO')
-            reporte['por_nivel'][nivel] = reporte['por_nivel'].get(nivel, 0) + 1
-        
-        return reporte
-        
-    except Exception as e:
-        logger.error(f"Error generando reporte crítico: {e}")
-        return {'total': 0, 'por_rotacion': {}, 'por_nivel': {}, 'productos': []}
+# Funciones detectar_alertas_rotacion_alta y generar_reporte_critico_rotacion removidas
 
 
 # Alias para compatibilidad con código existente
 clasificar_rotacion = clasificar_rotacion_tra
+
+
+def get_persisted_rotation(db_manager, sede="0301", dias_rango=365):
+    """
+    Recupera la rotación persistida para una SEDE y RANGO específicos.
+    """
+    try:
+        # Normalizar sede: si es %, tratar como ICH
+        sede_norm = "ICH" if sede == "%" else str(sede).strip()
+        
+        # Verificar si hay datos y su antigüedad para el contexto específico
+        sql = """
+            SELECT c_codigo, n_promedio_diario, c_clasificacion, f_ultima_actualizacion
+            FROM pal_productos_rotacion WITH (NOLOCK)
+            WHERE c_sede = ? AND n_dias_rango = ?
+        """
+        rows = db_manager.fetch_data(sql, (sede_norm, dias_rango))
+        if not rows:
+            return None
+            
+        # Verificar antigüedad del primer registro
+        ultima_act = rows[0][3]
+        if ultima_act and (datetime.now() - ultima_act).total_seconds() > 86400: # 24 horas
+            return None
+            
+        rotation_map = {row[0]: (row[1], row[2]) for row in rows}
+        logger.success(f"Cargada rotación persistida: {len(rotation_map)} productos (Sede: {sede}, Rango: {dias_rango}d)")
+        return rotation_map
+        
+    except Exception as e:
+        logger.error(f"Error cargando rotación persistida: {e}")
+        return None
+
+
+def save_rotation_persistence(db_manager, classified_data, sede="0301", dias_periodo=365, user_nodo="SISTEMA"):
+    """
+    Guarda los datos de rotación clasificados para un contexto específico (Sede + Rango).
+    """
+    if not classified_data:
+        return
+
+    try:
+        # Normalizar sede
+        sede_norm = "ICH" if sede == "%" else str(sede).strip()
+        
+        # 1. Limpiar solo el contexto específico (Sede + Rango)
+        db_manager.execute_query("DELETE FROM pal_productos_rotacion WHERE c_sede = ? AND n_dias_rango = ?", (sede_norm, dias_periodo))
+        
+        # 2. Preparar inserción masiva
+        sql = """
+            INSERT INTO pal_productos_rotacion 
+            (c_codigo, c_sede, n_dias_rango, n_neto, n_promedio_diario, n_porcentaje_representacion, c_clasificacion, f_ultima_actualizacion, c_usuario_nodo)
+            VALUES (?, ?, ?, ?, ?, ?, ?, GETDATE(), ?)
+        """
+        
+        # Calcular porcentajes para la persistencia
+        porcentajes = calcular_porcentajes_representacion(classified_data)
+        
+        params_list = []
+        for item in classified_data:
+            if not item or len(item) < 7:
+                continue
+                
+            codigo = str(item[0])
+            neto = float(item[5] or 0)
+            promedio = neto / (dias_periodo or 1)
+            clasificacion = str(item[6])
+            porcentaje = porcentajes.get(codigo, 0.0)
+            
+            params_list.append((codigo, sede_norm, dias_periodo, neto, promedio, porcentaje, clasificacion, user_nodo))
+            
+        # Ejecutar inserción en bloques (chunks) para mayor estabilidad
+        chunk_size = 1000
+        success_count = 0
+        
+        for i in range(0, len(params_list), chunk_size):
+            chunk = params_list[i:i + chunk_size]
+            if hasattr(db_manager, 'execute_many'):
+                if db_manager.execute_many(sql, chunk):
+                    success_count += len(chunk)
+            else:
+                for p in chunk:
+                    if db_manager.execute_query(sql, p):
+                        success_count += 1
+                
+        logger.success(f"Persistencia RI actualizada para Sede {sede} ({dias_periodo} días) por {user_nodo} | {success_count} productos")
+        
+    except Exception as e:
+        logger.error(f"Error guardando persistencia de rotación: {e}")

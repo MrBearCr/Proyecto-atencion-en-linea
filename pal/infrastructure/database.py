@@ -797,6 +797,45 @@ class DatabaseManager:
                     time.sleep(1)
                     continue
                 raise
+
+    def execute_many(self, query, params_list):
+        """Ejecuta inserción masiva optimizada usando fast_executemany"""
+        if not params_list:
+            return True
+            
+        max_retries = 2
+        for attempt in range(max_retries):
+            thread_conn = None
+            try:
+                # Usar conexión dedicada del hilo actual
+                thread_conn = self.get_thread_connection("exec_many")
+                if not thread_conn:
+                    if attempt < max_retries - 1:
+                        time.sleep(1)
+                        continue
+                    raise Exception("Unable to establish database connection")
+
+                cursor = thread_conn.cursor()
+                # Optimización crítica para SQL Server - acelera hasta 100x
+                try:
+                    cursor.fast_executemany = True
+                except Exception:
+                    pass
+                
+                cursor.executemany(query, params_list)
+                thread_conn.commit()
+                return True
+            except Exception as e:
+                try:
+                    if thread_conn:
+                        thread_conn.rollback()
+                except Exception:
+                    pass
+                if attempt < max_retries - 1:
+                    time.sleep(1)
+                    continue
+                self._log(f"Error en execute_many: {e}", "ERROR")
+                return False
             finally:
                 if cursor:
                     try:
@@ -1076,7 +1115,40 @@ class DatabaseManager:
         # print(f"[DB DEBUG] Chunk fallido después de {max_retries} intentos")  # DEBUG COMENTADO
         return []
     
-    def obtener_ventas_completas_tra(self, fecha_inicio, fecha_fin, sede_codigo, limit=None):
+    def get_subgroup_name(self, code):
+        """Obtiene el nombre descriptivo de un subgrupo dado su código."""
+        try:
+            result = self.fetch_data(
+                "SELECT C_DESCRIPCIO FROM MA_SUBGRUPOS WHERE C_CODIGO = ?",
+                (code,)
+            )
+            return result[0][0] if result else None
+        except Exception:
+            return None
+
+    def get_department_name(self, code):
+        """Obtiene el nombre descriptivo de un departamento dado su código."""
+        try:
+            result = self.fetch_data(
+                "SELECT C_DESCRIPCIO FROM MA_DEPARTAMENTOS WHERE C_CODIGO = ?",
+                (code,)
+            )
+            return result[0][0] if result else None
+        except Exception:
+            return None
+
+    def get_group_name(self, code):
+        """Obtiene el nombre descriptivo de un grupo dado su código."""
+        try:
+            result = self.fetch_data(
+                "SELECT C_DESCRIPCIO FROM MA_GRUPOS WHERE C_CODIGO = ?",
+                (code,)
+            )
+            return result[0][0] if result else None
+        except Exception:
+            return None
+
+    def obtener_ventas_completas_tra(self, fecha_inicio, fecha_fin, sede_codigo, limit=None, exclude_depts=None):
         """Obtiene ventas completas TRA con jerarquía para carga inicial
         
         Args:
@@ -1084,12 +1156,19 @@ class DatabaseManager:
             fecha_fin: Fecha fin del rango  
             sede_codigo: Código de sede/depósito
             limit: Límite de registros (para carga inicial)
+            exclude_depts: Departamentos a excluir
             
         Returns:
             list: Lista de ventas con jerarquía incluida
         """
         try:
-            query = """
+            # Construir cláusula de exclusión
+            exclude_clause = ""
+            if exclude_depts:
+                placeholders_ex = ','.join(['?'] * len(exclude_depts))
+                exclude_clause = f"AND p.C_DEPARTAMENTO NOT IN ({placeholders_ex})"
+
+            query = f"""
                 SELECT 
                     i.c_Codarticulo AS codigo,
                     COALESCE(p.cu_descripcion_corta, 'SIN DESCRIPCIÓN') AS descripcion,
@@ -1106,6 +1185,7 @@ class DatabaseManager:
                 WHERE i.f_fecha BETWEEN CONVERT(DATE, ?, 105) AND CONVERT(DATE, ?, 105)
                 AND i.c_Concepto IN ('VEN', 'DEV')
                 AND i.c_Deposito LIKE ?
+                {exclude_clause}
                 GROUP BY 
                     i.c_Codarticulo,
                     p.cu_descripcion_corta,
@@ -1122,14 +1202,19 @@ class DatabaseManager:
             fecha_inicio_str = fecha_inicio.strftime("%d-%m-%Y")
             fecha_fin_str = fecha_fin.strftime("%d-%m-%Y")
             
-            return self.fetch_data(query, (fecha_inicio_str, fecha_fin_str, sede_codigo))
+            params = [fecha_inicio_str, fecha_fin_str, sede_codigo]
+            if exclude_depts:
+                params.extend(exclude_depts)
+                
+            return self.fetch_data(query, tuple(params))
         except Exception as e:
             print(f"Error obteniendo ventas TRA completas: {str(e)}")
             return []
     
     def obtener_ventas_por_producto_chunk(self, fecha_inicio, fecha_fin, sede_codigo, 
-                                         start_row=1, fetch_size=1000, include_zero_sales=False):
-        """Obtiene ventas TRA en chunks para carga paralela - OPTIMIZADO (soporta consulta global ICH)
+                                         start_row=1, fetch_size=1000, include_zero_sales=False,
+                                         exclude_depts=None):
+        """Obtiene ventas TRA en chunks para carga paralela - OPTIMIZADO
         
         Args:
             fecha_inicio: Fecha inicio del rango
@@ -1137,20 +1222,18 @@ class DatabaseManager:
             sede_codigo: Código de sede/depósito
             start_row: Fila inicial (1-indexed)
             fetch_size: Cantidad de filas a obtener
-            include_zero_sales: Si True, incluye productos con neto <= 0 (devoluciones/sin venta)
-            
-        Returns:
-            list: Lista de ventas en el chunk especificado
-            
-        Optimizaciones:
-        - WITH (NOLOCK): Evita bloqueos de lectura (4x-10x más rápido)
-        - Usa = en lugar de LIKE: Permite uso de índices
-        - CTE pre-agregada: Reduce datos antes del JOIN costoso
-        - Filtra neto > 0: Solo productos con ventas reales (si include_zero_sales=False)
+            include_zero_sales: Si True, incluye productos con neto <= 0
+            exclude_depts: Lista de departamentos a excluir
         """
         try:
             # OPTIMIZACIÓN CRÍTICA: CTE + NOLOCK + filtro dinámico por depósito
             global_query = (sede_codigo in (None, '%', '00', 'ICH', 'ALL'))
+            
+            # Construir cláusula de exclusión
+            exclude_clause = ""
+            if exclude_depts:
+                placeholders_ex = ','.join(['?'] * len(exclude_depts))
+                exclude_clause = f"AND p.C_DEPARTAMENTO NOT IN ({placeholders_ex})"
             
             # Construir cláusula HAVING dinámicamente
             having_clause = ""
@@ -1189,8 +1272,7 @@ class DatabaseManager:
             # Query principal
             if include_zero_sales:
                 # MODO MASIVO: FROM MA_PRODUCTOS LEFT JOIN Ventas
-                # AGREGADO: p.C_CODIGO al ORDER BY para evitar duplicados/saltos en paginación de ceros
-                main_part = """
+                main_part = f"""
                     SELECT 
                         RTRIM(LTRIM(p.C_CODIGO)) AS codigo,
                         COALESCE(p.cu_descripcion_corta, 'SIN DESCRIPCIÓN') AS descripcion,
@@ -1203,13 +1285,13 @@ class DatabaseManager:
                         COALESCE(p.n_costoact, 0) AS costo
                     FROM MA_PRODUCTOS p WITH (NOLOCK)
                     LEFT JOIN VentasAgregadas v ON p.C_CODIGO = v.codigo
+                    WHERE 1=1 {exclude_clause}
                     ORDER BY COALESCE(v.neto, 0) DESC, p.C_CODIGO ASC
                     OFFSET ? ROWS FETCH NEXT ? ROWS ONLY
                 """
             else:
-                # MODO NORMAL: FROM Ventas LEFT JOIN MA_PRODUCTOS (Optimizado)
-                # AGREGADO: v.codigo al ORDER BY para garantizar orden determinístico
-                main_part = """
+                # MODO NORMAL: FROM Ventas LEFT JOIN MA_PRODUCTOS
+                main_part = f"""
                     SELECT 
                         RTRIM(LTRIM(v.codigo)) AS codigo,
                         COALESCE(p.cu_descripcion_corta, 'SIN DESCRIPCIÓN') AS descripcion,
@@ -1222,14 +1304,23 @@ class DatabaseManager:
                         COALESCE(p.n_costoact, 0) AS costo
                     FROM VentasAgregadas v
                     LEFT JOIN MA_PRODUCTOS p WITH (NOLOCK) ON v.codigo = p.C_CODIGO
+                    WHERE 1=1 {exclude_clause}
                     ORDER BY v.neto DESC, v.codigo ASC
                     OFFSET ? ROWS FETCH NEXT ? ROWS ONLY
                 """
             
-            query = cte_part + main_part
+            # ORDEN DE PARÁMETROS CRÍTICO:
+            # 1. Fechas y Sede (ya están en 'params')
             
-            offset = start_row - 1
-            params.extend([offset, fetch_size])
+            # 2. Exclusiones (si existen)
+            if exclude_depts:
+                params.extend(exclude_depts)
+            
+            # 3. Paginación (OFFSET y FETCH NEXT)
+            params.append(max(0, start_row-1))
+            params.append(fetch_size)
+            
+            query = cte_part + main_part
             
             # Ejecutar usando conexión específica del hilo
             thread_conn = self.get_thread_connection("tra_chunk")
@@ -1389,81 +1480,130 @@ class DatabaseManager:
             print(f"Error obteniendo proveedores por producto: {str(e)}")
             return []
     
-    def obtener_alertas_stock_chunk(self, start_row=1, fetch_size=500, deposito='0301'):
-        """Obtiene alertas de stock en chunks para depósito específico
-        
-        Args:
-            start_row: Fila inicial (1-indexed)
-            fetch_size: Cantidad de filas a obtener
-            deposito: Código de depósito/sede
-            
-        Returns:
-            list: Lista de tuplas (codigo, descripcion, stock, nivel)
+    # Métodos legacy obtener_alertas_stock, obtener_alertas_stock_chunk y obtener_alertas_stock_multiples removidos.
+    # Se reemplazan por obtener_quiebres_directos para el módulo Quiebre de Stock.
+
+    def obtener_ventas_persisted_tra(self, sede="0301", dias_rango=365):
+        """
+        Carga la vista TRA completa desde la tabla de persistencia pal_productos_rotacion 
+        filtrando por sede y rango de días.
         """
         try:
-            query = """
+            sql = """
                 SELECT 
-                    c_codarticulo AS codigo,
-                    MAX(COALESCE(p.cu_descripcion_corta, 'SIN DESCRIPCIÓN')) AS descripcion,
-                    CAST(SUM(n_cantidad) AS INT) AS stock,  
-                    CASE
-                        WHEN SUM(n_cantidad) BETWEEN 15 AND 20 THEN 'Leve'  
-                        WHEN SUM(n_cantidad) BETWEEN 8 AND 14 THEN 'Media'
-                        ELSE 'Crítica'
-                    END AS nivel
-                FROM MA_DEPOPROD d
-                    INNER JOIN MA_PRODUCTOS p ON d.c_codarticulo = p.C_CODIGO
-                    WHERE c_coddeposito = ?
-                    GROUP BY c_codarticulo
-                    HAVING SUM(n_cantidad) < 21  
-                    ORDER BY CAST(SUM(n_cantidad) AS INT) ASC
-                    OFFSET ? ROWS FETCH NEXT ? ROWS ONLY
+                    p.C_CODIGO, 
+                    p.C_DESCRI, 
+                    p.C_DEPARTAMENTO, 
+                    p.C_GRUPO, 
+                    p.C_SUBGRUPO,
+                    r.n_neto,
+                    r.c_clasificacion
+                FROM pal_productos_rotacion r WITH (NOLOCK)
+                JOIN MA_PRODUCTOS p WITH (NOLOCK) ON r.c_codigo = p.C_CODIGO
+                WHERE r.c_sede = ? AND r.n_dias_rango = ?
+                ORDER BY r.n_neto DESC
             """
-            offset = start_row - 1  # Convert to 0-indexed
-            return self.fetch_data(query, (deposito, offset, fetch_size))
+            return self.fetch_data(sql, (sede, dias_rango))
         except Exception as e:
-            print(f"Error obteniendo chunk de alertas stock: {str(e)}")
-            return []
-    
-    def obtener_alertas_stock_multiples(self, start_row=1, fetch_size=500, depositos=['0301']):
-        """Obtiene alertas de stock para múltiples depósitos
-        
-        Args:
-            start_row: Fila inicial (1-indexed)
-            fetch_size: Cantidad de filas a obtener
-            depositos: Lista de códigos de depósito
-            
-        Returns:
-            list: Lista de tuplas (codigo, descripcion, stock, nivel)
+            self._log(f"Error cargando ventas persistidas: {e}", "ERROR")
+            return None
+
+    def obtener_quiebres_directos(self, depositos, solo_alta_rotacion=True, sede_context="0301", 
+                                 dias_context=365, nombre_sede_display=None, exclude_depts=None):
         """
-        try:
-            if not depositos:
-                depositos = ['0301']
+        Identifica productos en quiebre de stock filtrando por rotación.
+        Consolida todos los depósitos proporcionados como una sola unidad (Sede).
+        """
+        if not depositos:
+            return []
             
-            placeholders = ','.join('?' for _ in depositos)
+        try:
+            placeholders = ','.join(['?'] * len(depositos))
+            sede_label = nombre_sede_display or sede_context
+            
+            # Construir cláusula de exclusión
+            exclude_clause = ""
+            if exclude_depts:
+                placeholders_ex = ','.join(['?'] * len(exclude_depts))
+                exclude_clause = f"AND p.C_DEPARTAMENTO NOT IN ({placeholders_ex})"
+            
+            # Parte opcional del JOIN para rotación con contexto dual
+            rotation_join = ""
+            rotation_where = ""
+            if solo_alta_rotacion:
+                if self.table_exists('pal_productos_rotacion'):
+                    # Buscamos rotación EXCLUSIVAMENTE para la sede específica
+                    rotation_join = f"""
+                        INNER JOIN pal_productos_rotacion rot WITH (NOLOCK) 
+                            ON p.C_CODIGO = rot.c_codigo 
+                            AND rot.c_sede = '{sede_context}'
+                            AND rot.n_dias_rango = {dias_context}
+                    """
+                    rotation_where = "AND rot.c_clasificacion IN ('ALTA', 'MEDIA')"
+            
+            # Query consolidada por Sede con Proyección de Venta Perdida Real
             query = f"""
                 SELECT 
-                    c_codarticulo AS codigo,
-                    MAX(COALESCE(p.cu_descripcion_corta, 'SIN DESCRIPCIÓN')) AS descripcion,
-                    CAST(SUM(n_cantidad) AS INT) AS stock,  
-                    CASE
-                        WHEN SUM(n_cantidad) BETWEEN 15 AND 20 THEN 'Leve'  
-                        WHEN SUM(n_cantidad) BETWEEN 8 AND 14 THEN 'Media'
-                        ELSE 'Crítica'
-                    END AS nivel
-                FROM MA_DEPOPROD d
-                    INNER JOIN MA_PRODUCTOS p ON d.c_codarticulo = p.C_CODIGO
-                    WHERE c_coddeposito IN ({placeholders})
-                    GROUP BY c_codarticulo
-                    HAVING SUM(n_cantidad) < 21  
-                    ORDER BY CAST(SUM(n_cantidad) AS INT) ASC
-                    OFFSET ? ROWS FETCH NEXT ? ROWS ONLY
+                    RTRIM(LTRIM(p.C_CODIGO)) as codigo,
+                    p.c_Descri as descripcion,
+                    '{sede_label}' as sede,
+                    p.Update_date as ultima_compra,
+                    stats.last_sale as ultima_venta,
+                    -- Cálculo de Venta Perdida Proyectada: (Ventas / Días con Stock) * Días en Quiebre
+                    CAST(ROUND(
+                        (ISNULL(stats.sold_units, 0) / 
+                         NULLIF(DATEDIFF(DAY, p.Update_date, stats.last_sale) + 1, 0)) -- Días con stock
+                        * DATEDIFF(DAY, ISNULL(stats.last_sale, p.Update_date), GETDATE()) -- Días en quiebre
+                    , 2) AS FLOAT) as unidades_perdidas,
+                    DATEDIFF(DAY, ISNULL(stats.last_sale, p.Update_date), GETDATE()) as dias_quiebre
+                FROM MA_PRODUCTOS p WITH (NOLOCK)
+                {rotation_join}
+                CROSS APPLY (
+                    SELECT 
+                        SUM(ISNULL(n_cantidad, 0)) as total_stock
+                    FROM MA_DEPOPROD WITH (NOLOCK)
+                    WHERE c_codarticulo = p.C_CODIGO AND c_coddeposito IN ({placeholders})
+                ) stock
+                OUTER APPLY (
+                    SELECT 
+                        MAX(i.f_fecha) as last_sale,
+                        SUM(CASE WHEN i.c_Concepto = 'VEN' THEN i.n_cantidad ELSE 0 END) - 
+                        SUM(CASE WHEN i.c_Concepto = 'DEV' THEN i.n_cantidad ELSE 0 END) as sold_units
+                    FROM TR_INVENTARIO i WITH (NOLOCK)
+                    WHERE i.c_Codarticulo = p.C_CODIGO 
+                        AND i.c_Deposito IN ({placeholders})
+                        AND i.f_fecha >= p.Update_date
+                        AND (i.c_Concepto = 'VEN' OR i.c_Concepto = 'DEV')
+                ) stats
+                WHERE stock.total_stock <= 0
+                  AND stats.sold_units > 0 -- Solo si hubo movimiento previo para poder proyectar
+                  {exclude_clause}
+                  {rotation_where}
+                ORDER BY unidades_perdidas DESC
             """
-            offset = start_row - 1  # Convert to 0-indexed
-            params = depositos + [offset, fetch_size]
-            return self.fetch_data(query, params)
+            
+            # Los parámetros se combinan: depósitos (para stock) + depósitos (para stats) + departamentos excluidos
+            params = depositos + depositos
+            if exclude_depts:
+                params.extend(exclude_depts)
+                
+            rows = self.fetch_data(query, params)
+            
+            quiebres = []
+            for row in rows:
+                quiebres.append({
+                    'codigo': row[0],
+                    'descripcion': row[1],
+                    'sede': row[2],
+                    'ultima_compra': row[3],
+                    'ultima_venta': row[4],
+                    'unidades_perdidas': float(row[5]),
+                    'dias_quiebre': row[6]
+                })
+            return quiebres
+            
         except Exception as e:
-            print(f"Error obteniendo alertas stock múltiples: {str(e)}")
+            print(f"Error en obtener_quiebres_directos: {str(e)}")
             return []
 
     def get_sedes_config(self):

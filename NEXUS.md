@@ -128,6 +128,13 @@ La configuración se gestiona vía interfaz: **Settings → Gestión de Usuarios
 
 **Propósito**: Clasificar productos usando el principio ABC/Pareto (regla 80/20) para optimizar compras e inventario.
 
+**Persistencia de Rotación (Nodo Maestro)**:
+Para evitar el recalculo constante de rotación (operación pesada en SQL), se implementó un sistema de persistencia compartida:
+- **Tabla**: `pal_productos_rotacion` (almacena neto, promedio diario, clasificación y fecha).
+- **Lógica de Nodo**: El primer usuario que carga el módulo TRA tras 24 horas actúa como **Nodo Maestro**, calcula la rotación y la persiste en la BD.
+- **Carga Instantánea**: Los demás usuarios cargan directamente desde la tabla de persistencia, reduciendo el tiempo de carga de minutos a segundos.
+- **Uso en Quiebres**: El módulo de Quiebre de Stock utiliza esta tabla para filtrar automáticamente y notificar solo productos de **Alta/Media Rotación**.
+
 **Lógica de Clasificación**:
 - **ALTA (Alta)**: Top 20% de productos que representan el 80% de las ventas
 - **MEDIA (Media)**: Siguiente 20% que representa el 15% de las ventas  

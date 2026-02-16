@@ -411,11 +411,16 @@ def save_rotation_persistence(db_manager, classified_data, sede="0301", dias_per
         porcentajes = calcular_porcentajes_representacion(classified_data)
         
         params_list = []
+        seen_codes = set()
         for item in classified_data:
             if not item or len(item) < 7:
                 continue
                 
             codigo = str(item[0])
+            if codigo in seen_codes:
+                continue
+            seen_codes.add(codigo)
+            
             neto = float(item[5] or 0)
             promedio = neto / (dias_periodo or 1)
             clasificacion = str(item[6])

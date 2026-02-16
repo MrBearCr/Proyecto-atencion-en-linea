@@ -199,7 +199,7 @@ def setup_tra_tab(app):
         
         # Extraer número de días
         dias = int(rango.split()[0])
-        fecha_inicio = ayer - timedelta(days=dias-1)  # -1 porque incluimos el día actual
+        fecha_inicio = ayer - timedelta(days=dias)
         
         # Asegurar que la fecha no exceda el límite mínimo
         if fecha_inicio < hace_2_anos:

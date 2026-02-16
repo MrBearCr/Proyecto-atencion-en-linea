@@ -1273,7 +1273,7 @@ class DatabaseManager:
             if include_zero_sales:
                 # MODO MASIVO: FROM MA_PRODUCTOS LEFT JOIN Ventas
                 main_part = f"""
-                    SELECT 
+                    SELECT DISTINCT
                         RTRIM(LTRIM(p.C_CODIGO)) AS codigo,
                         COALESCE(p.cu_descripcion_corta, 'SIN DESCRIPCIÓN') AS descripcion,
                         COALESCE(p.C_DEPARTAMENTO, '') AS departamento,
@@ -1286,13 +1286,13 @@ class DatabaseManager:
                     FROM MA_PRODUCTOS p WITH (NOLOCK)
                     LEFT JOIN VentasAgregadas v ON p.C_CODIGO = v.codigo
                     WHERE 1=1 {exclude_clause}
-                    ORDER BY COALESCE(v.neto, 0) DESC, p.C_CODIGO ASC
+                    ORDER BY COALESCE(v.neto, 0) DESC, RTRIM(LTRIM(p.C_CODIGO)) ASC
                     OFFSET ? ROWS FETCH NEXT ? ROWS ONLY
                 """
             else:
                 # MODO NORMAL: FROM Ventas LEFT JOIN MA_PRODUCTOS
                 main_part = f"""
-                    SELECT 
+                    SELECT DISTINCT
                         RTRIM(LTRIM(v.codigo)) AS codigo,
                         COALESCE(p.cu_descripcion_corta, 'SIN DESCRIPCIÓN') AS descripcion,
                         COALESCE(p.C_DEPARTAMENTO, '') AS departamento,
@@ -1305,7 +1305,7 @@ class DatabaseManager:
                     FROM VentasAgregadas v
                     LEFT JOIN MA_PRODUCTOS p WITH (NOLOCK) ON v.codigo = p.C_CODIGO
                     WHERE 1=1 {exclude_clause}
-                    ORDER BY v.neto DESC, v.codigo ASC
+                    ORDER BY v.neto DESC, RTRIM(LTRIM(v.codigo)) ASC
                     OFFSET ? ROWS FETCH NEXT ? ROWS ONLY
                 """
             

@@ -133,6 +133,8 @@ Para evitar el recalculo constante de rotación (operación pesada en SQL), se i
 - **Tabla**: `pal_productos_rotacion` (almacena neto, promedio diario, clasificación y fecha).
 - **Lógica de Nodo**: El primer usuario que carga el módulo TRA tras 24 horas actúa como **Nodo Maestro**, calcula la rotación y la persiste en la BD.
 - **Carga Instantánea**: Los demás usuarios cargan directamente desde la tabla de persistencia, reduciendo el tiempo de carga de minutos a segundos.
+- **Consistencia de Rango**: Los cálculos de rotación utilizan un rango inclusivo (ej: 30 días = `ayer - 29 días` + 1 día adicional en la lógica de backend) para asegurar que la persistencia coincida exactamente con la selección del usuario.
+- **Unicidad Garantizada**: Se utiliza `SELECT DISTINCT` a nivel de base de datos y un conjunto de validación en la capa de servicios para asegurar que no existan duplicados de códigos de producto en el sistema de persistencia.
 - **Uso en Quiebres**: El módulo de Quiebre de Stock utiliza esta tabla para filtrar automáticamente y notificar solo productos de **Alta/Media Rotación**.
 
 **Lógica de Clasificación**:

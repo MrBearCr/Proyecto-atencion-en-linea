@@ -2,6 +2,21 @@
 
 Todas las modificaciones notables a este proyecto serán documentadas en este archivo.
 
+## [1.6.2] - 2026-02-16
+
+### 🔧 Cambiado
+- **Corrección de Rango de Fechas en Módulo TRA**
+  - **Razón**: Había una discrepancia entre el cálculo por defecto (31 días reales) y la selección manual de "30 días" (30 días reales), lo que causaba inconsistencias en la persistencia.
+  - **Cambio**: Se ajustó la fecha de inicio por defecto a `ayer - 29 días` (30 días inclusive) y se actualizó la lógica de `dias_context` en el backend para ser siempre inclusive (`+1`).
+- **Optimización de Unicidad de Productos (SELECT DISTINCT)**
+  - **Archivo**: `pal/infrastructure/database.py` (función `obtener_ventas_por_producto_chunk`)
+  - **Cambio**: Se agregó `DISTINCT` a la consulta de ventas para prevenir la duplicidad de registros cuando existen entradas redundantes en la tabla maestra de productos.
+
+### 🐛 Corregido
+- **Duplicidad en Persistencia de Rotación**
+  - **Archivo**: `pal/services/tra.py`
+  - **Solución**: Se añadió un control explícito de unicidad por código de producto antes de insertar en la tabla `pal_productos_rotacion`, eliminando cualquier posibilidad de duplicados en el "Nodo Maestro".
+
 ## [1.6.1] - 2026-02-16
 
 ### 🆕 Añadido

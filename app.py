@@ -9002,7 +9002,7 @@ class DatabaseApp:
                 
             # ATAJO CRÍTICO: Si ya hay persistencia, no calcular nada
             from pal.services.tra import get_persisted_rotation
-            dias_context = (self.tra_fecha_fin - self.tra_fecha_inicio).days or 365
+            dias_context = (self.tra_fecha_fin - self.tra_fecha_inicio).days
             
             # Verificar si existe persistencia y si está fresca (TTL de 1 hora)
             # Nota: get_persisted_rotation devuelve el objeto con el timestamp para verificar frescura

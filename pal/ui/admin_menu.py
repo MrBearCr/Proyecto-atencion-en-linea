@@ -17,29 +17,37 @@ class AdminMenu(ttk.Frame):
         self.create_widgets()
 
     def _create_module_card(self, parent, icon, name, desc, command):
+        """
+        Crea una tarjeta de módulo con estilo visual moderno (estilo Windows/Web).
+        """
+        self.accent_color = "#004C97"  # Brand Blue
+        self.bg_hover = "#F9FAFB"
+        self.border_normal = "#E5E7EB"
+        self.border_hover = "#004C97"
+        
         card_frame = tk.Frame(
             parent,
             bg="#FFFFFF",
-            relief=tk.RAISED,
-            bd=1,
+            highlightthickness=1,
+            highlightbackground=self.border_normal,
             cursor="hand2"
         )
         
         inner = tk.Frame(card_frame, bg="#FFFFFF")
-        inner.pack(fill=tk.BOTH, expand=True, padx=15, pady=15)
+        inner.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
         
         tk.Label(
             inner,
             text=icon,
-            font=("Segoe UI", 28),
+            font=("Segoe UI", 32),
             bg="#FFFFFF"
-        ).pack(pady=(5, 5))
+        ).pack(pady=(0, 10))
         
         tk.Label(
             inner,
-            text=name,
-            font=("Segoe UI", 12, "bold"),
-            foreground="#1F2937",
+            text=name.upper(),
+            font=("Segoe UI", 11, "bold"),
+            foreground="#111827",
             bg="#FFFFFF"
         ).pack()
 
@@ -49,17 +57,20 @@ class AdminMenu(ttk.Frame):
             font=("Segoe UI", 9),
             foreground="#6B7280",
             bg="#FFFFFF",
-            wraplength=150
-        ).pack(pady=(2, 0))
+            wraplength=160,
+            justify="center"
+        ).pack(pady=(5, 0))
 
         def on_enter(e):
-            card_frame.configure(relief=tk.SUNKEN, bd=2, bg="#F3F4F6")
-            inner.configure(bg="#F3F4F6")
+            card_frame.configure(highlightbackground=self.border_hover, highlightthickness=2)
+            card_frame.configure(bg=self.bg_hover)
+            inner.configure(bg=self.bg_hover)
             for widget in inner.winfo_children():
-                widget.configure(bg="#F3F4F6")
+                widget.configure(bg=self.bg_hover)
 
         def on_leave(e):
-            card_frame.configure(relief=tk.RAISED, bd=1, bg="#FFFFFF")
+            card_frame.configure(highlightbackground=self.border_normal, highlightthickness=1)
+            card_frame.configure(bg="#FFFFFF")
             inner.configure(bg="#FFFFFF")
             for widget in inner.winfo_children():
                 widget.configure(bg="#FFFFFF")

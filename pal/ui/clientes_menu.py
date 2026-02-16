@@ -25,49 +25,53 @@ class ClientesMenu(ttk.Frame):
 
     def _create_module_card(self, parent, icon, name, command):
         """
-        Crea una tarjeta de módulo con estilo, que actúa como un botón.
+        Crea una tarjeta de módulo con estilo visual moderno (estilo Windows/Web).
         """
+        self.accent_color = "#004C97"  # Brand Blue
+        self.bg_hover = "#F9FAFB"
+        self.border_normal = "#E5E7EB"
+        self.border_hover = "#004C97"
+        
         card_frame = tk.Frame(
             parent,
             bg="#FFFFFF",
-            relief=tk.RAISED,
-            bd=1,
+            highlightthickness=1,
+            highlightbackground=self.border_normal,
             cursor="hand2"
         )
         
         inner = tk.Frame(card_frame, bg="#FFFFFF")
-        inner.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        inner.pack(fill=tk.BOTH, expand=True, padx=25, pady=25)
         
         tk.Label(
             inner,
             text=icon,
-            font=("Segoe UI", 36),
+            font=("Segoe UI", 42),
             bg="#FFFFFF"
-        ).pack(pady=(10, 12))
+        ).pack(pady=(5, 12))
         
         tk.Label(
             inner,
-            text=name,
-            font=("Segoe UI", 14, "bold"),
-            foreground="#1F2937",
+            text=name.upper(),
+            font=("Segoe UI", 12, "bold"),
+            foreground="#111827",
             bg="#FFFFFF"
         ).pack()
 
-        # --- Handlers de eventos ---
         def on_enter(e):
-            card_frame.configure(relief=tk.SUNKEN, bd=2, bg="#F3F4F6")
-            inner.configure(bg="#F3F4F6")
+            card_frame.configure(highlightbackground=self.border_hover, highlightthickness=2)
+            card_frame.configure(bg=self.bg_hover)
+            inner.configure(bg=self.bg_hover)
             for widget in inner.winfo_children():
-                widget.configure(bg="#F3F4F6")
+                widget.configure(bg=self.bg_hover)
 
         def on_leave(e):
-            card_frame.configure(relief=tk.RAISED, bd=1, bg="#FFFFFF")
+            card_frame.configure(highlightbackground=self.border_normal, highlightthickness=1)
+            card_frame.configure(bg="#FFFFFF")
             inner.configure(bg="#FFFFFF")
             for widget in inner.winfo_children():
                 widget.configure(bg="#FFFFFF")
         
-        # --- Bindings ---
-        # Vincular eventos a todos los componentes de la tarjeta
         for widget in [card_frame, inner] + inner.winfo_children():
              widget.bind("<Enter>", on_enter)
              widget.bind("<Leave>", on_leave)

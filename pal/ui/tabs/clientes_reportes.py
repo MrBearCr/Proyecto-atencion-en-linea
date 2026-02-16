@@ -27,23 +27,48 @@ class ClientesReportesTab(ttk.Frame):
         self.sede_combobox.bind("<<ComboboxSelected>>", self.on_sede_selected)
         
         # --- Controles de Fecha ---
-        # --- Controles de Fecha (Solo Hoy) ---
-        ttk.Label(control_frame, text="Fecha (Hoy):").pack(side=tk.LEFT, padx=(15, 0))
-        
+        # --- Controles de Período y Fecha ---
+        ttk.Label(control_frame, text="Período:").pack(side=tk.LEFT, padx=(15, 0))
+        self.periodo_combo = ttk.Combobox(control_frame, state='readonly', width=18)
+        self.periodo_combo['values'] = ("7 días", "15 días", "30 días", "60 días", "90 días", "180 días", "365 días", "Personalizado")
+        self.periodo_combo.current(2) # 30 días por defecto
+        self.periodo_combo.pack(side=tk.LEFT, padx=5)
+        self.periodo_combo.bind("<<ComboboxSelected>>", self._on_period_change)
+
+        ttk.Label(control_frame, text="Desde:").pack(side=tk.LEFT, padx=(15, 0))
         today = datetime.now()
-        
-        self.fecha_inicio_entry = DateEntry(control_frame, width=12, date_pattern='yyyy-mm-dd')
+        self.fecha_inicio_entry = DateEntry(control_frame, width=12, date_pattern='yyyy-mm-dd', background='#004C97', foreground='white')
         self.fecha_inicio_entry.set_date(today)
-        self.fecha_inicio_entry.configure(state='disabled')
         self.fecha_inicio_entry.pack(side=tk.LEFT, padx=5)
 
-        # Ocultamos el campo "Hasta" ya que es redundante si solo es HOY
-        self.fecha_fin_entry = DateEntry(control_frame, width=12, date_pattern='yyyy-mm-dd')
+        ttk.Label(control_frame, text="Hasta:").pack(side=tk.LEFT, padx=(10, 0))
+        self.fecha_fin_entry = DateEntry(control_frame, width=12, date_pattern='yyyy-mm-dd', background='#004C97', foreground='white')
         self.fecha_fin_entry.set_date(today)
-        self.fecha_fin_entry.configure(state='disabled')
-        # self.fecha_fin_entry.pack(side=tk.LEFT, padx=5) # No mostrar
+        self.fecha_fin_entry.pack(side=tk.LEFT, padx=5)
 
-        self.btn_generar_reporte = ttk.Button(control_frame, text="Generar Reporte del Día", command=self.generar_reporte)
+        # Segunda fila de controles (Filtros de búsqueda)
+        search_frame = ttk.Frame(self)
+        search_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=(0, 10))
+
+        ttk.Label(search_frame, text="RIF/ID:").pack(side=tk.LEFT, padx=(5, 0))
+        self.rif_filter_entry = ttk.Entry(search_frame, width=15)
+        self.rif_filter_entry.pack(side=tk.LEFT, padx=5)
+
+        ttk.Label(search_frame, text="Descripción:").pack(side=tk.LEFT, padx=(15, 0))
+        self.desc_filter_entry = ttk.Entry(search_frame, width=30)
+        self.desc_filter_entry.pack(side=tk.LEFT, padx=5)
+
+        # Barra de progreso y estado
+        self.progress_frame = ttk.Frame(search_frame)
+        self.progress_frame.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=15)
+        
+        self.progress_bar = ttk.Progressbar(self.progress_frame, orient=tk.HORIZONTAL, mode='determinate', length=150)
+        self.progress_bar.pack(side=tk.LEFT, padx=5)
+        
+        self.status_label = ttk.Label(self.progress_frame, text="", font=("Segoe UI", 9))
+        self.status_label.pack(side=tk.LEFT, padx=5)
+
+        self.btn_generar_reporte = ttk.Button(search_frame, text="Generar Reporte", command=self.generar_reporte)
         self.btn_generar_reporte.pack(side=tk.LEFT, padx=10)
         
         # Botón para volver al menú de clientes
@@ -118,102 +143,138 @@ class ClientesReportesTab(ttk.Frame):
             self.controller.log("Ninguna sede seleccionada o configurada.", "WARNING")
             self.btn_generar_reporte.config(state=tk.DISABLED)
 
+    def _on_period_change(self, event=None):
+        """Actualiza los DateEntry según el período seleccionado"""
+        rango = self.periodo_combo.get()
+        hoy = datetime.now()
+        
+        if rango == "Personalizado":
+            return
+            
+        # Extraer número de días
+        try:
+            dias = int(rango.split()[0])
+            inicio = hoy - timedelta(days=dias-1)
+            self.fecha_inicio_entry.set_date(inicio)
+            self.fecha_fin_entry.set_date(hoy)
+        except Exception:
+            pass
+
     def generar_reporte(self):
-        """Genera el reporte para la sede seleccionada y el rango de fechas (SOLO HOY)."""
+        """Inicia la generación del reporte en segundo plano."""
         if not self.selected_sede_config:
             messagebox.showwarning("Selección de Sede", "Por favor, seleccione una sede para generar el reporte.")
             return
 
-        # Forzar fechas a HOY
-        now = datetime.now()
-        fecha_inicio = now.date()
-        fecha_fin = now.date()
+        fecha_inicio = self.fecha_inicio_entry.get_date()
+        fecha_fin = self.fecha_fin_entry.get_date()
+        
+        # Deshabilitar interfaz
+        self.btn_generar_reporte.state(['disabled'])
+        self.report_tree.delete(*self.report_tree.get_children())
+        self.status_label.config(text="Procesando datos...", foreground="#004C97")
+        self.progress_bar.config(mode='indeterminate')
+        self.progress_bar.start()
+        
+        rif_filter = self.rif_filter_entry.get().strip()
+        desc_filter = self.desc_filter_entry.get().strip()
 
-        # Validación de rangos eliminada porque siempre es hoy == hoy
+        # Ejecutar en hilo
+        import threading
+        thread = threading.Thread(
+            target=self._background_generar_reporte,
+            args=(fecha_inicio, fecha_fin, rif_filter, desc_filter),
+            daemon=True
+        )
+        thread.start()
 
-        self.report_tree.delete(*self.report_tree.get_children()) # Limpiar treeview
-        self.vad20_conn = None # Asegurarse de que la conexión esté limpia
-
+    def _background_generar_reporte(self, fecha_inicio, fecha_fin, rif_filter, desc_filter):
+        """Procesa el reporte en segundo plano con USD históricos desde BD"""
         try:
-            # 1. Establecer conexión temporal a la BD VAD20 de la sede
-            self.vad20_conn = self.controller.db_manager.connect_to_vad20_sede(self.selected_sede_config)
+            # 1. Conexión a la BD VAD20 de la sede
+            conn_sede = self.controller.db_manager.connect_to_vad20_sede(self.selected_sede_config)
+            if not conn_sede:
+                raise Exception("No se pudo conectar a la base de datos de la sede")
+            
+            # Callback para actualizar barra de progreso
+            def update_progress(current, total):
+                if total > 0:
+                    percent = (current / total) * 100
+                    self.after(0, lambda: self.progress_bar.config(value=percent))
+                    self.after(0, lambda: self.status_label.config(text=f"Procesando: {int(percent)}%"))
 
-            # Obtener factor dolar (Usando conexión PRINCIPAL VAD10, no la de la sede)
-            # MA_MONEDAS solo existe en VAD10
-            # Se usa .conn porque es el atributo de conexión principal en DatabaseManager
-            factor_dolar = self.controller.db_manager.get_dolar_factor(self.controller.db_manager.conn)
-            if factor_dolar <= 0: factor_dolar = 1.0
-            
-            # 2. Obtener los datos del reporte (raw data, one row per product)
+            # Obtener datos (ahora con TotalUSD calculado en SQL por cada factura/día)
             report_data_raw = self.controller.db_manager.get_reporte_compras_por_cliente(
-                self.vad20_conn, fecha_inicio, fecha_fin
+                conn_sede, fecha_inicio, fecha_fin, 
+                rif_filter=rif_filter, desc_filter=desc_filter,
+                progress_callback=update_progress
             )
+            conn_sede.close()
             
-            # 3. Agrupar los datos por factura para la visualización jerárquica
+            # Procesar datos (agrupación de facturas y sus productos)
             invoices = {}
             for row in report_data_raw:
-                # Ahora row tiene 6 elementos: RIF, Nombre, Num, Fecha, CodProd, N_Total
-                rif, client_name, invoice_num, invoice_date, product_code, n_total_bs = row
-                
-                invoice_key = (rif, invoice_num) # Usar RIF y número de factura como clave única
+                # row: (rif, name, num, date, prod_code, total_bs, total_usd)
+                rif, client_name, invoice_num, invoice_date, product_code, n_total_bs, total_usd = row
+                invoice_key = (rif, invoice_num)
                 
                 if invoice_key not in invoices:
+                    # Primera vez que vemos esta factura: Guardamos sus datos de cabecera y el total
                     invoices[invoice_key] = {
-                        'rif': rif,
-                        'client_name': client_name,
+                        'rif': rif, 
+                        'client_name': client_name, 
                         'invoice_num': invoice_num,
-                        'invoice_date': invoice_date,
+                        'invoice_date': invoice_date, 
                         'total_bs': float(n_total_bs) if n_total_bs else 0.0,
-                        'products': []
+                        'total_usd': float(total_usd) if total_usd else 0.0,
+                        'products': set() 
                     }
-                invoices[invoice_key]['products'].append(product_code)
+                
+                # Añadir el producto al set (evita duplicados si hay re-pagos o datos sucios)
+                if product_code:
+                    invoices[invoice_key]['products'].add(product_code)
             
-            # 4. Calcular totales y ordenar de mayor a menor monto USD
-            invoices_list = []
-            for invoice_data in invoices.values():
-                invoice_data['total_usd'] = invoice_data['total_bs'] / factor_dolar
-                invoices_list.append(invoice_data)
+            # Convertir a lista y ordenar por monto descendente
+            invoices_list = list(invoices.values())
+            for inv in invoices_list:
+                inv['products'] = sorted(list(inv['products'])) # Ordenar productos por código
             
-            # Ordenar por total_usd descendente (mayor a menor)
             invoices_list.sort(key=lambda x: x['total_usd'], reverse=True)
-
-            # 5. Insertar datos en el Treeview jerárquicamente
-            for invoice_data in invoices_list:
-                formatted_date = invoice_data['invoice_date'].strftime('%Y-%m-%d')
-                num_items = len(invoice_data['products'])
-                
-                # Elemento padre para la factura
-                parent_values = (
-                    str(invoice_data['rif']),
-                    str(invoice_data['client_name']),
-                    str(invoice_data['invoice_num']),
-                    formatted_date,
-                    str(num_items),
-                    f"{invoice_data['total_usd']:,.2f}"
-                )
-                # Insertar el parent item, inicialmente cerrado
-                parent_iid = self.report_tree.insert("", tk.END, values=parent_values, open=False) 
-                
-                # Elementos hijo para los productos bajo esta factura
-                for product_code in invoice_data['products']:
-                    # Los child items solo mostrarán el código de producto.
-                    # Rellenamos columnas vacías para alinear
-                    self.report_tree.insert(parent_iid, tk.END, values=(str(product_code), "", "", "", "", ""))
-
-            messagebox.showinfo("Reporte Generado", f"Se encontraron {len(invoices)} facturas para {self.selected_sede_config['nombre_sede']}.")
-
+            
+            # Actualizar UI
+            self.after(0, lambda: self._on_report_loaded(invoices_list))
+            
         except Exception as e:
-            messagebox.showerror("Error al Generar Reporte", f"No se pudo generar el reporte: {e}")
-        finally:
-            # 5. Siempre cerrar la conexión VAD20
-            if self.vad20_conn:
-                try:
-                    self.vad20_conn.close()
-                    self.vad20_conn = None
-                    self.controller.log("Conexión VAD20 cerrada.", "INFO")
-                except Exception as e:
-                    self.controller.log(f"Error cerrando conexión VAD20: {e}", "ERROR")
+            self.after(0, lambda: self._on_report_error(str(e)))
 
+    def _on_report_loaded(self, invoices_list):
+        """Muestra los resultados en el Treeview"""
+        self.btn_generar_reporte.state(['!disabled'])
+        self.progress_bar.stop()
+        self.progress_bar.config(mode='determinate', value=100)
+        self.status_label.config(text="✓ Completado", foreground="#10B981")
+        
+        for invoice_data in invoices_list:
+            formatted_date = invoice_data['invoice_date'].strftime('%Y-%m-%d')
+            num_items = len(invoice_data['products'])
+            parent_values = (
+                str(invoice_data['rif']), str(invoice_data['client_name']),
+                str(invoice_data['invoice_num']), formatted_date,
+                str(num_items), f"{invoice_data['total_usd']:,.2f}"
+            )
+            parent_iid = self.report_tree.insert("", tk.END, values=parent_values, open=False) 
+            for product_code in invoice_data['products']:
+                self.report_tree.insert(parent_iid, tk.END, values=(str(product_code), "", "", "", "", ""))
+
+        messagebox.showinfo("Reporte Generado", f"Se encontraron {len(invoices_list)} facturas.")
+
+    def _on_report_error(self, message):
+        """Maneja errores en el reporte"""
+        self.btn_generar_reporte.state(['!disabled'])
+        self.progress_bar.stop()
+        self.progress_bar.config(mode='determinate', value=0)
+        self.status_label.config(text="⚠ Error", foreground="#EF4444")
+        messagebox.showerror("Error", f"No se pudo generar el reporte: {message}")
 
     def on_tab_close(self):
         """Se llama cuando la pestaña es cerrada para limpiar recursos."""

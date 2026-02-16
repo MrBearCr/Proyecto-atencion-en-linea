@@ -150,17 +150,20 @@ def setup_dashboard_tab(app):
     }
     
     # Crear tarjetas medianas para cada módulo habilitado (diseño grid)
-    col = 0
-    max_cols = 4  # 4 tarjetas por fila
+    accent_color = "#004C97"  # Brand Blue
+    bg_hover = "#F9FAFB"
+    border_normal = "#E5E7EB"
+    border_hover = "#004C97"
     
+    col = 0
     for module_key, module_data in modules_info.items():
         if app.modules_enabled.get(module_key, False):
-            # Frame para cada tarjeta
+            # Frame para cada tarjeta (Modern Style)
             card_frame = tk.Frame(
                 cards_container,
                 bg="#FFFFFF",
-                relief=tk.RAISED,
-                bd=1,
+                highlightthickness=1,
+                highlightbackground=border_normal,
                 cursor="hand2"
             )
             card_frame.pack(side=tk.LEFT, padx=8, pady=8, fill=tk.BOTH, expand=True)
@@ -186,23 +189,35 @@ def setup_dashboard_tab(app):
                 bg="#FFFFFF"
             ).pack()
             
-            # Efecto hover en toda la tarjeta
-            def on_enter(e, cf=card_frame):
-                cf.configure(relief=tk.SUNKEN, bd=2, bg="#F3F4F6")
+            # Efecto hover moderno
+            def make_on_enter(cf, inn):
+                def on_enter(e):
+                    cf.configure(highlightbackground=border_hover, highlightthickness=2)
+                    cf.configure(bg=bg_hover)
+                    inn.configure(bg=bg_hover)
+                    for widget in inn.winfo_children():
+                        widget.configure(bg=bg_hover)
+                return on_enter
             
-            def on_leave(e, cf=card_frame):
-                cf.configure(relief=tk.RAISED, bd=1, bg="#FFFFFF")
+            def make_on_leave(cf, inn):
+                def on_leave(e):
+                    cf.configure(highlightbackground=border_normal, highlightthickness=1)
+                    cf.configure(bg="#FFFFFF")
+                    inn.configure(bg="#FFFFFF")
+                    for widget in inn.winfo_children():
+                        widget.configure(bg="#FFFFFF")
+                return on_leave
             
             def on_click(tab_attr=module_data.get('tab_attr'), tab_text=module_data['tab_text']):
                 _select_tab_by_attr(app, tab_attr, fallback_text=tab_text)
             
-            card_frame.bind("<Enter>", on_enter)
-            card_frame.bind("<Leave>", on_leave)
-            # Importante: fijar la referencia del handler por iteración (evitar que todas apunten al último)
-            card_frame.bind("<Button-1>", lambda e, f=on_click: f())
-            inner.bind("<Button-1>", lambda e, f=on_click: f())
-            inner.bind("<Enter>", on_enter)
-            inner.bind("<Leave>", on_leave)
+            enter_func = make_on_enter(card_frame, inner)
+            leave_func = make_on_leave(card_frame, inner)
+            
+            for w in [card_frame, inner] + list(inner.winfo_children()):
+                w.bind("<Enter>", enter_func)
+                w.bind("<Leave>", leave_func)
+                w.bind("<Button-1>", lambda e, f=on_click: f())
             
             col += 1
     

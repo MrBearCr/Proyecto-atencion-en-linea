@@ -2,6 +2,33 @@
 
 Todas las modificaciones notables a este proyecto serán documentadas en este archivo.
 
+## [1.6.1] - 2026-02-16
+
+### 🆕 Añadido
+- **Filtros de Búsqueda en Reporte de Clientes**
+  - **Razón**: Los usuarios necesitaban buscar clientes específicos (RIF o Nombre) dentro de rangos de fechas extensos sin procesar toda la base de datos.
+  - **Cambio**: Implementado filtrado dinámico en SQL y nuevos campos de entrada en la UI.
+- **Interactividad en Gráficos de Estadísticas**
+  - **Cambio**: Implementación de tooltips dinámicos que muestran: Nombre del cliente, Mes, Total USD y desglose de facturas individuales al pasar el cursor sobre los puntos.
+  - **Beneficio**: Análisis profundo de tendencias sin necesidad de generar reportes adicionales.
+
+### 🔧 Cambiado
+- **Arquitectura de Cálculo de USD (Cross-Server)**
+  - **Archivo**: `pal/infrastructure/database.py`
+  - **Razón**: Bases de datos en diferentes servidores (172.x y 192.x) impedían la unión de tablas vía SQL directo.
+  - **Solución**: La aplicación ahora une `MA_PAGOS` y `FACTOR_DOLAR` en la capa de Python, gestionando factores del dólar de forma eficiente en memoria.
+- **Carga por Chunks y Barra de Progreso Determinada**
+  - **Cambio**: Migración de carga indeterminada a procesamiento por segmentos (5-10 días por chunk) con barra de progreso porcentual.
+  - **Impacto**: UI fluida durante cargas pesadas y feedback visual preciso del avance.
+
+### 🐛 Corregido
+- **Error de Conversión de Fecha SQL (22007)**
+  - **Problema**: Desajustes en configuraciones regionales de servidores producían errores de conversión de nvarchar a datetime.
+  - **Solución**: Uso estricto de `CONVERT(DATETIME, ?, 120)` en todas las consultas de clientes.
+- **Advertencias de Glifos (Font Glyphs)**
+  - **Problema**: Emojis en tooltips producían errores `UserWarning: Glyph missing` en sistemas sin fuentes completas.
+  - **Solución**: Reemplazados emojis por etiquetas de texto estándar.
+
 ## [1.6.0] - 2026-02-12
 
 ### 🆕 Añadido

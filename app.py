@@ -321,6 +321,9 @@ class DatabaseApp:
 
     def _initialize_app(self):
         try:
+            # Aplicar estilos modernos inmediatamente en el hilo principal
+            self.root.after(0, lambda: ui_setup_styles(self))
+            
             # Tu lógica de inicialización original
             self.ultimas_notificaciones = set()
             print("[DEBUG] Iniciando carga de la aplicación...", flush=True)
@@ -348,6 +351,11 @@ class DatabaseApp:
             self.settings_window = None
             self.show_pwd_var = None
             self.httpd = None
+            
+            # Inicializar referencias a widgets de estado para evitar AttributeError
+            self.db_status = None
+            self.api_status = None
+            
             self.favoritos = set()
             self._load_favoritos_cache()
             
@@ -371,8 +379,7 @@ class DatabaseApp:
             # Reportar progreso: 30%
             self.splash.set_progress(0.30)
             
-            ui_setup_styles(self)
-            self.setup_modern_ui()
+            # setup_modern_ui() <- Diferido para después del login (acelera inicio)
             
             # Reportar progreso: 40%
             self.splash.set_progress(0.40)
@@ -898,41 +905,10 @@ class DatabaseApp:
         except Exception as e:
             print(f"Error ocultando progreso: {e}")
     
-    def _background_load_ventas_tra(self):
-        """Carga todas las ventas TRA en segundo plano con adaptive chunking optimizado.
-        
-        Implementa:
-        - Adaptive chunking basado en latencia objetivo
-        - Cache con TTL por parámetros de consulta
-        - Optimizaciones SQL con índices
-        - Manejo thread-safe del pool de conexiones
-        """
-        if not hasattr(self, 'tra_fecha_inicio') or not hasattr(self, 'tra_fecha_fin') or not hasattr(self, 'tra_sede_codigo'):
-            self.log("No hay parámetros TRA para carga paralela", "ERROR")
-            return
-            
-        load_start_time = time.perf_counter()
-        
-        # Parámetros de adaptive chunking
-        target_latency = 2.0  # Latencia objetivo por chunk en segundos
-        min_chunk_size = 100
-        max_chunk_size = 2000
-        initial_chunk_size = 500
-        
-        # Inicializar controlador de chunks adaptativos
-        from pal.core.chunks import AdaptiveChunkController
-        controller = AdaptiveChunkController(
-            initial=initial_chunk_size,
-            min_size=min_chunk_size,
-            max_size=max_chunk_size,
-            target_latency=target_latency,
-            fast_ratio=0.5,
-            slow_ratio=1.2,
-            grow_factor=1.3,
-            shrink_factor=0.8,
-            ema_alpha=0.4,
-            cooldown=2,
-        )
+    def _background_load_ventas_tra_v3_deprecated(self):
+        # Esta función ha sido reemplazada por la versión optimizada al final del archivo
+        pass
+
         
         # Parámetros de cache
         cache_key = f"tra_{self.tra_sede_codigo}_{self.tra_fecha_inicio}_{self.tra_fecha_fin}"
@@ -2495,44 +2471,13 @@ class DatabaseApp:
             background=[('active', '#e89f00')],
             foreground=[('active', '#003f7e')])
         
-
-    def load_stock_filters(self):
-        """Puebla Combobox tras conectar a BD usando descripciones como identificador visible"""
-        if not hasattr(self, 'dept_combo') or not self.dept_combo.winfo_exists():
-            return
-            
-        try:
-            deps = self.db_manager.fetch_data(
-                "SELECT C_CODIGO, C_DESCRIPCIO FROM MA_DEPARTAMENTOS"
-            )
-            self.dept_dict = {desc: cod for cod, desc in deps if cod and desc}
-            self.dept_combo['values'] = ['Todos'] + list(self.dept_dict.keys())
-            self.dept_var.set('Todos')
-        except Exception as e:
-            print("Error cargando departamentos:", e)
-            self.dept_dict = {}
-            if hasattr(self, 'dept_combo'):
-                self.dept_combo['values'] = ['Todos']
-        self.dept_var.set('Todos')
-
-        self.group_dict = {}
-        if hasattr(self, 'group_combo'):
-            self.group_combo['values'] = ['Todos']
-        self.group_var.set('Todos')
-
-        self.sub_dict = {}
-        if hasattr(self, 'sub_combo'):
-            self.sub_combo['values'] = ['Todos']
-        self.sub_var.set('Todos')
+        # Sincronizar estados actuales tras crear los widgets
+        if hasattr(self, 'db_manager') and self.db_manager.conn:
+            self.update_status('connected', server=self.db_manager.server)
         
-        # Cargar depósitos y preferencias
-        try:
-            self._load_global_settings()
-            self.load_depositos_stock()
-            self._update_stock_depositos_label()
-        except Exception as e:
-            self.log(f"Error cargando depósitos: {e}", "DEBUG")
-            self.stock_depositos_seleccionados = ['0301']
+        if hasattr(self, 'api_state') and self.api_state == "active":
+            self.update_status('api_connected')
+        
 
     def load_tra_filters(self):
         """Carga departamentos, grupos y subgrupos para la pestaña T.R.A"""
@@ -2774,100 +2719,70 @@ class DatabaseApp:
             pass
 
     def load_stock_filters(self):
-        """Carga los departamentos, grupos y subgrupos para el módulo de Stock utilizando la jerarquía unificada."""
+        """Sincroniza los combos de Stock con la jerarquía unificada de la aplicación."""
         if not hasattr(self, 'stock_dept_combo'): return
         
-        # IMPORTANTE: No llamar a cargar_jerarquia_unificada aquí para evitar bucles infinitos
-        # Si no hay datos, simplemente salimos; el proceso unificado se encargará de llamarnos cuando esté listo
+        # Si no hay datos cargados aún, no hacemos nada
         if not hasattr(self, 'tra_dept_dict') or not self.tra_dept_dict:
             return
 
         try:
-            # Reutilizar los diccionarios de la jerarquía unificada para poblar los filtros de stock
-            # 1. Departamentos
-            self.stock_dept_map = self.tra_dept_dict.copy()
-            depts = sorted(list(self.stock_dept_map.keys()))
+            # Población directa desde el diccionario unificado (igual que RI/MBRP)
+            depts = sorted(list(self.tra_dept_dict.keys()))
             self.stock_dept_combo['values'] = ['Todos'] + depts
             
-            # Mantener valor actual si es válido, sino 'Todos'
+            # Asegurar que el valor actual sea válido
             if self.stock_dept_var.get() not in self.stock_dept_combo['values']:
                 self.stock_dept_var.set('Todos')
+                # Si reseteamos a Todos, limpiar hijos
+                self.stock_group_combo['values'] = ['Todos']
+                self.stock_group_var.set('Todos')
+                self.stock_subgroup_combo['values'] = ['Todos']
+                self.stock_subgroup_var.set('Todos')
             
-            # 2. Inicializar grupos y subgrupos
-            self.stock_group_dict = {} # dept_desc -> set of group_desc
-            self.stock_subgroup_dict = {} # (dept_desc, group_desc) -> set of sub_desc
-            
-            # Mapeos para filtros lógicos (usados en aplicar_filtro_stock)
-            self.stock_group_map = {} 
-            self.stock_subgroup_map = {} 
-            
-            # Invertir tra_dept_dict para mapear dept_code -> dept_desc
-            dept_rev = {code: name for name, code in self.tra_dept_dict.items()}
-            
-            # Poblar stock_group_dict desde tra_group_dict
-            if hasattr(self, 'tra_group_dict'):
-                for dept_code, groups in self.tra_group_dict.items():
-                    dept_desc = dept_rev.get(dept_code)
-                    if dept_desc:
-                        self.stock_group_dict[dept_desc] = set(groups.keys())
-                        for g_name, g_code in groups.items():
-                            self.stock_group_map[g_name] = g_code
-                            
-            # Poblar stock_subgroup_dict desde tra_sub_dict
-            if hasattr(self, 'tra_sub_dict'):
-                for key, subs in self.tra_sub_dict.items():
-                    if '|' in key:
-                        d_code, g_code = key.split('|')
-                        d_desc = dept_rev.get(d_code)
-                        # Encontrar el nombre del grupo para este departamento
-                        g_desc = None
-                        if d_code in self.tra_group_dict:
-                            # g_rev: code -> name
-                            g_rev = {code: name for name, code in self.tra_group_dict[d_code].items()}
-                            g_desc = g_rev.get(g_code)
-                        
-                        if d_desc and g_desc:
-                            self.stock_subgroup_dict[(d_desc, g_desc)] = set(subs.keys())
-                            for s_name, s_code in subs.items():
-                                self.stock_subgroup_map[s_name] = s_code
-            
-            # Si no hay selección, asegurar 'Todos'
-            if self.stock_group_var.get() == '': self.stock_group_var.set('Todos')
-            if self.stock_subgroup_var.get() == '': self.stock_subgroup_var.set('Todos')
-            
-            self.log(f"✅ Filtros de stock cargados: {len(depts)} departamentos", "SUCCESS")
+            self.log("✅ Filtros de stock sincronizados con jerarquía unificada", "DEBUG")
             
         except Exception as e:
-            self.log(f"Error procesando filtros stock: {e}", "ERROR")
+            self.log(f"Error sincronizando filtros stock: {e}", "ERROR")
 
     def on_stock_dept_selected(self, event=None):
-        """Maneja el cambio de departamento en los filtros de stock"""
+        """Maneja el cambio de departamento en stock usando la jerarquía unificada"""
         dept_desc = self.stock_dept_var.get()
-        if dept_desc == 'Todos':
+        dept_cod = self.tra_dept_dict.get(dept_desc)
+        
+        if dept_desc == 'Todos' or not dept_cod:
             self.stock_group_combo['values'] = ['Todos']
             self.stock_group_var.set('Todos')
             self.stock_subgroup_combo['values'] = ['Todos']
             self.stock_subgroup_var.set('Todos')
         else:
-            grupos_desc = sorted(list(self.stock_group_dict.get(dept_desc, set())))
-            self.stock_group_combo['values'] = ['Todos'] + grupos_desc
+            # Obtener grupos directamente del diccionario de TRA
+            grupos_dict = self.tra_group_dict.get(dept_cod, {})
+            self.stock_group_combo['values'] = ['Todos'] + sorted(list(grupos_dict.keys()))
             self.stock_group_var.set('Todos')
             self.stock_subgroup_combo['values'] = ['Todos']
             self.stock_subgroup_var.set('Todos')
+            
         self.aplicar_filtro_stock()
 
     def on_stock_group_selected(self, event=None):
-        """Maneja el cambio de grupo en los filtros de stock"""
+        """Maneja el cambio de grupo en stock usando la jerarquía unificada"""
         dept_desc = self.stock_dept_var.get()
         group_desc = self.stock_group_var.get()
         
-        if group_desc == 'Todos':
+        dept_cod = self.tra_dept_dict.get(dept_desc)
+        group_cod = self.tra_group_dict.get(dept_cod, {}).get(group_desc) if dept_cod else None
+        
+        if group_desc == 'Todos' or not group_cod:
             self.stock_subgroup_combo['values'] = ['Todos']
             self.stock_subgroup_var.set('Todos')
         else:
-            subgrupos_desc = sorted(list(self.stock_subgroup_dict.get((dept_desc, group_desc), set())))
-            self.stock_subgroup_combo['values'] = ['Todos'] + subgrupos_desc
+            # Obtener subgrupos usando la misma clave que TRA (dept|group)
+            key = f"{dept_cod}|{group_cod}"
+            subs_dict = self.tra_sub_dict.get(key, {})
+            self.stock_subgroup_combo['values'] = ['Todos'] + sorted(list(subs_dict.keys()))
             self.stock_subgroup_var.set('Todos')
+            
         self.aplicar_filtro_stock()
 
     def cambiar_pagina_stock(self, delta):
@@ -2891,10 +2806,18 @@ class DatabaseApp:
             search_text = self.stock_search_var.get() if hasattr(self, 'stock_search_var') else ''
             favoritos = getattr(self, 'favoritos', set())
 
-            # Convertir descripciones a códigos para el filtro lógico
-            dept_code = self.stock_dept_map.get(dept_desc) if dept_desc != 'Todos' else None
-            group_code = self.stock_group_map.get(group_desc) if group_desc != 'Todos' else None
-            subgroup_code = self.stock_subgroup_map.get(subgroup_desc) if subgroup_desc != 'Todos' else None
+            # Convertir descripciones a códigos para el filtro lógico usando diccionarios unificados
+            dept_code = self.tra_dept_dict.get(dept_desc) if dept_desc != 'Todos' else None
+            
+            # El grupo y subgrupo dependen de sus padres
+            group_code = None
+            if group_desc != 'Todos' and dept_code:
+                group_code = self.tra_group_dict.get(dept_code, {}).get(group_desc)
+                
+            subgroup_code = None
+            if subgroup_desc != 'Todos' and dept_code and group_code:
+                key = f"{dept_code}|{group_code}"
+                subgroup_code = self.tra_sub_dict.get(key, {}).get(subgroup_desc)
             
             # Usar vista efectiva (sin departamentos excluidos)
             alertas_base = getattr(self, 'cached_alertas_effective', self.cached_alertas)
@@ -7953,12 +7876,16 @@ class DatabaseApp:
             'dashboard_color': "#6B7280"
         })
         
-        # Actualizar footer status
-        self.db_status.config(text=config['text'], foreground=config['color'])
+        # Actualizar footer status (Solo si el widget ya existe y no ha sido destruido)
+        try:
+            if hasattr(self, 'db_status') and self.db_status and self.db_status.winfo_exists():
+                self.db_status.config(text=config['text'], foreground=config['color'])
+        except (AttributeError, tk.TclError):
+            pass
         
         # Actualizar dashboard status (si existe)
         try:
-            if hasattr(self, 'dashboard_connection_status'):
+            if hasattr(self, 'dashboard_connection_status') and self.dashboard_connection_status.winfo_exists():
                 self.dashboard_connection_status.config(
                     text=config['dashboard_text'], 
                     foreground=config['dashboard_color']
@@ -7970,13 +7897,18 @@ class DatabaseApp:
         if not hasattr(self, 'api_state'):
             self.api_state = "inactive"
     
-        # Actualizar solo si hay cambio explícito
-        if status_type == 'api_connected':
-            self.api_state = "active"
-            self.api_status.config(text="API: Lista", foreground="green")
-        elif status_type == 'api_error':
-            self.api_state = "error"
-            self.api_status.config(text="API: Error", foreground="red")
+        # Actualizar solo si hay cambio explícito y el widget existe
+        try:
+            if status_type == 'api_connected':
+                self.api_state = "active"
+                if hasattr(self, 'api_status') and self.api_status and self.api_status.winfo_exists():
+                    self.api_status.config(text="API: Lista", foreground="green")
+            elif status_type == 'api_error':
+                self.api_state = "error"
+                if hasattr(self, 'api_status') and self.api_status and self.api_status.winfo_exists():
+                    self.api_status.config(text="API: Error", foreground="red")
+        except (AttributeError, tk.TclError):
+            pass
 
         # Habilitar/Deshabilitar UI dependiente de BD
         try:
@@ -8296,10 +8228,14 @@ class DatabaseApp:
                 self.root.after(500, self._prompt_change_admin_password)
             
             
-            # Diferir operaciones pesadas para después del cierre del splash
-            # Esto acelera la respuesta de "Verificando..."
             def _post_login_setup():
                 try:
+                    # CONFIGURAR COMPONENTES UI AHORA (Diferido desde la inicialización temprana)
+                    try:
+                        self.setup_modern_ui()
+                    except Exception as e:
+                        print(f"[ERROR] No se pudo inicializar UI moderna: {e}")
+
                     # Verificar y crear esquema si es necesario
                     try:
                         missing = self.db_manager.check_security_schema()

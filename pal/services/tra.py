@@ -374,7 +374,7 @@ def get_persisted_rotation(db_manager, sede="0301", dias_rango=365):
             
         # Verificar antigüedad del primer registro
         ultima_act = rows[0][3]
-        if ultima_act and (datetime.now() - ultima_act).total_seconds() > 86400: # 24 horas
+        if ultima_act and (datetime.now() - ultima_act).total_seconds() > 3600: # 1 hora
             return None
             
         rotation_map = {row[0]: (row[1], row[2]) for row in rows}

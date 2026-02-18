@@ -30,10 +30,12 @@ from pal.core.session import SessionManager
 from pal.core.updater import UpdateManager
 UPDATE_MANAGER_AVAILABLE = True
 from pal.infrastructure.database import DatabaseManager
+from pal.infrastructure.notification_db_backend import PyodbcNotificationBackend
 from pal.services.cache import CacheDescripciones
 from pal.services.envios import EnvioProgramado, ProgramadorEnvios
+from pal.services.notifications import NotificationManager as CentralNotificationManager, NotificationPriority
 from pal.ui.debug_console import DebugConsole
-from pal.ui.header import create_header, setup_styles as ui_setup_styles
+from pal.ui.header import create_header, setup_styles as ui_setup_styles, NotificationBell
 from pal.ui.splash import SplashScreen
 from pal.ui.clientes_menu import ClientesMenu
 from tkcalendar import Calendar, DateEntry
@@ -6087,6 +6089,39 @@ class DatabaseApp:
 
 
 
+    def navigate_to_module(self, modulo_ruta: str):
+        """
+        Navega a la pestaña correspondiente al módulo indicado.
+        Llamado por NotificationBell al hacer clic en "Tratar".
+
+        modulo_ruta puede ser:
+          'stock', 'tra', 'mbrp', 'clientes', 'admin', 'mensajes',
+          'estadisticas', 'calendario', 'registros'
+        """
+        try:
+            ruta = (modulo_ruta or '').lower().strip()
+            tab_map = {
+                'stock':        'stock_tab',
+                'tra':          'tra_tab',
+                'mbrp':         'mbrp_tab',
+                'clientes':     'clientes_tab',
+                'admin':        'admin_tab',
+                'mensajes':     'messaging_tab',
+                'estadisticas': 'stats_tab',
+                'calendario':   'calendar_tab',
+                'registros':    'records_tab',
+                'inicio':       'dashboard_tab',
+            }
+            attr = tab_map.get(ruta)
+            if attr and hasattr(self, attr):
+                tab = getattr(self, attr)
+                if tab and tab.winfo_exists():
+                    self.main_notebook.select(tab)
+                    return
+            self.log(f"[navigate_to_module] Módulo desconocido o no disponible: '{modulo_ruta}'", "WARNING")
+        except Exception as e:
+            self.log(f"[navigate_to_module] Error navegando a '{modulo_ruta}': {e}", "ERROR")
+
     def show_records_view(self):
         self.main_notebook.select(self.records_tab)
 
@@ -8277,6 +8312,33 @@ class DatabaseApp:
                     except Exception as e:
                         self.log(f"Error recreando workspace: {e}", "WARNING")
                     
+                    # ── Integración post-login del sistema de notificaciones ──────────
+                    try:
+                        from pal.infrastructure.notification_db_backend import PyodbcNotificationBackend
+                        from pal.services.notifications import NotificationManager as CentralNotificationManager
+
+                        # Reemplazar el manager temporal por uno con backend persistente
+                        backend = PyodbcNotificationBackend(self.db_manager)
+                        self.notification_manager = CentralNotificationManager(db_backend=backend)
+
+                        # Cargar notificaciones activas del usuario desde la BD
+                        usuario = self.current_user.get('username') if self.current_user else None
+                        self.notification_manager.load_from_db(usuario=usuario)
+
+                        # Actualizar la campana si ya existe en el header
+                        if hasattr(self, 'notification_bell') and self.notification_bell:
+                            self.notification_bell._mgr = self.notification_manager
+                            self.notification_bell.set_usuario(usuario)
+                            self.notification_bell._mgr.add_observer(
+                                self.notification_bell._on_notifications_changed
+                            )
+                            self.notification_bell._refresh_badge()
+
+                        self.log("✅ Sistema de notificaciones persistente activado", "SUCCESS")
+                    except Exception as _notif_err:
+                        self.log(f"[Notificaciones] Error activando backend persistente: {_notif_err}", "WARNING")
+                    # ─────────────────────────────────────────────────────────────────
+
                     # Inicializar servicios de fondo según módulos habilitados
                     self._start_module_services()
                     

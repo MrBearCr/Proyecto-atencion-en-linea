@@ -501,6 +501,10 @@ class NotificationManager:
         module: str = "SISTEMA",
         modulo_ruta: Optional[str] = None,
         usuario: Optional[str] = None,
+        # Parámetros extra ignorados para compatibilidad con llamadas legacy
+        bg: Optional[str] = None,
+        fg: Optional[str] = None,
+        duration: Optional[int] = None,
     ) -> "Notification":
         """
         Compatibilidad con el método show_banner() usado en tra.py y mbrp.py.
@@ -514,6 +518,37 @@ class NotificationManager:
             modulo_ruta=modulo_ruta,
             accion_etiqueta="Tratar",
             usuario=usuario,
+        )
+
+    def add(
+        self,
+        title: str,
+        message: str,
+        priority: str = "info",
+        module: str = "SISTEMA",
+        modulo_ruta: Optional[str] = None,
+        accion_etiqueta: str = "Tratar",
+        usuario: Optional[str] = None,
+        datos: Optional[Dict] = None,
+    ) -> "Notification":
+        """
+        Alias simplificado de add_notification() que acepta priority como string.
+        Usado por mostrar_notificacion_quiebre() y otros módulos.
+
+        Args:
+            priority: String 'urgent' | 'warning' | 'info' | 'success'
+        """
+        priority_map = {p.value: p for p in NotificationPriority}
+        prio_enum = priority_map.get(str(priority).lower(), NotificationPriority.INFO)
+        return self.add_notification(
+            title=title,
+            message=message,
+            priority=prio_enum,
+            module=module,
+            modulo_ruta=modulo_ruta,
+            accion_etiqueta=accion_etiqueta,
+            usuario=usuario,
+            data=datos,
         )
 
     # ------------------------------------------------------------------

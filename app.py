@@ -435,8 +435,9 @@ class DatabaseApp:
             
             # Sistema de Paginacion ya inicializado arriba
             # Sistema de notificaciones (inicializar antes de auto-connect)
-            self.notification_manager = self.NotificationManager(self.root)  
-            self.help_tooltips = self.HelpTooltips(self.root)  
+            # Usar CentralNotificationManager desde el inicio (sin backend BD aún)
+            self.notification_manager = CentralNotificationManager()
+            self.help_tooltips = self.HelpTooltips(self.root)
             # Tooltips y update manager se inicializarán después del login para acelerar inicio
             self.update_manager = None
             
@@ -8353,19 +8354,44 @@ class DatabaseApp:
                         from pal.infrastructure.notification_db_backend import PyodbcNotificationBackend
                         from pal.services.notifications import NotificationManager as CentralNotificationManager
 
-                        # Reemplazar el manager temporal por uno con backend persistente
+                        # Guardar referencia al manager anterior para migrar notificaciones en memoria
+                        old_manager = getattr(self, 'notification_manager', None)
+
+                        # Crear nuevo manager con backend persistente
                         backend = PyodbcNotificationBackend(self.db_manager)
-                        self.notification_manager = CentralNotificationManager(db_backend=backend)
+                        new_manager = CentralNotificationManager(db_backend=backend)
+
+                        # Migrar notificaciones en memoria del manager anterior (si las hay)
+                        if old_manager is not None and hasattr(old_manager, 'notifications'):
+                            try:
+                                for n in list(old_manager.notifications):
+                                    if n.id not in {x.id for x in new_manager.notifications}:
+                                        new_manager.notifications.append(n)
+                            except Exception:
+                                pass
+
+                        # Reemplazar el manager
+                        self.notification_manager = new_manager
 
                         # Cargar notificaciones activas del usuario desde la BD
                         usuario = self.current_user.get('username') if self.current_user else None
                         self.notification_manager.load_from_db(usuario=usuario)
 
-                        # Actualizar la campana si ya existe en el header
+                        # Actualizar la campana si ya existe en el status panel
                         if hasattr(self, 'notification_bell') and self.notification_bell:
+                            # Desconectar observador del manager viejo (si existe)
+                            if old_manager is not None and hasattr(old_manager, 'remove_observer'):
+                                try:
+                                    old_manager.remove_observer(
+                                        self.notification_bell._on_notifications_changed
+                                    )
+                                except Exception:
+                                    pass
+
+                            # Conectar campana al nuevo manager
                             self.notification_bell._mgr = self.notification_manager
                             self.notification_bell.set_usuario(usuario)
-                            self.notification_bell._mgr.add_observer(
+                            self.notification_manager.add_observer(
                                 self.notification_bell._on_notifications_changed
                             )
                             self.notification_bell._refresh_badge()

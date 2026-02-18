@@ -127,3 +127,10 @@ class AdminMenu(ttk.Frame):
             cards_frame, "📜", "Auditoría", "Historial de acciones del sistema",
             lambda: self.controller.show_admin_sub_view('auditoria')
         ).grid(row=1, column=2, padx=10, pady=10, sticky="nsew")
+
+        # --- Fila 3 ---
+        # 7. Temas
+        self._create_module_card(
+            cards_frame, "🎨", "Temas", "Personalizar la apariencia de la UI",
+            lambda: self.controller.show_admin_sub_view('temas')
+        ).grid(row=2, column=0, padx=10, pady=10, sticky="nsew")

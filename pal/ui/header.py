@@ -16,7 +16,7 @@ def setup_styles(app):
             "map": {"background": [("selected", "#004C97")], "foreground": [("selected", "white")]}
         }
     })
-    app.style.theme_use("modern")
+    app.style.theme_use("alt")
     
     # Configuraciones específicas
     app.style.configure("Header.TFrame", background="white")

@@ -504,6 +504,15 @@ class DatabaseApp:
                 json.dump(list(self.favoritos), f, ensure_ascii=False)
         except Exception:
             pass
+    
+    def _load_saved_theme(self):
+        """Carga y aplica el tema guardado desde archivo local"""
+        try:
+            from pal.ui.themes import load_saved_theme
+            if hasattr(self, 'style') and self.style:
+                load_saved_theme(self)
+        except Exception as e:
+            print(f"Error cargando tema: {e}")
 
     def _toggle_favorito_local(self, codigo):
         """Alterna un código en el set de favoritos y lo cachea"""
@@ -7569,6 +7578,60 @@ class DatabaseApp:
         pass
 
     # =========================
+    # Temas (Configuración de UI)
+    # =========================
+    def _create_temas_tab(self, parent):
+        from pal.ui.themes import THEMES, apply_theme, get_current_theme
+        
+        frame = ttk.Frame(parent, padding=20)
+        frame.pack(fill=tk.BOTH, expand=True)
+        
+        ttk.Label(frame, text="🎨 Temas de Interfaz", font=("Segoe UI", 14, "bold")).pack(pady=(0, 20))
+        
+        current_theme = get_current_theme(self)
+        
+        themes_frame = ttk.Frame(frame)
+        themes_frame.pack(fill=tk.BOTH, expand=True)
+        
+        for idx, (theme_key, theme_data) in enumerate(THEMES.items()):
+            card = ttk.Frame(themes_frame, relief="solid", borderwidth=1)
+            card.grid(row=idx // 3, column=idx % 3, padx=10, pady=10, sticky="nsew")
+            
+            is_selected = (theme_key == current_theme)
+            
+            bg_color = theme_data["colors"]["bg_main"]
+            accent_color = theme_data["colors"]["accent"]
+            
+            preview = tk.Frame(card, bg=bg_color, width=80, height=50)
+            preview.pack(pady=(10, 5))
+            preview.pack_propagate(False)
+            tk.Label(preview, text=" preview ", bg=accent_color, fg="white", font=("Segoe UI", 8)).pack(expand=True)
+            
+            ttk.Label(card, text=theme_data["name"], font=("Segoe UI", 10, "bold")).pack()
+            ttk.Label(card, text=theme_data["description"], font=("Segoe UI", 8)).pack()
+            
+            if is_selected:
+                ttk.Label(card, text="✓ ACTIVO", foreground="green", font=("Segoe UI", 9, "bold")).pack(pady=5)
+                btn_text = "Aplicar de nuevo"
+            else:
+                ttk.Label(card, text="   ", font=("Segoe UI", 8)).pack(pady=5)
+                btn_text = "Aplicar"
+            
+            btn = ttk.Button(card, text=btn_text, command=lambda tk=theme_key: self._apply_theme(tk))
+            btn.pack(pady=5)
+        
+        themes_frame.columnconfigure((0, 1, 2), weight=1)
+        themes_frame.rowconfigure((0, 1), weight=1)
+        
+        ttk.Label(frame, text="Nota: Algunos cambios pueden requerir reiniciar la aplicación.", 
+                  font=("Segoe UI", 8), foreground="gray").pack(pady=10)
+    
+    def _apply_theme(self, theme_key):
+        from pal.ui.themes import apply_theme
+        apply_theme(self, theme_key)
+        messagebox.showinfo("Tema aplicado", f"El tema '{theme_key}' ha sido aplicado.\n\nNota: Los cambios se aplicarán completamente al reiniciar la aplicación.")
+
+    # =========================
     # Auditoría (Fase 6)
     # =========================
     def _create_audit_tab(self, parent):
@@ -7699,7 +7762,7 @@ class DatabaseApp:
         views = [
             'admin_menu_view', 'sedes_servidores_view', 'sedes_almacenes_view',
             'admin_users_view', 'admin_roles_view', 'admin_exclusions_view',
-            'admin_audit_view'
+            'admin_audit_view', 'admin_temas_view'
         ]
         for v in views:
             if hasattr(self, v) and getattr(self, v) and getattr(self, v).winfo_exists():
@@ -7744,6 +7807,12 @@ class DatabaseApp:
                 self.admin_audit_view = ttk.Frame(self.admin_tab)
                 self._create_audit_tab(self.admin_audit_view)
             self.admin_audit_view.pack(fill=tk.BOTH, expand=True)
+        
+        elif view_name == 'temas':
+            if not hasattr(self, 'admin_temas_view') or not self.admin_temas_view or not self.admin_temas_view.winfo_exists():
+                self.admin_temas_view = ttk.Frame(self.admin_tab)
+                self._create_temas_tab(self.admin_temas_view)
+            self.admin_temas_view.pack(fill=tk.BOTH, expand=True)
 
         # Botón de volver al menú (excepto si ya estamos en el menú)
         if view_name != 'menu':
@@ -8373,6 +8442,13 @@ class DatabaseApp:
             
             def _post_login_setup():
                 try:
+                    # Cargar tema guardado
+                    try:
+                        from pal.ui.themes import load_saved_theme
+                        load_saved_theme(self)
+                    except Exception as e:
+                        print(f"[WARN] Error cargando tema: {e}")
+                    
                     # CONFIGURAR COMPONENTES UI AHORA (Diferido desde la inicialización temprana)
                     try:
                         self.setup_modern_ui()
@@ -8406,8 +8482,16 @@ class DatabaseApp:
                     
                     # Recrear workspace con módulos actualizados
                     try:
+                        # Limpiar dashboard_tab específicamente antes de destruir
+                        if hasattr(self, 'dashboard_tab') and self.dashboard_tab.winfo_exists():
+                            for widget in self.dashboard_tab.winfo_children():
+                                widget.destroy()
+                        
                         if hasattr(self, 'main_notebook') and self.main_notebook.winfo_exists():
                             self.main_notebook.destroy()
+                        
+                        # Forzar actualización de la UI
+                        self.root.update_idletasks()
                         
                         self.create_main_workspace()
                         

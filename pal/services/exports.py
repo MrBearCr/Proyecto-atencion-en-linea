@@ -62,10 +62,10 @@ def export_stock_csv(filename: str, datos_exportar: List, seleccionadas: List[st
             writer = csv.writer(csvfile)
             
             # ENCABEZADO DESCRIPTIVO DEL REPORTE
-            writer.writerow([f'REPORTE DE ALERTAS DE STOCK - GENERADO EL {datetime.now().strftime("%d/%m/%Y a las %H:%M:%S")}'])
+            writer.writerow([f'REPORTE DE QUIEBRES DE STOCK - GENERADO EL {datetime.now().strftime("%d/%m/%Y a las %H:%M:%S")}'])
             writer.writerow([''])
             writer.writerow([f'Total de productos en alerta: {total_registros}'])
-            writer.writerow([f'Ubicaciones incluidas: {", ".join(seleccionadas)}'])
+            #writer.writerow([f'Ubicaciones incluidas: {", ".join(seleccionadas)}'])
             writer.writerow([f'Depósitos consultados: {sum(len(location_groups[u]) for u in seleccionadas)}'])
             writer.writerow([''])
             writer.writerow(['NIVELES DE ALERTA:'])
@@ -322,7 +322,9 @@ def export_mbrp_csv(filename: str, datos_mbrp: List, progress_cb: Optional[Calla
 def export_stock_excel(filename: str, datos_exportar: List, seleccionadas: List[str], 
                       location_groups: Dict[str, List[str]], db_manager, 
                       progress_cb: Optional[Callable[[int, int], None]] = None,
-                      current_localidad: Optional[str] = None) -> int:
+                      current_localidad: Optional[str] = None,
+                      permissions_manager=None,
+                      current_user_id: int = None) -> int:
     """
     Exporta datos de stock a un archivo Excel con formato profesional,
     filtros, formato condicional y múltiples hojas de análisis.
@@ -372,27 +374,128 @@ def export_stock_excel(filename: str, datos_exportar: List, seleccionadas: List[
         
         # Obtener nombres de depósitos desde la BD antes de crear headers
         depositos_info = {}
-        try:
-            depositos_result = db_manager.obtener_depositos()  # Retorna [(codigo, descripcion), ...]
-            depositos_info = {codigo: descripcion for codigo, descripcion in depositos_result}
-            logger.info(f"[EXPORT TIMER] Cargados {len(depositos_info)} nombres de depósitos")
-        except Exception as e:
-            logger.warning(f"No se pudieron cargar nombres de depósitos: {e}")
+        # Mapeos de jerarquía: Código -> Descripción
+        dept_desc_map = {}
+        group_desc_map = {}
+        sub_desc_map = {}
+        # Mapeo de producto -> jerarquía (código -> codes)
+        product_hierarchy_map = {}
         
-        # Headers de la tabla (fila 8) con sedes dinámicas
-        # construir sedes dinámicas desde location_groups (sede->lista de depósitos)
-        sedes_dynamic = list((location_groups or {}).keys()) if isinstance(location_groups, dict) else []
-        if not sedes_dynamic:
-            # Fallback a sedes por prefijo
-            sedes_dynamic = ['Cabudare','Barinas','Guanare']
-        # Ordenar con localidad actual primero
-        loc_actual = current_localidad if current_localidad in sedes_dynamic else (sedes_dynamic[0] if sedes_dynamic else 'Cabudare')
-        sedes_order = [loc_actual] + [s for s in sedes_dynamic if s != loc_actual]
-        headers = ['Código', 'Descripción', 'Nivel'] + [f'Stock {s}' for s in sedes_order] + ['Total Existencias']
-        for ubicacion in seleccionadas:
-            nombre_deposito = depositos_info.get(ubicacion, ubicacion)
-            header_text = f'{ubicacion} - {nombre_deposito}' if nombre_deposito != ubicacion else ubicacion
-            headers.append(header_text)
+        # Mapeo de precios, costos y proveedores (just-in-time)
+        precio_map_stock = {}
+        costo_map_stock = {}
+        impuestos_map_stock = {}
+        proveedor_map_stock = {}
+
+        mostrar_costo_utilidad = False
+        mostrar_proveedores = False
+        if permissions_manager and current_user_id:
+            try:
+                mostrar_costo_utilidad = permissions_manager.tiene_permiso(current_user_id, 'STOCK', 'ver_costo_utilidad')
+                mostrar_proveedores = permissions_manager.tiene_permiso(current_user_id, 'STOCK', 'ver_proveedores')
+            except Exception as e:
+                logger.warning(f"Error verificando permisos en STOCK: {e}")
+        
+        try:
+            if db_manager:
+                # 1. Obtener depósitos
+                try:
+                    depositos_result = db_manager.obtener_depositos()
+                    depositos_info = {codigo: descripcion for codigo, descripcion in depositos_result}
+                except Exception: pass
+                
+                # 2. Obtener nombres de departamentos, grupos y subgrupos
+                try:
+                    depts = db_manager.fetch_data("SELECT C_CODIGO, C_DESCRIPCIO FROM MA_DEPARTAMENTOS WITH (NOLOCK)")
+                    dept_desc_map = {str(c).strip(): str(d).strip() for c, d in depts if c}
+                    
+                    groups = db_manager.fetch_data("SELECT C_CODIGO, C_DESCRIPCIO FROM MA_GRUPOS WITH (NOLOCK)")
+                    group_desc_map = {str(c).strip(): str(d).strip() for c, d in groups if c}
+                    
+                    subs = db_manager.fetch_data("SELECT C_CODIGO, C_DESCRIPCIO FROM MA_SUBGRUPOS WITH (NOLOCK)")
+                    sub_desc_map = {str(c).strip(): str(d).strip() for c, d in subs if c}
+                except Exception as e:
+                    logger.warning(f"Error cargando nombres de jerarquía: {e}")
+
+                # 3. Obtener códigos de jerarquía para los productos a exportar (en batch)
+                codigos_export = []
+                for item in datos_exportar:
+                    if isinstance(item, dict): codigos_export.append(str(item.get('codigo', '')).strip())
+                    else: codigos_export.append(str(item[0]).strip())
+                
+                if codigos_export:
+                    # SQL Server parameter limit (approx 2100)
+                    BATCH_SIZE = 1800
+                    for i in range(0, len(codigos_export), BATCH_SIZE):
+                        batch = codigos_export[i:i + BATCH_SIZE]
+                        placeholders = ','.join('?' * len(batch))
+                        
+                        # 3.1 Metadata de jerarquía
+                        query_h = f"""
+                            SELECT RTRIM(LTRIM(C_CODIGO)), 
+                                   COALESCE(C_DEPARTAMENTO, ''), 
+                                   COALESCE(C_GRUPO, ''), 
+                                   COALESCE(C_SUBGRUPO, ''), 
+                                   COALESCE(c_marca, '')
+                            FROM MA_PRODUCTOS WITH (NOLOCK)
+                            WHERE C_CODIGO IN ({placeholders})
+                        """
+                        rows_h = db_manager.fetch_data(query_h, batch)
+                        for r in rows_h:
+                            product_hierarchy_map[r[0]] = {
+                                'dept': r[1],
+                                'group': r[2],
+                                'sub': r[3],
+                                'marca': r[4]
+                            }
+
+                        # 3.2 Precios, costos e impuestos (JIT)
+                        query_eco = f"""
+                            SELECT C_CODIGO, COALESCE(n_precio1, 0), COALESCE(n_costoact, 0), COALESCE(n_impuesto1, 0)
+                            FROM MA_PRODUCTOS WITH (NOLOCK)
+                            WHERE C_CODIGO IN ({placeholders})
+                        """
+                        rows_eco = db_manager.fetch_data(query_eco, batch) or []
+                        for cod, p, c, imp in rows_eco:
+                            c_str = str(cod).strip()
+                            precio_map_stock[c_str] = float(p or 0)
+                            costo_map_stock[c_str] = float(c or 0)
+                            impuestos_map_stock[c_str] = float(imp or 0)
+
+                        # 3.3 Último Proveedor (JIT)
+                        if mostrar_proveedores:
+                            try:
+                                proveedor_map_stock = db_manager.obtener_ultimas_compras_bulk(batch)
+                                logger.info(f"[EXPORT STOCK] Cargados {len(proveedor_map_stock)} proveedores para el batch")
+                            except Exception as e:
+                                logger.warning(f"Error cargando proveedores bulk en STOCK: {e}")
+                
+                logger.info(f"[EXPORT TIMER] Metadatos, Precios y Proveedores cargados")
+        except Exception as e:
+            logger.error(f"Error crítico cargando metadatos para exportación: {e}")
+        
+        # Definición de grupos de depósitos para alineación con TRA (RI)
+        GRUPOS_DEPOSITOS = {
+            'Cabudare': ['0301', '0302'],
+            'Barinas':  ['0101', '0102', '0108'],
+            'Guanare':  ['0401', '0402'],
+            'CDT':      ['0106'],
+            'Transito': ['0104', '0110', '0112']
+        }
+        
+        # Columnas modernas alineadas con RI (TRA)
+        headers = [
+            'Código', 'Descripción', 'Departamento', 'Grupo', 'Subgrupo', 'Marca', 
+            'Sede de Quiebre', 'Unid. Perdidas', 'Días Quiebre', 'Últ. Liquidación', 'Últ. Venta',
+            'Stock Cabudare', 'Stock Barinas', 'Stock Guanare', 'CDT', 'Transito SEDES', 'Stock Total'
+        ]
+
+        if mostrar_proveedores:
+            headers.append('Últ. Proveedor')
+        
+        # Columnas de análisis económico (según permisos)
+        if mostrar_costo_utilidad:
+            headers.extend(['Precio + IVA', 'Costo', 'Utilidad %'])
         
         start_row = 8
         for col, header in enumerate(headers, 1):
@@ -405,7 +508,12 @@ def export_stock_excel(filename: str, datos_exportar: List, seleccionadas: List[
         tiempo_pre_datos = time.time()
         
         # Obtener todos los códigos de productos
-        codigos_productos = [codigo for codigo, _, _, _ in datos_exportar]
+        codigos_productos = []
+        for item in datos_exportar:
+            if isinstance(item, dict):
+                codigos_productos.append(item.get('codigo', ''))
+            else:
+                codigos_productos.append(item[0])
         
         # Obtener existencias en BATCH con chunking para evitar límites de parámetros SQL
         logger.info(f"[EXPORT TIMER] Obteniendo existencias batch para {len(codigos_productos)} productos x {len(seleccionadas)} depósitos...")
@@ -477,38 +585,20 @@ def export_stock_excel(filename: str, datos_exportar: List, seleccionadas: List[
         # Ahora procesar los datos usando el mapa precargado
         data_start_row = start_row + 1
 
-        # Reordenar datos por severidad y por stock de la localidad actual para que las CRÍTICAS queden primero
-        def _norm_nivel(n):
-            s = str(n or '').upper()
-            for a,b in [('Á','A'),('É','E'),('Í','I'),('Ó','O'),('Ú','U')]:
-                s = s.replace(a,b)
-            return s
-        def _rank(n):
-            s = _norm_nivel(n)
-            return 0 if s == 'CRITICA' else 1 if s == 'MEDIA' else 2 if s == 'LEVE' else 3
-
-        # Determinar orden de sedes según localidad actual (ya calculado arriba)
-        sede_order = ['Cabudare', 'Barinas', 'Guanare']
-        if current_localidad in sede_order:
-            sede_order.remove(current_localidad)
-            sede_order.insert(0, current_localidad)
-        selected_by_sede = {
-            'Cabudare': [d for d in seleccionadas if str(d).startswith('03')],
-            'Barinas':  [d for d in seleccionadas if str(d).startswith('01')],
-            'Guanare':  [d for d in seleccionadas if str(d).startswith('04')],
-        }
+        # Reordenar datos por unidades perdidas (descendente)
         def _local_stock(codigo):
             dep_qty = existencias_map.get(codigo, {})
-            deps_local = selected_by_sede.get(sede_order[0], [])
+            prefijo = '03' if current_localidad == 'Cabudare' else '01' if current_localidad == 'Barinas' else '04'
+            deps_local = [d for d in seleccionadas if str(d).startswith(prefijo)]
             return sum(int(dep_qty.get(d, 0)) for d in deps_local)
 
         datos_exportar = sorted(
             datos_exportar,
             key=lambda r: (
-                _rank(r[3] if len(r) > 3 else ''),
-                _local_stock(r[0]),
-                str(r[0])
-            )
+                float(r.get('unidades_perdidas') if isinstance(r, dict) else (r[3] if len(r) > 3 else 0)),
+                -_local_stock(r.get('codigo') if isinstance(r, dict) else r[0])
+            ),
+            reverse=True
         )
 
         # Precalcular depósitos seleccionados por sede (dinámico desde location_groups)
@@ -521,56 +611,106 @@ def export_stock_excel(filename: str, datos_exportar: List, seleccionadas: List[
                 'Guanare':  [d for d in seleccionadas if str(d).startswith('04')],
             }
         
-        for i, (codigo, desc, stock, nivel) in enumerate(datos_exportar):
+        for i, item in enumerate(datos_exportar):
             try:
                 row = data_start_row + i
-                
-                # Limpiar caracteres inválidos para Excel
+                # Manejar tanto diccionarios (nuevos) como tuplas (antiguos)
+                if isinstance(item, dict):
+                    codigo = item.get('codigo', '')
+                    desc = item.get('descripcion', '')
+                    sede_q = item.get('sede_detectada', '')
+                    unid_p = item.get('unidades_perdidas', 0)
+                    dias_q = item.get('dias_quiebre', 0)
+                    u_comp = item.get('ultima_compra', '')
+                    u_vent = item.get('ultima_venta', '')
+                else:
+                    # Estructura q: (codigo, descripcion, sede, unidades_perdidas, dias_quiebre, ultima_compra, ultima_venta)
+                    codigo = item[0]
+                    desc = item[1]
+                    sede_q = item[2] if len(item) > 2 else ''
+                    unid_p = item[3] if len(item) > 3 else 0
+                    dias_q = item[4] if len(item) > 4 else 0
+                    u_comp = item[5] if len(item) > 5 else ''
+                    u_vent = item[6] if len(item) > 6 else ''
+
+                # Resolver jerarquía desde el mapa interno
+                h_info = product_hierarchy_map.get(str(codigo).strip(), {})
+                dept_code = h_info.get('dept', '')
+                group_code = h_info.get('group', '')
+                sub_code = h_info.get('sub', '')
+                brand = h_info.get('marca', '')
+
+                # Resolver nombres desde mapeos
+                dept = dept_desc_map.get(str(dept_code).strip(), dept_code)
+                group = group_desc_map.get(str(group_code).strip(), group_code)
+                sub = sub_desc_map.get(str(sub_code).strip(), sub_code)
+
+                # Escribir 11 columnas fijas (Quiebre de Stock)
+                from pal.services.exports import clean_for_excel
                 ws_main.cell(row=row, column=1, value=clean_for_excel(codigo))
                 ws_main.cell(row=row, column=2, value=clean_for_excel(desc))
-                # Normalizar nivel a MAYÚSCULAS sin acento
-                nivel_excel = str(nivel).upper().replace('Á','A').replace('É','E').replace('Í','I').replace('Ó','O').replace('Ú','U')
-                ws_main.cell(row=row, column=3, value=clean_for_excel(nivel_excel))
+                ws_main.cell(row=row, column=3, value=clean_for_excel(dept))
+                ws_main.cell(row=row, column=4, value=clean_for_excel(group))
+                ws_main.cell(row=row, column=5, value=clean_for_excel(sub))
+                ws_main.cell(row=row, column=6, value=clean_for_excel(brand))
+                # Sede de quiebre (col 7)
+                ws_main.cell(row=row, column=7, value=clean_for_excel(sede_q))
+                # Unid. Perdidas (col 8)
+                ws_main.cell(row=row, column=8, value=float(unid_p))
+                # Días Quiebre (col 9)
+                ws_main.cell(row=row, column=9, value=int(dias_q))
+                # Últs (col 10, 11)
+                ws_main.cell(row=row, column=10, value=str(u_comp))
+                ws_main.cell(row=row, column=11, value=str(u_vent))
 
-                # Calcular stock por sedes (según prefijo de depósito)
-                # Construir map rápido depósito->cantidad (filtrando SOLO los depósitos seleccionados)
-                dep_qty = existencias_map.get(codigo, {})
-                sum_cabu = sum(int(dep_qty.get(d, 0)) for d in selected_by_sede['Cabudare'])
-                sum_bari = sum(int(dep_qty.get(d, 0)) for d in selected_by_sede['Barinas'])
-                sum_guan = sum(int(dep_qty.get(d, 0)) for d in selected_by_sede['Guanare'])
+                # Sumar por grupos alineados con TRA
+                codigo_s = str(codigo).strip()
+                dep_qty = existencias_map.get(codigo_s, {})
+                s_cab = sum(int(dep_qty.get(d, 0)) for d in GRUPOS_DEPOSITOS['Cabudare'])
+                s_bar = sum(int(dep_qty.get(d, 0)) for d in GRUPOS_DEPOSITOS['Barinas'])
+                s_gua = sum(int(dep_qty.get(d, 0)) for d in GRUPOS_DEPOSITOS['Guanare'])
+                s_cdt = sum(int(dep_qty.get(d, 0)) for d in GRUPOS_DEPOSITOS['CDT'])
+                s_tra = sum(int(dep_qty.get(d, 0)) for d in GRUPOS_DEPOSITOS['Transito'])
+                s_tot = s_cab + s_bar + s_gua + s_cdt + s_tra
+                
+                ws_main.cell(row=row, column=12, value=s_cab)
+                ws_main.cell(row=row, column=13, value=s_bar)
+                ws_main.cell(row=row, column=14, value=s_gua)
+                ws_main.cell(row=row, column=15, value=s_cdt)
+                ws_main.cell(row=row, column=16, value=s_tra)
+                ws_main.cell(row=row, column=17, value=s_tot)
 
-                # Determinar orden de sedes dinámicas
-                sedes_dynamic = list(selected_by_sede.keys())
-                sede_order = [current_localidad] + [s for s in sedes_dynamic if s != current_localidad] if current_localidad in sedes_dynamic else sedes_dynamic
-                # Map sede->valor calculado
-                sede_vals = {
-                    'Cabudare': sum_cabu,
-                    'Barinas': sum_bari,
-                    'Guanare': sum_guan
-                }
-                # Escribir columnas Stock por sede dinámica
-                start_sede_col = 4
-                total_existencias = 0
-                for idx_s, sede in enumerate(sede_order):
-                    val = int(sede_vals.get(sede, 0))
-                    ws_main.cell(row=row, column=start_sede_col + idx_s, value=val)
-                    total_existencias += val
-                # Total existencias
-                ws_main.cell(row=row, column=start_sede_col + len(sede_order), value=total_existencias)
-                
-                # Existencias por ubicación seleccionada (mantener columnas por depósito)
-                start_dep_col = start_sede_col + len(sede_order) + 1
-                for j, ubicacion in enumerate(seleccionadas):
-                    existencias = existencias_map.get(codigo, {}).get(ubicacion, 0)
-                    ws_main.cell(row=row, column=start_dep_col + j, value=int(existencias))
-                
-                # Reportar progreso de procesamiento de datos (10-100% del total)
+                current_dyn_col = 18
+                if mostrar_proveedores:
+                    ws_main.cell(row=row, column=current_dyn_col, value=proveedor_map_stock.get(codigo_s, 'SIN COMPRAS'))
+                    current_dyn_col += 1
+
+                # Columnas económicas
+                if mostrar_costo_utilidad:
+                    precio_base = precio_map_stock.get(codigo_s, 0.0)
+                    costo_val = costo_map_stock.get(codigo_s, 0.0)
+                    iva_pct = impuestos_map_stock.get(codigo_s, 0.0)
+                    
+                    precio_iva = precio_base * (1 + (iva_pct / 100))
+                    utilidad_pct = ((precio_base - costo_val) / precio_base * 100) if precio_base > 0 else 0
+                    
+                    c_p = ws_main.cell(row=row, column=current_dyn_col, value=precio_iva)
+                    c_p.number_format = '#,##0.00'
+                    current_dyn_col += 1
+                    
+                    c_c = ws_main.cell(row=row, column=current_dyn_col, value=costo_val)
+                    c_c.number_format = '#,##0.00'
+                    current_dyn_col += 1
+                    
+                    c_u = ws_main.cell(row=row, column=current_dyn_col, value=utilidad_pct)
+                    c_u.number_format = '0.00 "%"'
+                    current_dyn_col += 1
+
+                # Reportar progreso
                 if progress_cb:
-                    chunk_progress_weight = 0.10
-                    data_progress_weight = 0.90
-                    base_progress = int(chunk_progress_weight * total_registros)
-                    data_progress = int(((i + 1) / total_registros) * data_progress_weight * total_registros)
-                    progress_cb(base_progress + data_progress, total_registros)
+                    base_p = int(0.10 * total_registros)
+                    curr_p = int(((i + 1) / total_registros) * 0.90 * total_registros)
+                    progress_cb(base_p + curr_p, total_registros)
                     
             except Exception as e:
                 logger.error(f"Error procesando registro {i}: {codigo} - {e}")
@@ -582,125 +722,33 @@ def export_stock_excel(filename: str, datos_exportar: List, seleccionadas: List[
         # Crear tabla con filtros
         end_col_letter = get_column_letter(len(headers))
         table_range = f"A{start_row}:{end_col_letter}{data_start_row + total_registros - 1}"
-        # Actualizar o crear tabla 'TablaStock'
-        existing_table = None
-        try:
-            for tbl in getattr(ws_main, 'tables', {}).values():
-                if getattr(tbl, 'displayName', '') == 'TablaStock':
-                    existing_table = tbl
-                    break
-        except Exception:
-            pass
-        if existing_table:
-            existing_table.ref = table_range
-        else:
-            table = Table(displayName="TablaStock", ref=table_range)
-            table.tableStyleInfo = TableStyleInfo(
-                name="TableStyleMedium9", showFirstColumn=False,
-                showLastColumn=False, showRowStripes=True, showColumnStripes=False
-            )
-            ws_main.add_table(table)
-        
-        # Formato condicional solo para la columna Nivel
-        data_range = f"C{data_start_row}:C{data_start_row + total_registros - 1}"
-        
-        # Crítica = Rojo (valor normalizado a MAYÚSCULAS sin acentos)
-        ws_main.conditional_formatting.add(
-            data_range,
-            CellIsRule(operator='equal', formula=['"CRITICA"'],
-                       fill=PatternFill(start_color="FF6B6B", end_color="FF6B6B"))
+        from openpyxl.worksheet.table import Table, TableStyleInfo
+        table = Table(displayName="TablaStock", ref=table_range)
+        table.tableStyleInfo = TableStyleInfo(
+            name="TableStyleMedium9", showFirstColumn=False,
+            showLastColumn=False, showRowStripes=True, showColumnStripes=False
         )
-        
-        # Media = Amarillo
-        ws_main.conditional_formatting.add(
-            data_range,
-            CellIsRule(operator='equal', formula=['"MEDIA"'],
-                       fill=PatternFill(start_color="FFD93D", end_color="FFD93D"))
-        )
-        
-        # Leve = Verde
-        ws_main.conditional_formatting.add(
-            data_range,
-            CellIsRule(operator='equal', formula=['"LEVE"'],
-                       fill=PatternFill(start_color="6BCF7F", end_color="6BCF7F"))
-        )
+        ws_main.add_table(table)
         
         # Ajustar anchos de columna
         ws_main.column_dimensions['A'].width = 12  # Código
         ws_main.column_dimensions['B'].width = 40  # Descripción
-        ws_main.column_dimensions['C'].width = 12  # Nivel
-        ws_main.column_dimensions['D'].width = 15  # Stock Localidad
-        ws_main.column_dimensions['E'].width = 15  # Stock Sede 1
-        ws_main.column_dimensions['F'].width = 15  # Stock Sede 2
-        ws_main.column_dimensions['G'].width = 15  # Total
-        # Columnas por depósito comienzan en H
-        for i in range(len(seleccionadas)):
-            col_letter = get_column_letter(8 + i)  # 8 -> H, luego I, J, ... AA, AB, etc.
+        ws_main.column_dimensions['C'].width = 20  # Departamento
+        ws_main.column_dimensions['D'].width = 20  # Grupo
+        ws_main.column_dimensions['E'].width = 20  # Subgrupo
+        ws_main.column_dimensions['F'].width = 20  # Marca
+        ws_main.column_dimensions['G'].width = 18  # Sede de Quiebre
+        ws_main.column_dimensions['H'].width = 15  # Unid. Perdidas
+        ws_main.column_dimensions['I'].width = 12  # Días Quiebre
+        ws_main.column_dimensions['J'].width = 18  # Últ. Liquidación
+        ws_main.column_dimensions['K'].width = 18  # Últ. Venta
+        
+        # Columnas de Stock y económicas
+        for col_idx in range(12, len(headers) + 1):
+            col_letter = get_column_letter(col_idx)
             ws_main.column_dimensions[col_letter].width = 15
         
-        # === HOJA 2: RESUMEN POR NIVEL ===
-        ws_summary = wb.create_sheet("Resumen por Nivel")
-        
-        # Contar por niveles (normalizando acentos)
-        nivel_counts = {'CRITICA': 0, 'MEDIA': 0, 'LEVE': 0}
-        for _, _, _, nivel in datos_exportar:
-            nivel_upper = str(nivel).upper().replace('Á','A').replace('É','E').replace('Í','I').replace('Ó','O').replace('Ú','U')
-            if nivel_upper in nivel_counts:
-                nivel_counts[nivel_upper] += 1
-        
-        # Crear tabla resumen
-        ws_summary['A1'] = 'RESUMEN POR NIVEL DE ALERTA'
-        ws_summary['A1'].font = Font(size=14, bold=True)
-        ws_summary.merge_cells('A1:C1')
-        
-        ws_summary['A3'] = 'Nivel'
-        ws_summary['B3'] = 'Cantidad'
-        ws_summary['C3'] = 'Porcentaje'
-        
-        for i, cell in enumerate(['A3', 'B3', 'C3']):
-            ws_summary[cell].font = Font(bold=True)
-            ws_summary[cell].fill = PatternFill(start_color="4472C4", end_color="4472C4")
-            ws_summary[cell].font = Font(bold=True, color="FFFFFF")
-        
-        row = 4
-        for nivel, count in nivel_counts.items():
-            porcentaje = (count / total_registros * 100) if total_registros > 0 else 0
-            ws_summary.cell(row=row, column=1, value=nivel)
-            ws_summary.cell(row=row, column=2, value=count)
-            ws_summary.cell(row=row, column=3, value=f"{porcentaje:.1f}%")
-            row += 1
-        
-        # === HOJA 3: PRODUCTOS CRÍTICOS ===
-        ws_critical = wb.create_sheet("Productos Críticos")
-        
-        productos_criticos = [(codigo, desc, stock, nivel) for codigo, desc, stock, nivel in datos_exportar 
-                             if str(nivel).upper().replace('Á','A').replace('É','E').replace('Í','I').replace('Ó','O').replace('Ú','U') == 'CRITICA']
-        
-        ws_critical['A1'] = f'PRODUCTOS CRÍTICOS ({len(productos_criticos)} productos)'
-        ws_critical['A1'].font = Font(size=12, bold=True, color="FFFFFF")
-        ws_critical['A1'].fill = PatternFill(start_color="FF6B6B", end_color="FF6B6B")
-        ws_critical.merge_cells('A1:D1')
-        
-        # Headers
-        headers_criticos = ['Código', 'Descripción', 'Stock Actual', 'Acción Requerida']
-        for col, header in enumerate(headers_criticos, 1):
-            cell = ws_critical.cell(row=3, column=col, value=header)
-            cell.font = Font(bold=True)
-            cell.fill = PatternFill(start_color="FFA500", end_color="FFA500")
-        
-        # Datos críticos
-        for i, (codigo, desc, stock, _) in enumerate(productos_criticos, 4):
-            ws_critical.cell(row=i, column=1, value=clean_for_excel(codigo))
-            ws_critical.cell(row=i, column=2, value=clean_for_excel(desc))
-            ws_critical.cell(row=i, column=3, value=int(stock))
-            ws_critical.cell(row=i, column=4, value="REABASTECER URGENTE")
-        
-        # Ajustar columnas
-        ws_critical.column_dimensions['A'].width = 12
-        ws_critical.column_dimensions['B'].width = 40
-        ws_critical.column_dimensions['C'].width = 15
-        ws_critical.column_dimensions['D'].width = 20
-        
+        # === FIN DE REPORTE ===
         # Guardar archivo
         tiempo_pre_save = time.time()
         wb.save(filename)
@@ -773,6 +821,17 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
         # Crear workbook
         wb = Workbook()
         wb.remove(wb.active)  # Remover hoja por defecto
+
+        mostrar_costo_utilidad = False
+        mostrar_proveedores = False
+        if permissions_manager and current_user_id:
+            try:
+                mostrar_costo_utilidad = permissions_manager.tiene_permiso(current_user_id, 'TRA', 'ver_costo_utilidad')
+                logger.info(f"Permiso ver_costo_utilidad para TRA: {mostrar_costo_utilidad}")
+                mostrar_proveedores = permissions_manager.tiene_permiso(current_user_id, 'TRA', 'ver_proveedores')
+                logger.info(f"Permiso ver_proveedores para TRA: {mostrar_proveedores}")
+            except Exception as e:
+                logger.warning(f"Error verificando permisos TRA: {e}")
         
         # Crear diccionarios de mapeo código -> descripción para jerarquía
         dept_desc_map = {}
@@ -804,18 +863,24 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
                 logger.warning(f"No se pudieron cargar las descripciones de jerarquía/marcas: {e}")
             
             # Cargar impuestos (IVA) por producto desde MA_PRODUCTOS.n_impuesto1
+            codigos_productos = sorted({
+                str(f[0]).strip() for f in datos_tra
+                if f and len(f) > 0 and f[0] is not None
+            })
+            
+            # Mapa de precios y costos (just-in-time para evitar persistencia de datos sensibles)
+            precio_map_tra = {}
+            costo_map_tra = {}
+            
             try:
-                # Construir lista única de códigos presentes en datos_tra
-                codigos_productos = sorted({
-                    str(f[0]).strip() for f in datos_tra
-                    if f and len(f) > 0 and f[0] is not None
-                })
                 if codigos_productos:
                     # Evitar límite de 2100 parámetros de SQL Server
                     BATCH_SIZE = 1800
                     for i in range(0, len(codigos_productos), BATCH_SIZE):
                         batch = codigos_productos[i:i + BATCH_SIZE]
                         placeholders = ','.join('?' * len(batch))
+                        
+                        # Cargar impuestos
                         query_imp = f"""
                             SELECT C_CODIGO, COALESCE(n_impuesto1, 0) AS impuesto1
                             FROM MA_PRODUCTOS WITH (NOLOCK)
@@ -827,9 +892,26 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
                                 impuestos_map[str(cod).strip()] = float(imp or 0)
                             except Exception:
                                 continue
-                    logger.info(f"[EXPORT TRA] Impuestos cargados para {len(impuestos_map)} productos")
+                                
+                        # Cargar precios y costos just-in-time si el usuario tiene permiso
+                        if mostrar_costo_utilidad:
+                            query_eco = f"""
+                                SELECT C_CODIGO, COALESCE(n_precio1, 0), COALESCE(n_costoact, 0)
+                                FROM MA_PRODUCTOS WITH (NOLOCK)
+                                WHERE C_CODIGO IN ({placeholders})
+                            """
+                            rows_eco = db_manager.fetch_data(query_eco, batch) or []
+                            for cod, p, c in rows_eco:
+                                try:
+                                    c_str = str(cod).strip()
+                                    precio_map_tra[c_str] = float(p or 0)
+                                    costo_map_tra[c_str] = float(c or 0)
+                                except Exception:
+                                    continue
+                    
+                    logger.info(f"[EXPORT TRA] Datos económicos cargados - Impuestos: {len(impuestos_map)}, Precios/Costos: {len(precio_map_tra)}")
             except Exception as e:
-                logger.warning(f"No se pudieron cargar los impuestos (IVA): {e}")
+                logger.warning(f"No se pudieron cargar los datos económicos para TRA: {e}")
         
         # === HOJA 1: DATOS PRINCIPALES RI ===
         ws_main = wb.create_sheet("Datos RI")
@@ -847,16 +929,6 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
         ws_main['A1'].font = header_font
         ws_main['A1'].fill = header_fill
         
-        mostrar_costo_utilidad = False
-        mostrar_proveedores = False
-        if permissions_manager and current_user_id:
-            try:
-                mostrar_costo_utilidad = permissions_manager.tiene_permiso(current_user_id, 'TRA', 'ver_costo_utilidad')
-                logger.info(f"Permiso ver_costo_utilidad para TRA: {mostrar_costo_utilidad}")
-                mostrar_proveedores = permissions_manager.tiene_permiso(current_user_id, 'TRA', 'ver_proveedores')
-                logger.info(f"Permiso ver_proveedores para TRA: {mostrar_proveedores}")
-            except Exception as e:
-                logger.warning(f"Error verificando permisos TRA: {e}")
         
         # Helper para obtener stock actual por producto
         def _get_stock_actual_bulk_tra(codigos: List[str], deposito: Optional[str]) -> Dict[str, int]:
@@ -1052,6 +1124,11 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
         for i, fila in enumerate(datos_tra):
             try:
                 row = data_start_row + i
+                # Extraer código base primero para resolución JIT
+                codigo = fila[0] if fila and len(fila) > 0 else None
+                if codigo is None:
+                    continue
+                codigo_str = str(codigo).strip()
                 
                 # Manejar diferentes longitudes de fila según estructura real:
                 if len(fila) >= 10:
@@ -1073,6 +1150,13 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
                     precio = costo = 0
                 else:
                     continue
+                
+                # Resolucion just-in-time de precios/costos si vienen en 0 (Nodo Maestro)
+                if mostrar_costo_utilidad:
+                    if precio == 0:
+                        precio = precio_map_tra.get(codigo_str, 0)
+                    if costo == 0:
+                        costo = costo_map_tra.get(codigo_str, 0)
                 
                 # Convertir códigos a descripciones legibles
                 dept_desc = dept_desc_map.get(dept, dept) if dept else 'Sin clasificar'
@@ -2219,7 +2303,7 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
         
         # Pre-calcular todas las filas de datos en memoria primero
         filas_datos = []
-        for fila in datos_mbrp:
+        for i, fila in enumerate(datos_mbrp):
             try:
                 # Normalizar a lista para poder inspeccionar la estructura
                 fila_list = list(fila) if not isinstance(fila, list) else fila
@@ -2228,6 +2312,7 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
                     continue
 
                 codigo = fila_list[0]
+                codigo_str = str(codigo).strip()
                 desc = fila_list[1]
 
                 # Jerarquía (códigos) para filtros: depto, grupo, subgrupo
@@ -2239,6 +2324,7 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
                 dept_desc = dept_desc_map.get(str(dept).strip(), dept) if dept else 'Sin clasificar'
                 grupo_desc = group_desc_map.get(str(grupo).strip(), grupo) if grupo else 'Sin clasificar'
                 sub_desc = sub_desc_map.get(str(sub).strip(), sub) if sub else 'Sin clasificar'
+                marca_val = marca_map_mbrp.get(codigo_str, '')
 
                 # Neto de ventas siempre en posición 5 en la estructura TRA/MBRP
                 neto_valor = _safe_float(fila_list[5])

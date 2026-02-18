@@ -507,6 +507,15 @@ class DatabaseApp:
                 json.dump(list(self.favoritos), f, ensure_ascii=False)
         except Exception:
             pass
+    
+    def _load_saved_theme(self):
+        """Carga y aplica el tema guardado desde archivo local"""
+        try:
+            from pal.ui.themes import load_saved_theme
+            if hasattr(self, 'style') and self.style:
+                load_saved_theme(self)
+        except Exception as e:
+            print(f"Error cargando tema: {e}")
 
     def _toggle_favorito_local(self, codigo):
         """Alterna un código en el set de favoritos y lo cachea"""
@@ -1553,6 +1562,149 @@ class DatabaseApp:
 
 
     
+    def exportar_stock_excel(self):
+        """Exporta datos de quiebres de stock en formato Excel con formato profesional - ASYNC"""
+        import threading
+        from tkinter import filedialog, messagebox
+        from pal.services.exports import export_stock_excel
+        from pal.services.stock import filter_alertas
+        
+        try:
+            # Permisos: STOCK.exportar
+            allowed = False
+            try:
+                if hasattr(self, 'permissions') and self.current_user:
+                    allowed = self.permissions.tiene_permiso(self.current_user['id'], 'STOCK', 'exportar')
+                if self.current_user and self.current_user.get('username','').lower() == 'admin':
+                    allowed = True
+            except Exception:
+                allowed = False
+            
+            if not allowed:
+                messagebox.showwarning("Permiso denegado", "No tienes permiso para exportar quiebres de stock")
+                return
+
+            # Verificar si hay datos
+            if not hasattr(self, 'cached_alertas') or not self.cached_alertas:
+                messagebox.showinfo("Sin datos", "No hay datos de quiebres para exportar.")
+                return
+
+            # Aplicar filtros actuales de la UI
+            dept_desc = self.stock_dept_var.get() if hasattr(self, 'stock_dept_var') else 'Todos'
+            group_desc = self.stock_group_var.get() if hasattr(self, 'stock_group_var') else 'Todos'
+            subgroup_desc = self.stock_subgroup_var.get() if hasattr(self, 'stock_subgroup_var') else 'Todos'
+            search_text = self.stock_search_var.get() if hasattr(self, 'stock_search_var') else ''
+            
+            dept_code = self.tra_dept_dict.get(dept_desc) if dept_desc != 'Todos' else None
+            group_code = None
+            if group_desc != 'Todos' and dept_code:
+                group_code = self.tra_group_dict.get(dept_code, {}).get(group_desc)
+            subgroup_code = None
+            if subgroup_desc != 'Todos' and dept_code and group_code:
+                key = f"{dept_code}|{group_code}"
+                subgroup_code = self.tra_sub_dict.get(key, {}).get(subgroup_desc)
+
+            # Usar vista efectiva (sin departamentos excluidos)
+            alertas_base = getattr(self, 'cached_alertas_effective', self.cached_alertas)
+            
+            # Filtrar
+            filtrados = filter_alertas(
+                alertas=alertas_base,
+                producto_jerarquia=getattr(self, 'all_jerarquia', {}),
+                dept_code=dept_code,
+                group_code=group_code,
+                subgroup_code=subgroup_code,
+                search_text=search_text,
+                favoritos=getattr(self, 'favoritos', set())
+            )
+
+            if not filtrados:
+                messagebox.showinfo("Sin resultados", "No hay quiebres que coincidan con los filtros actuales.")
+                return
+
+            # Diálogo para guardar
+            filename = filedialog.asksaveasfilename(
+                title="Guardar Quiebres de Stock",
+                defaultextension=".xlsx",
+                initialfile=f"quiebres_stock_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                filetypes=[("Excel files", "*.xlsx"), ("All files", "*.*")]
+            )
+            
+            if not filename:
+                return
+
+            # Obtener configuraciones para la exportación
+            try:
+                # Obtener todos los depósitos tratables para la columna de stock
+                sedes_config = self.config_manager.get_sedes_config()
+                seleccionadas = []
+                # location_groups para el service
+                location_groups_svc = {}
+                
+                for name, cfg in sedes_config.items():
+                    deps = cfg.get('almacenes_tratables', [])
+                    if deps:
+                        # Extraer código de sede de manera consistente
+                        cod_sede = cfg.get('codigo_sede')
+                        if not cod_sede:
+                            if " - " in name: cod_sede = name.split(" - ")[0]
+                            else: cod_sede = deps[0] if deps else name
+                        
+                        if cod_sede not in ('00', 'ICH', '%', 'ALL'):
+                            seleccionadas.extend(deps)
+                            location_groups_svc[name] = deps
+                
+                seleccionadas = list(set(seleccionadas)) # Únicos
+                
+            except Exception as e:
+                self.log(f"Error preparando parámetros de exportación: {e}", "ERROR")
+                seleccionadas = []
+                location_groups_svc = {}
+
+            # Ejecutar en segundo plano
+            def run_export():
+                try:
+                    self.log(f"Iniciando exportación de {len(filtrados)} quiebres...", "INFO")
+                    
+                    # El service espera: (codigo, descripcion, stock, nivel) 
+                    # Nuestras tuplas son: (codigo, desc, sede, unid_perd, dias, comp, vent, dept, grp, sub, brand)
+                    # Mapear a diccionarios para mayor claridad y compatibilidad
+                    datos_svc = []
+                    for q in filtrados:
+                        # Estructura q: (codigo, descripcion, sede, unidades_perdidas, dias_quiebre, ultima_compra, ultima_venta)
+                        # Pasamos los 7 elementos básicos, la jerarquía se resuelve en el service
+                        if len(q) >= 7:
+                            datos_svc.append((q[0], q[1], q[2], q[3], q[4], q[5], q[6]))
+                        else:
+                            # Fallback si por alguna razón la tupla fuese diferente
+                            datos_svc.append(q)
+
+                    count = export_stock_excel(
+                        filename=filename,
+                        datos_exportar=datos_svc,
+                        seleccionadas=seleccionadas,
+                        location_groups=location_groups_svc,
+                        db_manager=self.db_manager,
+                        current_localidad=getattr(self, 'current_sede_name', 'Cabudare'),
+                        permissions_manager=self.permissions,
+                        current_user_id=self.current_user['id'] if self.current_user else None
+                    )
+                    
+                    self.log(f"✅ Exportación completada: {count} registros en {filename}", "SUCCESS")
+                    self.root.after(0, lambda: messagebox.showinfo("Exportación Exitosa", f"Se han exportado {count} quiebres de stock exitosamente."))
+                    
+                except Exception as e:
+                    self.log(f"Error exportando stock: {e}", "ERROR")
+                    def _show_err(err=e):
+                        messagebox.showerror("Error de Exportación", f"No se pudo completar la exportación:\n{str(err)}")
+                    self.root.after(0, _show_err)
+
+            threading.Thread(target=run_export, daemon=True).start()
+            
+        except Exception as e:
+            self.log(f"Error al iniciar exportación de stock: {e}", "ERROR")
+            messagebox.showerror("Error", f"Error inesperado al exportar: {e}")
+
     def exportar_tra_excel(self):
         """Exporta datos TRA en formato Excel con múltiples hojas y formato profesional - ASYNC"""
         import threading
@@ -7498,6 +7650,60 @@ class DatabaseApp:
         pass
 
     # =========================
+    # Temas (Configuración de UI)
+    # =========================
+    def _create_temas_tab(self, parent):
+        from pal.ui.themes import THEMES, apply_theme, get_current_theme
+        
+        frame = ttk.Frame(parent, padding=20)
+        frame.pack(fill=tk.BOTH, expand=True)
+        
+        ttk.Label(frame, text="🎨 Temas de Interfaz", font=("Segoe UI", 14, "bold")).pack(pady=(0, 20))
+        
+        current_theme = get_current_theme(self)
+        
+        themes_frame = ttk.Frame(frame)
+        themes_frame.pack(fill=tk.BOTH, expand=True)
+        
+        for idx, (theme_key, theme_data) in enumerate(THEMES.items()):
+            card = ttk.Frame(themes_frame, relief="solid", borderwidth=1)
+            card.grid(row=idx // 3, column=idx % 3, padx=10, pady=10, sticky="nsew")
+            
+            is_selected = (theme_key == current_theme)
+            
+            bg_color = theme_data["colors"]["bg_main"]
+            accent_color = theme_data["colors"]["accent"]
+            
+            preview = tk.Frame(card, bg=bg_color, width=80, height=50)
+            preview.pack(pady=(10, 5))
+            preview.pack_propagate(False)
+            tk.Label(preview, text=" preview ", bg=accent_color, fg="white", font=("Segoe UI", 8)).pack(expand=True)
+            
+            ttk.Label(card, text=theme_data["name"], font=("Segoe UI", 10, "bold")).pack()
+            ttk.Label(card, text=theme_data["description"], font=("Segoe UI", 8)).pack()
+            
+            if is_selected:
+                ttk.Label(card, text="✓ ACTIVO", foreground="green", font=("Segoe UI", 9, "bold")).pack(pady=5)
+                btn_text = "Aplicar de nuevo"
+            else:
+                ttk.Label(card, text="   ", font=("Segoe UI", 8)).pack(pady=5)
+                btn_text = "Aplicar"
+            
+            btn = ttk.Button(card, text=btn_text, command=lambda tk=theme_key: self._apply_theme(tk))
+            btn.pack(pady=5)
+        
+        themes_frame.columnconfigure((0, 1, 2), weight=1)
+        themes_frame.rowconfigure((0, 1), weight=1)
+        
+        ttk.Label(frame, text="Nota: Algunos cambios pueden requerir reiniciar la aplicación.", 
+                  font=("Segoe UI", 8), foreground="gray").pack(pady=10)
+    
+    def _apply_theme(self, theme_key):
+        from pal.ui.themes import apply_theme
+        apply_theme(self, theme_key)
+        messagebox.showinfo("Tema aplicado", f"El tema '{theme_key}' ha sido aplicado.\n\nNota: Los cambios se aplicarán completamente al reiniciar la aplicación.")
+
+    # =========================
     # Auditoría (Fase 6)
     # =========================
     def _create_audit_tab(self, parent):
@@ -7628,7 +7834,7 @@ class DatabaseApp:
         views = [
             'admin_menu_view', 'sedes_servidores_view', 'sedes_almacenes_view',
             'admin_users_view', 'admin_roles_view', 'admin_exclusions_view',
-            'admin_audit_view'
+            'admin_audit_view', 'admin_temas_view'
         ]
         for v in views:
             if hasattr(self, v) and getattr(self, v) and getattr(self, v).winfo_exists():
@@ -7673,6 +7879,12 @@ class DatabaseApp:
                 self.admin_audit_view = ttk.Frame(self.admin_tab)
                 self._create_audit_tab(self.admin_audit_view)
             self.admin_audit_view.pack(fill=tk.BOTH, expand=True)
+        
+        elif view_name == 'temas':
+            if not hasattr(self, 'admin_temas_view') or not self.admin_temas_view or not self.admin_temas_view.winfo_exists():
+                self.admin_temas_view = ttk.Frame(self.admin_tab)
+                self._create_temas_tab(self.admin_temas_view)
+            self.admin_temas_view.pack(fill=tk.BOTH, expand=True)
 
         # Botón de volver al menú (excepto si ya estamos en el menú)
         if view_name != 'menu':
@@ -8302,6 +8514,13 @@ class DatabaseApp:
             
             def _post_login_setup():
                 try:
+                    # Cargar tema guardado
+                    try:
+                        from pal.ui.themes import load_saved_theme
+                        load_saved_theme(self)
+                    except Exception as e:
+                        print(f"[WARN] Error cargando tema: {e}")
+                    
                     # CONFIGURAR COMPONENTES UI AHORA (Diferido desde la inicialización temprana)
                     try:
                         self.setup_modern_ui()
@@ -8335,8 +8554,16 @@ class DatabaseApp:
                     
                     # Recrear workspace con módulos actualizados
                     try:
+                        # Limpiar dashboard_tab específicamente antes de destruir
+                        if hasattr(self, 'dashboard_tab') and self.dashboard_tab.winfo_exists():
+                            for widget in self.dashboard_tab.winfo_children():
+                                widget.destroy()
+                        
                         if hasattr(self, 'main_notebook') and self.main_notebook.winfo_exists():
                             self.main_notebook.destroy()
+                        
+                        # Forzar actualización de la UI
+                        self.root.update_idletasks()
                         
                         self.create_main_workspace()
                         

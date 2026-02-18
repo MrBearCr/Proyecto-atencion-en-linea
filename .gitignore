@@ -24,7 +24,11 @@ stock_depositos_preference.json
 stock_depositos_preference.json
 setup.iss
 desuso
-
+pal/services/__pycache__
+pal/ui/__pycache__
+pal/core/__pycache__
+pal/infrastructure/__pycache__
+pal/__pycache__
 posmigra/nexus-example
 
 

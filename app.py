@@ -1520,7 +1520,25 @@ class DatabaseApp:
     def mostrar_notificacion_quiebre(self, codigo, desc, sede_name):
         """Muestra un toast para quiebre de stock en una sede específica."""
         mensaje = f"Código: {codigo} | Sede: {sede_name}\nDescripción: {desc}"
-        
+
+        # Persistir en el Centro de Notificaciones
+        try:
+            if hasattr(self, 'notification_manager'):
+                usuario = self.current_user.get('username') if self.current_user else None
+                self.notification_manager.add(
+                    title="Quiebre de Stock Detectado",
+                    message=mensaje,
+                    priority="urgent",
+                    module="Stock",
+                    modulo_ruta="stock",
+                    accion_etiqueta="Ver Stock",
+                    usuario=usuario,
+                    datos={"codigo": codigo, "sede": sede_name},
+                )
+        except Exception as e:
+            self.log(f"Error al registrar quiebre en notificaciones: {e}", "DEBUG")
+
+        # Toast visual (mantener compatibilidad)
         try:
             if hasattr(self, 'toaster'):
                 self.toaster.show_toast(
@@ -6414,7 +6432,25 @@ class DatabaseApp:
         # Oculto por defecto
         self.stock_alert_label.pack_forget()
         self.stock_alert_label.bind("<Button-1>", lambda e: self.abrir_popup_quiebres())
-        
+
+        # ── Campana de Notificaciones (Centro de Notificaciones) ──────
+        self.notification_bell = None
+        try:
+            navigate_fn = getattr(self, "navigate_to_module", None)
+            usuario = None
+            if self.current_user:
+                usuario = self.current_user.get("username")
+            bell = NotificationBell(
+                parent=status_frame,
+                notification_manager=self.notification_manager,
+                navigate_fn=navigate_fn,
+                usuario_actual=usuario,
+            )
+            bell.pack(side=tk.RIGHT, padx=8)
+            self.notification_bell = bell
+        except Exception as _bell_err:
+            self.log(f"[create_status_panel] Error creando NotificationBell: {_bell_err}", "ERROR")
+
         # Menú de usuario (Cerrar sesión, Configuración solo para admin)
         self.user_menu = ttk.Menubutton(status_frame, text="Usuario")
         user_menu_popup = tk.Menu(self.user_menu, tearoff=0)

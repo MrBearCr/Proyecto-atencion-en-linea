@@ -1,6 +1,6 @@
 # Estado del Sistema de Notificaciones PAL
 
-> Última actualización: 2026-02-17
+> Última actualización: 2026-02-18
 
 ---
 
@@ -176,10 +176,11 @@ NotificationBell._on_tratar(notif)
 | Botón "Tratar" con navegación | ✅ Implementado |
 | `navigate_to_module()` en app.py | ✅ Implementado |
 | Integración post-login (cargar desde BD) | ✅ Implementado |
+| Integración quiebres de stock → notification_manager.add() | ✅ Implementado |
 
 ---
 
-## Integración post-login (paso pendiente)
+## Integración post-login (completada)
 
 Para activar la persistencia completa, agregar en `_post_login_setup()` dentro de `app.py`:
 

@@ -88,8 +88,12 @@ class NotificationBell:
 
         self._frame = tk.Frame(parent, bg="#004C97", cursor="hand2")
 
+        # Contenedor horizontal para campana + badges de prioridad
+        self._container = tk.Frame(self._frame, bg="#004C97")
+        self._container.pack(side=tk.LEFT)
+
         self._btn = tk.Label(
-            self._frame,
+            self._container,
             text="🔔",
             font=("Segoe UI", 16),
             bg="#004C97",
@@ -100,7 +104,7 @@ class NotificationBell:
 
         self._badge_var = tk.StringVar(value="")
         self._badge = tk.Label(
-            self._frame,
+            self._container,
             textvariable=self._badge_var,
             font=("Segoe UI", 7, "bold"),
             bg="#dc3545",
@@ -108,6 +112,10 @@ class NotificationBell:
             width=2,
             relief="flat",
         )
+
+        # Contenedor para badges de prioridad (al lado de la campana)
+        self._priority_badges_frame = tk.Frame(self._container, bg="#004C97")
+        self._priority_badges_frame.pack(side=tk.LEFT, padx=(4, 0))
 
         self._btn.bind("<Button-1>",   self._toggle_panel)
         self._badge.bind("<Button-1>", self._toggle_panel)
@@ -140,11 +148,84 @@ class NotificationBell:
 
     def _on_notifications_changed(self):
         try:
-            self._frame.after(0, self._refresh_badge)
+            self._frame.after_idle(self._refresh_badge)
             if self._panel_open and self._panel_win and self._panel_win.winfo_exists():
-                self._frame.after(0, self._rebuild_panel_content)
+                self._frame.after_idle(self._rebuild_panel_content)
         except Exception:
             pass
+
+    def _refresh_priority_badges(self):
+        """Muestra badges de prioridad al lado de la campana para notificaciones urgentes."""
+        try:
+            if not hasattr(self, '_priority_badges_frame') or not self._priority_badges_frame:
+                return
+            
+            # Solo verificar si el frame está visible
+            try:
+                if not self._priority_badges_frame.winfo_exists():
+                    return
+            except:
+                return
+                
+            # No destruir widgets si no hay cambios - optimizar
+            if not hasattr(self, '_mgr') or not self._mgr:
+                return
+            
+            notifications = self._mgr.get_notifications()
+            urgent_count = 0
+            warning_count = 0
+            
+            for notif in notifications[:10]:
+                if not notif.read:
+                    if notif.priority.value == "urgent":
+                        urgent_count += 1
+                    elif notif.priority.value == "warning":
+                        warning_count += 1
+            
+            # Solo recrear si hay cambios
+            current_counts = getattr(self, '_last_priority_counts', (0, 0))
+            if current_counts == (urgent_count, warning_count):
+                return  # Sin cambios, no hacer nada
+            
+            self._last_priority_counts = (urgent_count, warning_count)
+            
+            # Limpiar solo si hay cambios
+            for widget in self._priority_badges_frame.winfo_children():
+                try:
+                    widget.destroy()
+                except:
+                    pass
+            
+            if urgent_count > 0:
+                self._create_priority_badge("🔴", str(urgent_count), "#dc3545")
+            if warning_count > 0:
+                self._create_priority_badge("🟠", str(warning_count), "#fd7e14")
+                
+        except Exception as e:
+            print(f"[NotificationBell] Error refresh priority badges: {e}")
+
+    def _create_priority_badge(self, icon, count, color):
+        """Crea un badge de prioridad."""
+        badge_frame = tk.Frame(self._priority_badges_frame, bg="#004C97")
+        badge_frame.pack(side=tk.LEFT, padx=1)
+        
+        tk.Label(
+            badge_frame,
+            text=icon,
+            font=("Segoe UI", 8),
+            bg="#004C97",
+            fg="white",
+        ).pack()
+        
+        tk.Label(
+            badge_frame,
+            text=count,
+            font=("Segoe UI", 7, "bold"),
+            bg=color,
+            fg="white",
+            padx=3,
+            pady=1,
+        ).pack()
 
     def _toggle_panel(self, event=None):
         if self._panel_open:

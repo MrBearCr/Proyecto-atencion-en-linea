@@ -104,7 +104,7 @@ Columnas principales de `pal_notificaciones`:
 
 | Columna | Tipo | Descripción |
 |---|---|---|
-| `id` | NVARCHAR(36) PK | UUID de la notificación |
+| `id` | NVARCHAR(100) PK | UUID de la notificación |
 | `titulo` | NVARCHAR(200) | Título corto |
 | `mensaje` | NVARCHAR(MAX) | Cuerpo del mensaje |
 | `prioridad` | NVARCHAR(20) | `urgent`, `warning`, `info`, `success` |

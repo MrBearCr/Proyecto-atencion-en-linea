@@ -83,16 +83,30 @@ class PyodbcNotificationBackend(NotificationDBBackend):
             row["id"],
         )
 
-        # Verificar si ya existe
-        exists = self._db.fetch_data(
-            "SELECT 1 FROM pal_notificaciones WHERE id = ?", (row["id"],)
-        )
-
-        if exists:
-            self._db.execute_query(update_sql, update_params)
-        else:
-            insert_sql = """
-                INSERT INTO pal_notificaciones (
+        # Atomic upsert using MERGE (SQL Server)
+        merge_sql = """
+            MERGE INTO pal_notificaciones AS target
+            USING (SELECT ? AS id) AS source
+            ON target.id = source.id
+            WHEN MATCHED THEN
+                UPDATE SET
+                    titulo          = ?,
+                    mensaje         = ?,
+                    prioridad       = ?,
+                    modulo          = ?,
+                    modulo_ruta     = ?,
+                    accion_etiqueta = ?,
+                    datos_json      = ?,
+                    leida           = ?,
+                    descartada      = ?,
+                    tratada         = ?,
+                    c_usuario       = ?,
+                    c_usuario_trato = ?,
+                    f_leida         = ?,
+                    f_tratada       = ?,
+                    f_expiracion    = ?
+            WHEN NOT MATCHED THEN
+                INSERT (
                     id, titulo, mensaje, prioridad, modulo,
                     modulo_ruta, accion_etiqueta, datos_json,
                     leida, descartada, tratada,
@@ -105,27 +119,43 @@ class PyodbcNotificationBackend(NotificationDBBackend):
                     ?, ?,
                     ?, ?, ?, ?
                 )
-            """
-            insert_params = (
-                row["id"],
-                row["titulo"],
-                row["mensaje"],
-                row["prioridad"],
-                row["modulo"],
-                row["modulo_ruta"],
-                row["accion_etiqueta"],
-                row["datos_json"],
-                row["leida"],
-                row["descartada"],
-                row["tratada"],
-                row["c_usuario"],
-                row["c_usuario_trato"],
-                row["f_creacion"] or datetime.now(),
-                row["f_leida"],
-                row["f_tratada"],
-                row["f_expiracion"],
-            )
-            self._db.execute_query(insert_sql, insert_params)
+        """
+        merge_params = (
+            row["id"],
+            row["titulo"],
+            row["mensaje"],
+            row["prioridad"],
+            row["modulo"],
+            row["modulo_ruta"],
+            row["accion_etiqueta"],
+            row["datos_json"],
+            row["leida"],
+            row["descartada"],
+            row["tratada"],
+            row["c_usuario"],
+            row["c_usuario_trato"],
+            row["f_leida"],
+            row["f_tratada"],
+            row["f_expiracion"],
+            row["id"],
+            row["titulo"],
+            row["mensaje"],
+            row["prioridad"],
+            row["modulo"],
+            row["modulo_ruta"],
+            row["accion_etiqueta"],
+            row["datos_json"],
+            row["leida"],
+            row["descartada"],
+            row["tratada"],
+            row["c_usuario"],
+            row["c_usuario_trato"],
+            row["f_creacion"] or datetime.now(),
+            row["f_leida"],
+            row["f_tratada"],
+            row["f_expiracion"],
+        )
+        self._db.execute_query(merge_sql, merge_params)
 
     # ------------------------------------------------------------------
     # update_status — solo campos de estado

@@ -601,11 +601,32 @@ class NotificationManager:
 
     def _notify_observers(self):
         """Notifica a todos los observadores sobre cambios."""
-        for observer in self._observers:
+        def notify_one(observer):
             try:
                 observer()
             except Exception as e:
                 print(f"[NotificationManager] Error notificando observador: {e}")
+        
+        # Ejecutar en el hilo de Tkinter de forma diferida para no bloquear la UI
+        try:
+            import tkinter as tk
+            root = None
+            # Intentar obtener la raíz de Tkinter de forma segura
+            try:
+                root = tk._default_root
+            except AttributeError:
+                pass
+            
+            if root is not None:
+                for observer in self._observers:
+                    root.after_idle(notify_one, observer)
+                return
+        except ImportError:
+            pass
+        
+        # Fallback: ejecutar directamente si no hay Tkinter
+        for observer in self._observers:
+            notify_one(observer)
 
 
 # ==============================================================================

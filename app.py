@@ -597,8 +597,8 @@ class DatabaseApp:
     def actualizar_alertas_stock(self, force_refresh=False):
         """Actualiza las alertas de stock respetando permisos y filtros de rotación"""
         if not self.modules_enabled.get("stock", False):
-            if hasattr(self, 'stock_alert_label'):
-                self.stock_alert_label.pack_forget()
+            if hasattr(self, 'alerts_display_label'):
+                self.alerts_display_label.pack_forget()
             return
 
         try:
@@ -661,10 +661,27 @@ class DatabaseApp:
                 
                 # POPUP AUTOMÁTICO: Informar si hay quiebres críticos detectados
                 if self.cached_alertas and len(self.cached_alertas) > 0:
-                    # Mostrar alerta parpadeante en el dashboard
-                    if hasattr(self, 'stock_alert_label'):
-                        self.stock_alert_label.pack(side=tk.LEFT, padx=10)
+                    # Mostrar alerta en el display de alertas
+                    if hasattr(self, 'alerts_display_label'):
+                        self.alerts_display_label.config(text="🚨 Alerta: Quiebres de stock")
+                        self.alerts_display_label.pack(side=tk.LEFT, padx=10)
                         self.toggle_stock_blink()
+
+                    # Agregar notificación al Centro de Notificaciones
+                    if hasattr(self, 'notification_manager') and self.notification_manager:
+                        try:
+                            self.notification_manager.add_notification(
+                                title="🚨 Alerta de Quiebres de Stock",
+                                message=f"Se detectaron {len(self.cached_alertas)} productos en quiebre de stock. Revisa los detalles para más información.",
+                                priority=NotificationPriority.URGENT,
+                                module="STOCK",
+                                modulo_ruta="stock",
+                                accion_etiqueta="Ver Quiebres"
+                            )
+                            # Actualizar display de alertas
+                            self.root.after(100, self._update_alerts_display)
+                        except Exception as e:
+                            self.log(f"Error agregando notificación de quiebres: {e}", "WARNING")
 
                     # Lógica de revisión: Solo abrir popup si los datos cambiaron (ID diferente)
                     import hashlib
@@ -678,8 +695,8 @@ class DatabaseApp:
                         self.log("ℹ️ Quiebres detectados pero ya fueron revisados previamente.", "DEBUG")
                 else:
                     # Ocultar alerta si no hay quiebres
-                    if hasattr(self, 'stock_alert_label'):
-                        self.stock_alert_label.pack_forget()
+                    if hasattr(self, 'alerts_display_label'):
+                        self.alerts_display_label.pack_forget()
                 
                 self.log(f"Quiebres de stock actualizados automáticamente ({len(self.cached_alertas)} encontrados)", "INFO")
 
@@ -692,7 +709,7 @@ class DatabaseApp:
             return
 
         if hasattr(self, 'cached_alertas') and self.cached_alertas:
-            from pal.ui.stock_break_popup import StockBreakPopup
+            from pal.ui.popups import StockBreakPopup
             # Pasar la instancia de la app para poder llamar a marcar_revisado
             popup = StockBreakPopup(self.root, self.cached_alertas)
             # Modificar el botón del popup para que llame a la revisión
@@ -718,20 +735,63 @@ class DatabaseApp:
 
     def toggle_stock_blink(self):
         """Efecto de parpadeo para la alerta de stock en la barra de estado"""
-        if not hasattr(self, 'stock_alert_label') or not self.stock_alert_label.winfo_exists():
+        if not hasattr(self, 'alerts_display_label') or not self.alerts_display_label.winfo_exists():
             return
 
-        current_color = self.stock_alert_label.cget("foreground")
+        current_color = self.alerts_display_label.cget("foreground")
         # El color de fondo para "apagar" el texto
         bg_color = self.root.cget("background") 
         
         # Alternar entre rojo y el color de fondo (efecto desaparecer)
         next_color = bg_color if current_color == "#D32F2F" else "#D32F2F"
-        self.stock_alert_label.configure(foreground=next_color)
+        self.alerts_display_label.configure(foreground=next_color)
         
         # Solo seguir parpadeando si hay quiebres y la etiqueta es visible
-        if hasattr(self, 'cached_alertas') and self.cached_alertas and self.stock_alert_label.winfo_ismapped():
+        if hasattr(self, 'cached_alertas') and self.cached_alertas and self.alerts_display_label.winfo_ismapped():
             self.root.after(600, self.toggle_stock_blink)
+
+    def _handle_alert_click(self):
+        """Maneja el clic en el display de alertas."""
+        # Obtener la primera notificación urgente/warning no leída
+        if hasattr(self, 'notification_manager') and self.notification_manager:
+            notifications = self.notification_manager.get_notifications()
+            for notif in notifications:
+                if not notif.read and notif.priority.value in ('urgent', 'warning'):
+                    # Navegar al módulo si tiene ruta
+                    if notif.modulo_ruta and hasattr(self, 'navigate_to_module'):
+                        self.navigate_to_module(notif.modulo_ruta)
+                    return
+        
+        # Si no hay notificación específica, abrir popup de quiebres
+        self.abrir_popup_quiebres()
+
+    def _update_alerts_display(self):
+        """Actualiza el display de alertas basado en notificaciones."""
+        if not hasattr(self, 'alerts_display_label'):
+            return
+            
+        try:
+            # Buscar notificaciones urgentes/warnings no leídas
+            alert_text = ""
+            alert_callback = None
+            
+            if hasattr(self, 'notification_manager') and self.notification_manager:
+                notifications = self.notification_manager.get_notifications()
+                for notif in notifications:
+                    if not notif.read and notif.priority.value in ('urgent', 'warning'):
+                        # Mostrar el título de la primera alerta encontrada
+                        alert_text = notif.title
+                        alert_callback = notif.modulo_ruta
+                        break
+            
+            if alert_text:
+                self.alerts_display_label.config(text=alert_text)
+                self.alerts_display_label.pack(side=tk.LEFT, padx=10)
+                self._alert_callback = alert_callback
+            else:
+                self.alerts_display_label.pack_forget()
+        except Exception as e:
+            print(f"Error actualizando alerts display: {e}")
 
     def recargar_stock(self):
         """Recarga completamente el módulo de stock"""
@@ -1489,7 +1549,7 @@ class DatabaseApp:
         usando la lógica directa de ventas después de última compra.
         """
         try:
-            from pal.ui.stock_break_popup import show_stock_break_popup
+            from pal.ui.popups import show_stock_break_popup
             
             sedes_config = self.config_manager.get_sedes_config()
             quiebres_consolidados = {}
@@ -6573,20 +6633,8 @@ class DatabaseApp:
         self.api_status = ttk.Label(status_frame, text="API: Inactiva", foreground="orange")
         self.api_status.pack(side=tk.LEFT)
         
-        # Anuncio de Alerta (Parpadeante) - Ubicado al lado de API
-        self.stock_alert_label = tk.Label(
-            status_frame,
-            text="🚨 Alerta: Quiebres de stock",
-            font=("Segoe UI", 9, "bold"),
-            foreground="#D32F2F",
-            cursor="hand2",
-            padx=10
-        )
-        # Oculto por defecto
-        self.stock_alert_label.pack_forget()
-        self.stock_alert_label.bind("<Button-1>", lambda e: self.abrir_popup_quiebres())
-
         # ── Campana de Notificaciones (Centro de Notificaciones) ──────
+        # Debe estar ANTES de la alerta para aparecer a la izquierda
         self.notification_bell = None
         try:
             navigate_fn = getattr(self, "navigate_to_module", None)
@@ -6599,10 +6647,23 @@ class DatabaseApp:
                 navigate_fn=navigate_fn,
                 usuario_actual=usuario,
             )
-            bell.pack(side=tk.RIGHT, padx=8)
+            bell.pack(side=tk.LEFT, padx=8)
             self.notification_bell = bell
         except Exception as _bell_err:
             self.log(f"[create_status_panel] Error creando NotificationBell: {_bell_err}", "ERROR")
+        
+        # Anuncio de Alerta (Parpadeante) - Display de alertas basada en notificaciones
+        self.alerts_display_label = tk.Label(
+            status_frame,
+            text="",
+            font=("Segoe UI", 9, "bold"),
+            foreground="#D32F2F",
+            cursor="hand2",
+            padx=10
+        )
+        # Oculto por defecto
+        self.alerts_display_label.pack_forget()
+        self.alerts_display_label.bind("<Button-1>", lambda e: self._handle_alert_click())
 
         # Menú de usuario (Cerrar sesión, Configuración solo para admin)
         self.user_menu = ttk.Menubutton(status_frame, text="Usuario")

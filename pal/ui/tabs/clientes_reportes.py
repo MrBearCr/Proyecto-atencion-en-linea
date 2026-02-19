@@ -79,9 +79,16 @@ class ClientesReportesTab(ttk.Frame):
         tree_frame = ttk.Frame(self)
         tree_frame.pack(side=tk.BOTTOM, fill=tk.BOTH, expand=True, padx=10, pady=10)
 
+        # Configurar estilo para selección highlight
+        style = ttk.Style()
+        style.configure('Clientes.Treeview', rowheight=22)
+        style.map('Clientes.Treeview',
+                  background=[('selected', '#0D47A1')],
+                  foreground=[('selected', 'white')])
+
         # Definir las columnas para el Treeview (para elementos padre)
         columns = ["RIF/ID", "Nombre Cliente", "Factura", "Fecha", "N° Items", "Total USD"]
-        self.report_tree = ttk.Treeview(tree_frame, columns=columns, show='headings') # 'headings' para mostrar solo los encabezados
+        self.report_tree = ttk.Treeview(tree_frame, columns=columns, show='headings', style='Clientes.Treeview')
         
         # Configurar encabezados y columnas
         for col in columns:

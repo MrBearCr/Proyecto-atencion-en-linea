@@ -1,0 +1,292 @@
+# Módulo LOGÍSTICA - Abastecimiento entre Sucursales
+
+> **Nota**: Este módulo forma parte del sistema de LOGÍSTICA.
+
+## Submódulos del Módulo LOGÍSTICA
+
+| # | Submódulo | Estado | Descripción |
+|---|-----------|--------|-------------|
+| 1 | **Abastecimiento entre Sucursales** | 🔄 En desarrollo | Transferencia de mercancía CDT → Sucursales |
+| 2 | **Autorizaciones** | 🔄 En desarrollo | Popup de alertas + gestión de autorizaciones Sede→Sede |
+| 3 | Inventario | ⏳ Pendiente | Control de stock por almacén |
+| 4 | Distribución | ⏳ Pendiente | Control de distribución a clientes |
+| 5 | Flota/Vehículos | ⏳ Pendiente | Gestión de flota de entrega |
+| 6 | Proveedores | ⏳ Pendiente | Gestión de proveedores |
+
+> **Estructura de Abastecimiento entre Sucursales**:
+> - Pestaña "Sugerencias CDT" - Transferencias sugeridas desde CDT (sin autorización)
+> - Pestaña "Transferencias Sede→Sede" - Transferencias entre sedes (requieren autorización)
+> - Pestaña "Autorizaciones" - Detalles de transferencias pendientes por autorizar
+
+> **Historial**: Este módulo fue iniciado previamente pero se hizo rollback. La migración `desuso/010_agregar_modulo_logistica.sql` existe como referencia pero NO se ejecutó en BD.
+
+---
+
+## Visión General
+
+Sistema de transferencia de mercancía entre sedes/sucursales desde un Centro de Distribución (CDT), con lógica de distribución proporcional, compromisos de stock, y autorización de supervisor.
+
+---
+
+## Fase 1: Arquitectura y Configuración Base
+
+### 1.1 Definición de Centros de Distribución
+- [ ] **Módulo LOGISTICA**: Registrar en BD (migración nueva)
+- [ ] **Permiso base**: `logistica.ver` 
+- [ ] **Agregar permisos granulares**:
+  - [ ] `abastecimiento.ver` - Ver módulo de abastecimiento
+  - [ ] `abastecimiento.generar` - Generar sugerencias de transferencia
+  - [ ] `abastecimiento.autorizar` - Autorizar transferencias entre sedes
+  - [ ] `abastecimiento.exportar` - Exportar reportes a Excel
+  - [ ] `abastecimiento.configurar` - Configurar parámetros de días de stock
+- [ ] **Roles de autorización**:
+  - [ ] `Gerente Logistica` - Puede autorizar transferencias Sede→Sede
+  - [ ] `Subgerente Logistica` - Puede autorizar transferencias Sede→Sede
+- [ ] **Identificar CDT principal**: Configurar una sede como "Centro de Distribución" (cerebro de abastecimiento)
+- [ ] **Tabla de configuración**: Crear tabla `configuracion_sedes` con campo `es_cdt` (boolean)
+
+### 1.2 Variables de Criterios de Stock
+- [ ] **Período de análisis**: Días desde última fecha de liquidación (configurable por producto/categoría)
+- [ ] **Cálculo de promedio**: `(ventas_período / días_período)` = promedio ventas diarias
+- [ ] **Días de stock objetivo**: Variable configurable (ej: 7, 14, 30 días)
+- [ ] **Fórmula**: `stock_necesario = promedio_diario * días_deseados`
+- [ ] **Tabla**: `parametros_abastecimiento` (días_por_defecto, días_por_categoria, etc.)
+
+### 1.3 Almacenes "Vendibles" por Sucursal
+- [ ] **Configuración por sede**: Definir qué almacenes de cada sucursal cuentan como stock disponible para venta
+- [ ] **Tabla**: `almacenes_sucursal` (sucursal_id, almacen_id, es_vendible, orden_prioridad)
+- [ ] **UI**: Sección en configuración de sedes para seleccionar almacenes vendibles
+
+---
+
+## Fase 2: Motor de Cálculo de Abastecimiento
+
+### 2.1 Algoritmo de Sugerencia de Transferencia
+- [ ] **Entrada**: Sucursal destino, código de producto, días de stock deseados
+- [ ] **Paso 1**: Calcular stock actual en almacenes vendibles de la sucursal
+- [ ] **Paso 2**: Calcular promedio de ventas diarias desde última liquidación
+- [ ] **Paso 3**: Determinar stock necesario = `promedio * días_deseados`
+- [ ] **Paso 4**: Si `stock_actual < stock_necesario`, calcular déficit
+- [ ] **Paso 5**: Buscar stock disponible en CDT u otras sucursales
+
+### 2.2 Control de Stock Comprometido
+- [ ] **Registro de compromisos**: Tabla `compromisos_stock` (producto_id, sucursal_origen, sucursal_destino, cantidad, fecha, estado)
+- [ ] **Cálculo de disponible**: `stock_físico - compromisos_pendientes = disponible_real`
+- [ ] **Lógica de "ya comprometido"**: El sistema debe conocer cuánto ya está asignado a la sucursal analizada
+- [ ] **Mostrar disponible**: UI debe indicar qué cantidad queda libre para otras sucursales
+
+### 2.3 Distribución Proporcional (Overflow)
+- [ ] **Detectar overflow**: Si `sum(solicitudes) > disponible_en_CDT`
+- [ ] **Calcular peso porcentual**:
+  - Barinas: 5/14 = 36%
+  - Cabudare: 6/14 = 43%
+  - Guanare: 3/14 = 21%
+- [ ] **Aplicar distribución**: Asignar según peso proporcional
+- [ ] **Registrar truncamiento**: Guardar nota de que la solicitud fue ajustada
+
+---
+
+## Flujo de Autorizaciones
+
+> **Nota**: El **Centro de Notificaciones** existente se utiliza para organizar este flujo.
+
+| Tipo de Transferencia | Requiere Autorización | Roles que pueden autorizar |
+|---------------------|----------------------|---------------------------|
+| **CDT → Sucursal** | ❌ No (solo sugerencia) | N/A |
+| **Sucursal → Sucursal** | ✅ Sí (obligatoria) | Gerente de Logística o Subgerente de Logística |
+
+### Reglas de Notificación y Autorización
+
+- [ ] **Notificaciones**: Se envían a AMBOS roles (Gerente y Subgerente de Logística)
+- [ ] **Popup de alertas pendientes (URGENTE)**:
+  - [ ] **Al iniciar sesión**: Verificar si hay transferencias pendientes por autorizar
+  - [ ] **Si existen**: Mostrar popup emergente inmediatamente: "⚠️ Transferencias Pendientes por Autorizar"
+  - [ ] El popup debe mostrar:
+    - Lista de transferencias pendientes (sucursal origen → destino, producto, cantidad)
+    - Botón "Autorizar" que redirija al submódulo de autorizaciones
+    - Botón "Cerrar" para minimizar (la notificación queda como leída)
+  - [ ] Al hacer clic en "Autorizar": cerrar popup y abrir el submódulo de autorizaciones con los detalles de la transferencia
+  - [ ] Si no hay pendientes, no mostrar popup
+- [ ] **Estado "pendiente"**: Cuando se crea una solicitud entre sedes
+- [ ] **Prevención de doble autorización**:
+  - [ ] Al crear la solicitud, se marca con estado "pendiente"
+  - [ ] Cuando un usuario con rol autorizado hace clic en "Autorizar":
+    1. Verificar estado actual de la solicitud
+    2. Si ya está "aprobada", mostrar mensaje: "Esta solicitud ya fue autorizada por [usuario]" y bloquear acción
+    3. Si está "pendiente", cambiar a "aprobada", registrar usuario, fecha y hora exactas
+  - [ ] **Transacción atómica**: Usar bloqueos o transacciones para evitar race conditions
+- [ ] **Log de auditoría**: Registrar quién autorizó y cuándo
+
+### Validación de Órdenes de Compra (ODC)
+
+- [ ] **Verificar ODC activas**: Al sugerir transferencia, buscar si el producto tiene ODC vigente hacia la sucursal destino
+- [ ] **Si existe ODC activa**:
+  - [ ] Mostrar advertencia clara: "⚠️ ADVERTENCIA: Ya existe una ODC activa para este producto"
+  - [ ] La sugerencia cambia a "No transferir" o similar
+  - [ ] Color diferente en la UI (naranja/amarillo)
+- [ ] **Permitir forzar transferencia**: Solo con autorización de Gerente/Subgerente de Logística
+- [ ] **Integración**: Consumir datos del módulo de compras existente (tabla ODC)
+
+---
+
+## Fase 4: Interfaz de Usuario y Reportes
+
+### 4.1 Dashboard de Abastecimiento
+- [ ] **Resumen por sucursal**: Stock actual vs necesario, déficit total
+- [ ] **Alertas**: Productos bajo umbral de días de stock
+- [ ] **Gráficos**: Distribución de transferencias sugeridas por sucursal
+
+### 4.2 Filtros Avanzados
+- [ ] **Por departamento**
+- [ ] **Por grupo**
+- [ ] **Por subgrupo**
+- [ ] **Por marca**
+- [ ] **Por proveedor**
+- [ ] **Por sucursal origen/destino**
+- [ ] **Rango de fechas (última liquidación)**
+
+### 4.3 Exportación a Excel
+- [ ] **Botón exportar**: Generar archivo .xlsx
+- [ ] **Columnas**: Producto, SKU, Descripción, Stock Actual, Stock Necesario, Déficit, Sugerencia Origen, Cantidad Sugerida
+- [ ] **Hojas múltiples**: Una hoja por sucursal destino, o resumen consolidado
+- [ ] **Aplicar filtros activos**: El Excel respeta los filtros seleccionados en UI
+
+---
+
+## Fase 5: Integración con Módulos Existentes
+
+### 5.1 Inventario (Stock)
+- [ ] Consumir datos de `stock.py` o tabla `inventario_actual`
+- [ ] Integrar con lógica de almacenes
+
+### 5.2 Ventas
+- [ ] Consumir datos de ventas desde última liquidación
+- [ ] Tabla `ventas` o `movimientos` con campo `fecha_liquidacion`
+
+### 5.3 Órdenes de Compra
+- [ ] Integrar con módulo de compras (ODC)
+- [ ] Verificar estado ODC (activa/cerrada/cancelada)
+
+### 5.4 Notifications
+- [ ] Notificar a supervisor cuando haya solicitudes pendientes de autorización
+- [ ] Notificar a analistas cuando haya nuevas sugerencias de transferencia
+
+---
+
+## Fase 6: Base de Datos
+
+### 6.1 Tablas Nuevas
+
+```sql
+-- Configuración de sedes
+CREATE TABLE configuracion_sedes (
+    id INT PRIMARY KEY,
+    sede_id INT REFERENCES sedes(id),
+    es_cdt BOOLEAN DEFAULT FALSE,
+    almacenes_vendibles JSON, -- Lista de IDs de almacenes
+    dias_stock_default INT DEFAULT 7
+);
+
+-- Parámetros de abastecimiento
+CREATE TABLE parametros_abastecimiento (
+    id INT PRIMARY KEY,
+    categoria_id INT,
+    dias_stock INT,
+    fecha_actualizacion DATETIME
+);
+
+-- Compromisos de stock (ya comprometido para transferencia)
+CREATE TABLE compromisos_stock (
+    id INT PRIMARY KEY,
+    producto_id INT,
+    sucursal_origen INT,
+    sucursal_destino INT,
+    cantidad DECIMAL(10,2),
+    fecha_compromiso DATETIME,
+    estado ENUM('pendiente', 'confirmado', 'cancelado')
+);
+
+-- Auditoría de autorizaciones
+CREATE TABLE auditoria_autorizaciones (
+    id INT PRIMARY KEY,
+    usuario_id INT,
+    producto_id INT,
+    sucursal_origen INT,
+    sucursal_destino INT,
+    cantidad_original DECIMAL(10,2),
+    cantidad_autorizada DECIMAL(10,2),
+    motivo TEXT,
+    fecha_autorizacion DATETIME
+);
+
+-- Sugerencias de transferencia
+CREATE TABLE sugerencias_transferencia (
+    id INT PRIMARY KEY,
+    producto_id INT,
+    sucursal_destino INT,
+    sucursal_origen_sugerida INT,
+    cantidad_sugerida DECIMAL(10,2),
+    cantidad_disponible DECIMAL(10,2),
+    dias_stock_actual INT,
+    dias_stock_necesario INT,
+    tiene_odc_activa BOOLEAN,
+    requiere_autorizacion BOOLEAN,
+    fecha_generacion DATETIME,
+    estado ENUM('pendiente', 'aprobada', 'rechazada', 'exportada')
+);
+```
+
+### 6.2 Índices
+- [ ] `idx_compromisos_producto_sede` ON `compromisos_stock(producto_id, sucursal_destino)`
+- [ ] `idx_sugerencias_estado` ON `sugerencias_transferencia(estado, fecha_generacion)`
+- [ ] `idx_ventas_fecha_liquidacion` ON `ventas(fecha_liquidacion)`
+
+---
+
+## Fase 7: Permisos
+
+| Permiso | Descripción |
+|---------|-------------|
+| `ver_modulo_abastecimiento` | Acceder al módulo de abastecimiento |
+| `generar_sugerencias` | Ejecutar cálculo de sugerencias |
+| `exportar_excel_abastecimiento` | Exportar reportes a Excel |
+| `autorizar_transferencia` | Autorizar transferencias especiales |
+| `ver_todas_sucursales` | Ver datos de todas las sucursales |
+| `configurar_parametros` | Modificar parámetros de días de stock |
+
+---
+
+## Tareas por Desarrollador
+
+### Frontend/UI
+- [ ] Crear pestaña "Abastecimiento" en el menú
+- [ ] Panel de filtros con todos los criterios
+- [ ] Tabla de resultados con columnas configurables
+- [ ] Gráficos de resumen
+- [ ] Botón de exportación Excel
+- [ ] Modal de autorización de supervisor
+
+### Backend/Lógica
+- [ ] Endpoint de cálculo de sugerencias
+- [ ] Lógica de distribución proporcional
+- [ ] Integración con ventas (período desde liquidación)
+- [ ] Validación de ODC activas
+- [ ] Registro de compromisos
+
+### Base de Datos
+- [ ] Crear tablas nuevas
+- [ ] Crear índices de rendimiento
+- [ ] Migrar datos si aplica
+
+### Testing
+- [ ] Pruebas unitarias de algoritmo de distribución
+- [ ] Pruebas de integración con ODC
+- [ ] Pruebas de autorización de supervisor
+
+---
+
+## Notas
+
+- **Período de liquidación**: El sistema debe almacenar la última fecha de liquidación por sucursal para calcular el promedio de ventas correctamente.
+- **Múltiples CDT**: La arquitectura debe permitir configurar múltiples CDT si es necesario en el futuro.
+- **Tiempo real vs batch**: Iniciar con generación de sugerencias bajo demanda (botón), opcionalmente mover a proceso programado.

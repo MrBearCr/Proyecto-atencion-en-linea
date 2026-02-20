@@ -118,7 +118,7 @@ class PyodbcNotificationBackend(NotificationDBBackend):
                     ?, ?, ?,
                     ?, ?,
                     ?, ?, ?, ?
-                )
+                );
         """
         merge_params = (
             row["id"],

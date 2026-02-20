@@ -3120,35 +3120,6 @@ class DatabaseApp:
         #     )
         # except Exception:
         #     pass
-        # Sanitizar filas (ahora con 7 elementos)
-        filtrados_clean = []
-        for r in filtrados:
-            try:
-                if len(r) < 7: continue 
-                codigo = str(r[0])
-                desc = str(r[1])
-                sede = str(r[2])
-                unid_perd = float(r[3])
-                dias = int(r[4])
-                ult_compra = r[5]
-                ult_venta = r[6]
-                filtrados_clean.append((codigo, desc, sede, unid_perd, dias, ult_compra, ult_venta))
-            except Exception:
-                continue
-        # Paginación
-        datos_pagina, total_paginas, self.current_page = paginate(
-            filtrados_clean, self.current_page, self.page_size
-        )
-        # DEBUG: Log de resultados finales
-        self.stock_debug_log(
-            f"Resultado filtrado: {len(filtrados_clean)} productos | "
-            f"Página {self.current_page}/{total_paginas} | "
-            f"Mostrando: {len(datos_pagina)} productos"
-        )
-        
-        # Actualizar UI
-        self.mostrar_alertas_paginadas(datos_pagina)
-        self.actualizar_controles_paginacion(total_paginas)
 
     def _coincide_jerarquia(self, codigo, dept_code, group_code, sub_code):
         """Helper function para filtro jerárquico optimizado"""

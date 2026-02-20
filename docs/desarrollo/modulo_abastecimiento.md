@@ -6,12 +6,8 @@
 
 | # | Submódulo | Estado | Descripción |
 |---|-----------|--------|-------------|
-| 1 | **Abastecimiento entre Sucursales** | 🔄 En desarrollo | Transferencia de mercancía CDT → Sucursales |
-| 2 | **Autorizaciones** | 🔄 En desarrollo | Popup de alertas + gestión de autorizaciones Sede→Sede |
-| 3 | Inventario | ⏳ Pendiente | Control de stock por almacén |
-| 4 | Distribución | ⏳ Pendiente | Control de distribución a clientes |
-| 5 | Flota/Vehículos | ⏳ Pendiente | Gestión de flota de entrega |
-| 6 | Proveedores | ⏳ Pendiente | Gestión de proveedores |
+| 1 | **Abastecimiento** | 🔄 En desarrollo | Transferencia CDT → Sucursales |
+| 2 | **Autorizaciones** | 🔄 En desarrollo | Transferencias Sede→Sede (requieren autorización) |
 
 > **Estructura de Abastecimiento entre Sucursales**:
 > - Pestaña "Sugerencias CDT" - Transferencias sugeridas desde CDT (sin autorización)
@@ -24,7 +20,7 @@
 
 ## Visión General
 
-Sistema de transferencia de mercancía entre sedes/sucursales desde un Centro de Distribución (CDT), con lógica de distribución proporcional, compromisos de stock, y autorización de supervisor.
+Sistema de transferencia de mercancía entre sedes/sucursales desde un Centro de Distribución (CDT), con lógica de distribución proporcional, y autorización de supervisor.
 
 ---
 
@@ -32,7 +28,7 @@ Sistema de transferencia de mercancía entre sedes/sucursales desde un Centro de
 
 ### 1.1 Definición de Centros de Distribución
 - [ ] **Módulo LOGISTICA**: Registrar en BD (migración nueva)
-- [ ] **Permiso base**: `logistica.ver` 
+- [ ] **Permiso base**: `logistica.ver`
 - [ ] **Agregar permisos granulares**:
   - [ ] `abastecimiento.ver` - Ver módulo de abastecimiento
   - [ ] `abastecimiento.generar` - Generar sugerencias de transferencia
@@ -42,20 +38,24 @@ Sistema de transferencia de mercancía entre sedes/sucursales desde un Centro de
 - [ ] **Roles de autorización**:
   - [ ] `Gerente Logistica` - Puede autorizar transferencias Sede→Sede
   - [ ] `Subgerente Logistica` - Puede autorizar transferencias Sede→Sede
-- [ ] **Identificar CDT principal**: Configurar una sede como "Centro de Distribución" (cerebro de abastecimiento)
-- [ ] **Tabla de configuración**: Crear tabla `configuracion_sedes` con campo `es_cdt` (boolean)
 
-### 1.2 Variables de Criterios de Stock
+### 1.2 Configuración de Sedes (YA EXISTE)
+> La configuración de sedes ya existe en Admin > Sedes_Almacenes. Ver `pal_global_settings` (setting_key = "sedes_config").
+
+- [ ] **Agregar campo CDT**: Agregar campo `es_cdt: boolean` al JSON de configuración de sedes
+- [ ] **Actualizar UI**: Agregar checkbox "Es Centro de Distribución" en `pal/ui/tabs/sedes_config.py`
+
+### 1.3 Variables de Criterios de Stock
 - [ ] **Período de análisis**: Días desde última fecha de liquidación (configurable por producto/categoría)
 - [ ] **Cálculo de promedio**: `(ventas_período / días_período)` = promedio ventas diarias
 - [ ] **Días de stock objetivo**: Variable configurable (ej: 7, 14, 30 días)
 - [ ] **Fórmula**: `stock_necesario = promedio_diario * días_deseados`
 - [ ] **Tabla**: `parametros_abastecimiento` (días_por_defecto, días_por_categoria, etc.)
 
-### 1.3 Almacenes "Vendibles" por Sucursal
-- [ ] **Configuración por sede**: Definir qué almacenes de cada sucursal cuentan como stock disponible para venta
-- [ ] **Tabla**: `almacenes_sucursal` (sucursal_id, almacen_id, es_vendible, orden_prioridad)
-- [ ] **UI**: Sección en configuración de sedes para seleccionar almacenes vendibles
+### 1.4 Almacenes "Vendibles" por Sucursal (YA EXISTE)
+> La configuración de almacenes por sede ya existe en Admin > Sedes_Almacenes. Los almacenes "tratables" se configuran en cada sede y representan los depósitos que cuentan como stock disponible para venta.
+
+- [ ] **Verificar**: Confirmar que `almacenes_tratables` en el JSON de sedes_config cumple con la función de almacenes "vendibles"
 
 ---
 
@@ -76,13 +76,23 @@ Sistema de transferencia de mercancía entre sedes/sucursales desde un Centro de
 - [ ] **Mostrar disponible**: UI debe indicar qué cantidad queda libre para otras sucursales
 
 ### 2.3 Distribución Proporcional (Overflow)
-- [ ] **Detectar overflow**: Si `sum(solicitudes) > disponible_en_CDT`
-- [ ] **Calcular peso porcentual**:
-  - Barinas: 5/14 = 36%
-  - Cabudare: 6/14 = 43%
-  - Guanare: 3/14 = 21%
-- [ ] **Aplicar distribución**: Asignar según peso proporcional
-- [ ] **Registrar truncamiento**: Guardar nota de que la solicitud fue ajustada
+
+> **Caso**: Cuando el CDT no tiene suficiente stock para satisfacer toda la demanda de las sedes.
+
+- [ ] **Detectar overflow**: Si `sum(demandas_sedes) > disponible_en_CDT`
+- [ ] **Calcular peso de cada sede**:
+  - [ ] Obtener promedio de ventas diarias de cada sede desde última liquidación
+  - [ ] Calcular peso porcentual: `peso_sede = ventas_sede / sum(ventas_todas_sedes)`
+  - [ ] Ejemplo: Barinas vende 50/día, Cabudare 80/día, Guanare 20/día → Total 150
+    - Barinas: 50/150 = 33%
+    - Cabudare: 80/150 = 53%
+    - Guanare: 20/150 = 14%
+- [ ] **Aplicar distribución**: Asignar a cada sede el % disponible según su peso
+  - [ ] Si CDT tiene 100 unidades disponibles:
+    - Barinas: 33 unidades
+    - Cabudare: 53 unidades
+    - Guanare: 14 unidades
+- [ ] **Registrar truncamiento**: Guardar nota de que la solicitud fue ajustada y por qué
 
 ---
 
@@ -124,8 +134,53 @@ Sistema de transferencia de mercancía entre sedes/sucursales desde un Centro de
   - [ ] Mostrar advertencia clara: "⚠️ ADVERTENCIA: Ya existe una ODC activa para este producto"
   - [ ] La sugerencia cambia a "No transferir" o similar
   - [ ] Color diferente en la UI (naranja/amarillo)
-- [ ] **Permitir forzar transferencia**: Solo con autorización de Gerente/Subgerente de Logística
+- [ ] **Flujo de autorización**:
+  - [ ] Si usuario NO tiene permiso `abastecimiento.autorizar`:
+    - [ ] Mostrar botón "Solicitar Autorización"
+    - [ ] Crear solicitud de autorización
+  - [ ] Si usuario SÍ tiene permiso `abastecimiento.autorizar`:
+    - [ ] Mostrar botón "Forzar Transferencia"
 - [ ] **Integración**: Consumir datos del módulo de compras existente (tabla ODC)
+
+### Validación de Productos "ROJOS" (Inviables para Traslado)
+
+> Productos que por su naturaleza (fragilidad, costo, regulación, etc.) no deben transferirse entre sedes específicas.
+
+- [ ] **Lista de productos ROJOS por sede**: La prohibición es **origin → destino**, no global
+  - Ejemplo: Producto X puede transferirse de CDT → Barinas, pero NO de CDT → Cabudare
+  - Ejemplo: Producto Y puede transferirse de Sede A → Sede B, pero NO de Sede B → Sede A
+- [ ] **Tabla propuesta**: `productos_no_trasladables`
+  ```sql
+  CREATE TABLE productos_no_trasladables (
+      id INT IDENTITY(1,1) PRIMARY KEY,
+      producto_codigo NVARCHAR(15) NOT NULL,
+      sede_origen NVARCHAR(50), -- NULL = todas las sedes origen
+      sede_destino NVARCHAR(50) NOT NULL,
+      motivo NVARCHAR(255) NOT NULL,
+      fecha_agregado DATETIME DEFAULT GETDATE(),
+      usuario_agrega INT,
+      activo BIT DEFAULT 1
+  );
+  ```
+- [ ] **UI de gestión**: Sección en configuración para agregar/eliminar productos de la lista ROJA
+  - [ ] Selector de producto
+  - [ ] Selector de sede origen (opcional, si se deja vacío aplica a todas)
+  - [ ] Selector de sede destino (obligatorio)
+  - [ ] Campo de motivo
+- [ ] **En sugerencia de transferencia**:
+  - [ ] Verificar si el producto está en lista ROJA para esa sede origen → destino
+  - [ ] Si está en lista: mostrar advertencia "⚠️ PRODUCTO NO TRASLADABLE - [motivo]"
+  - [ ] Mostrar color diferente en la UI (rojo)
+  - [ ] Por defecto NO permitir transferencia
+- [ ] **Flujo de autorización para productos ROJOS**:
+  - [ ] Si usuario NO tiene permiso `abastecimiento.autorizar`:
+    - [ ] Mostrar botón "Solicitar Autorización"
+    - [ ] Crear solicitud de autorización (igual que transferencias Sede→Sede)
+    - [ ] Notificar a Gerente/Subgerente de Logística
+  - [ ] Si usuario SÍ tiene permiso `abastecimiento.autorizar`:
+    - [ ] Mostrar botón "Forzar Transferencia"
+    - [ ] Al hacer clic: registrar en auditoría quién forzó, motivo, fecha
+    - [ ] La transferencia se procesa normalmente pero marcada como "forzada"
 
 ---
 
@@ -156,12 +211,20 @@ Sistema de transferencia de mercancía entre sedes/sucursales desde un Centro de
 ## Fase 5: Integración con Módulos Existentes
 
 ### 5.1 Inventario (Stock)
-- [ ] Consumir datos de `stock.py` o tabla `inventario_actual`
-- [ ] Integrar con lógica de almacenes
+> **Importante**: El módulo `stock.py` genera alertas de **quiebres de stock** para productos de alta/media rotación. NO proporciona stock general.
+
+- [ ] **Datos de stock**: Consumir directamente de tabla `MA_DEPOPROD` (c_codarticulo, c_coddeposito, n_cantidad)
+- [ ] **Alertas de stock**: Usar `stock.py` para mostrar productos en quiebre en la UI
 
 ### 5.2 Ventas
-- [ ] Consumir datos de ventas desde última liquidación
-- [ ] Tabla `ventas` o `movimientos` con campo `fecha_liquidacion`
+- [ ] **Fuente de datos**: Tabla `TR_INVENTARIO` (contiene movimientos de inventario/ventas)
+- [ ] **Última Liquidación**: Tabla `MA_HISTORICO_COSTO_PRECIO`
+  - Campo: `d_fechaCambio` = fecha de última liquidación
+  - Filtro: `c_procesoOrigen = 'REGISTRO DE FACTURA'` (indica que el producto se liquidó)
+  - Campo clave: `c_codarticulo` = código del producto
+- [ ] **Cálculo de promedio**: `(ventas_período / días_período)` = promedio ventas diarias
+- [ ] **Período**: Desde `d_fechaCambio` hasta fecha actual
+- [ ] **Consultas existentes**: Usar métodos como `obtener_ventas_persisted_tra()` o `obtener_ventas_por_producto_chunk()`
 
 ### 5.3 Órdenes de Compra
 - [ ] Integrar con módulo de compras (ODC)
@@ -175,40 +238,50 @@ Sistema de transferencia de mercancía entre sedes/sucursales desde un Centro de
 
 ## Fase 6: Base de Datos
 
-### 6.1 Tablas Nuevas
+### 6.1 Configuración de Sedes (YA EXISTE)
+
+> **Importante**: La configuración de sedes ya existe en `pal_global_settings` (setting_key = "sedes_config") en formato JSON. NO crear nueva tabla.
+
+**Estructura actual**:
+```json
+{
+    "nombre_sede": {
+        "descripcion": "",
+        "zona": "",
+        "almacenes_tratables": []
+    }
+}
+```
+
+**Lo que hay que agregar**:
+- [ ] Campo `es_cdt: boolean` al JSON de cada sede
+- [ ] Actualizar UI en `pal/ui/tabs/sedes_config.py` para mostrar checkbox "Es Centro de Distribución"
+
+### 6.2 Tablas Nuevas
 
 ```sql
--- Configuración de sedes
-CREATE TABLE configuracion_sedes (
-    id INT PRIMARY KEY,
-    sede_id INT REFERENCES sedes(id),
-    es_cdt BOOLEAN DEFAULT FALSE,
-    almacenes_vendibles JSON, -- Lista de IDs de almacenes
-    dias_stock_default INT DEFAULT 7
-);
-
--- Parámetros de abastecimiento
+-- Parámetros de abastecimiento (días de stock por categoría)
 CREATE TABLE parametros_abastecimiento (
-    id INT PRIMARY KEY,
+    id INT IDENTITY(1,1) PRIMARY KEY,
     categoria_id INT,
-    dias_stock INT,
-    fecha_actualizacion DATETIME
+    dias_stock INT DEFAULT 7,
+    fecha_actualizacion DATETIME DEFAULT GETDATE()
 );
 
 -- Compromisos de stock (ya comprometido para transferencia)
 CREATE TABLE compromisos_stock (
-    id INT PRIMARY KEY,
+    id INT IDENTITY(1,1) PRIMARY KEY,
     producto_id INT,
     sucursal_origen INT,
     sucursal_destino INT,
     cantidad DECIMAL(10,2),
-    fecha_compromiso DATETIME,
-    estado ENUM('pendiente', 'confirmado', 'cancelado')
+    fecha_compromiso DATETIME DEFAULT GETDATE(),
+    estado NVARCHAR(20) DEFAULT 'pendiente' -- pendiente, confirmado, cancelado
 );
 
 -- Auditoría de autorizaciones
 CREATE TABLE auditoria_autorizaciones (
-    id INT PRIMARY KEY,
+    id INT IDENTITY(1,1) PRIMARY KEY,
     usuario_id INT,
     producto_id INT,
     sucursal_origen INT,
@@ -216,12 +289,12 @@ CREATE TABLE auditoria_autorizaciones (
     cantidad_original DECIMAL(10,2),
     cantidad_autorizada DECIMAL(10,2),
     motivo TEXT,
-    fecha_autorizacion DATETIME
+    fecha_autorizacion DATETIME DEFAULT GETDATE()
 );
 
 -- Sugerencias de transferencia
 CREATE TABLE sugerencias_transferencia (
-    id INT PRIMARY KEY,
+    id INT IDENTITY(1,1) PRIMARY KEY,
     producto_id INT,
     sucursal_destino INT,
     sucursal_origen_sugerida INT,
@@ -229,17 +302,42 @@ CREATE TABLE sugerencias_transferencia (
     cantidad_disponible DECIMAL(10,2),
     dias_stock_actual INT,
     dias_stock_necesario INT,
-    tiene_odc_activa BOOLEAN,
-    requiere_autorizacion BOOLEAN,
-    fecha_generacion DATETIME,
-    estado ENUM('pendiente', 'aprobada', 'rechazada', 'exportada')
+    tiene_odc_activa BIT DEFAULT 0,
+    es_producto_rojo BIT DEFAULT 0,
+    tipo_solicitud NVARCHAR(20) DEFAULT 'normal', -- normal, odc, producto_rojo
+    requiere_autorizacion BIT DEFAULT 0,
+    fue_autorizada BIT DEFAULT 0,
+    usuario_autoriza INT,
+    fecha_autorizacion DATETIME,
+    fecha_generacion DATETIME DEFAULT GETDATE(),
+    estado NVARCHAR(20) DEFAULT 'pendiente' -- pendiente, aprobada, rechazada, exportada
+);
+
+-- Productos no trasladables (Lista ROJA) - Por sede origen → destino
+CREATE TABLE productos_no_trasladables (
+    id INT IDENTITY(1,1) PRIMARY KEY,
+    producto_codigo NVARCHAR(15) NOT NULL,
+    sede_origen NVARCHAR(50), -- NULL = todas las sedes origen
+    sede_destino NVARCHAR(50) NOT NULL,
+    motivo NVARCHAR(255) NOT NULL,
+    fecha_agregado DATETIME DEFAULT GETDATE(),
+    usuario_agrega INT,
+    activo BIT DEFAULT 1
+);
+);
+    cantidad_disponible DECIMAL(10,2),
+    dias_stock_actual INT,
+    dias_stock_necesario INT,
+    tiene_odc_activa BIT DEFAULT 0,
+    requiere_autorizacion BIT DEFAULT 0,
+    fecha_generacion DATETIME DEFAULT GETDATE(),
+    estado NVARCHAR(20) DEFAULT 'pendiente' -- pendiente, aprobada, rechazada, exportada
 );
 ```
 
-### 6.2 Índices
+### 6.3 Índices
 - [ ] `idx_compromisos_producto_sede` ON `compromisos_stock(producto_id, sucursal_destino)`
 - [ ] `idx_sugerencias_estado` ON `sugerencias_transferencia(estado, fecha_generacion)`
-- [ ] `idx_ventas_fecha_liquidacion` ON `ventas(fecha_liquidacion)`
 
 ---
 
@@ -256,10 +354,11 @@ CREATE TABLE sugerencias_transferencia (
 
 ---
 
-## Tareas por Desarrollador
+## Tareas 
 
 ### Frontend/UI
 - [ ] Crear pestaña "Abastecimiento" en el menú
+- [ ] **Carga en tiempo real**: Las sugerencias se cargan automáticamente al acceder al módulo (como STOCK), no con botón
 - [ ] Panel de filtros con todos los criterios
 - [ ] Tabla de resultados con columnas configurables
 - [ ] Gráficos de resumen
@@ -289,4 +388,5 @@ CREATE TABLE sugerencias_transferencia (
 
 - **Período de liquidación**: El sistema debe almacenar la última fecha de liquidación por sucursal para calcular el promedio de ventas correctamente.
 - **Múltiples CDT**: La arquitectura debe permitir configurar múltiples CDT si es necesario en el futuro.
-- **Tiempo real vs batch**: Iniciar con generación de sugerencias bajo demanda (botón), opcionalmente mover a proceso programado.
+- **Tiempo real**: Las sugerencias se calculan en tiempo real al cargar el módulo (igual que STOCK), no es un proceso batch.
+ 

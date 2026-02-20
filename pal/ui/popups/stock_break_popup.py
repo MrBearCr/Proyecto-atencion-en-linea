@@ -117,7 +117,7 @@ class StockBreakPopup:
         table_frame = tk.Frame(container)
         table_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-        cols = ("codigo", "descripcion", "perdidas", "dias", "u_venta")
+        cols = ("codigo", "descripcion", "perdidas", "dias", "u_liquidacion", "u_venta")
         tree = ttk.Treeview(
             table_frame, 
             columns=cols, 
@@ -134,12 +134,14 @@ class StockBreakPopup:
         tree.heading("descripcion", text="Descripción")
         tree.heading("perdidas", text="Venta Perdida")
         tree.heading("dias", text="Días en 0")
+        tree.heading("u_liquidacion", text="Últ. Liquid.")
         tree.heading("u_venta", text="Última Venta")
         
         tree.column("codigo", width=100, anchor=tk.CENTER)
-        tree.column("descripcion", width=350, anchor=tk.W)
+        tree.column("descripcion", width=300, anchor=tk.W)
         tree.column("perdidas", width=100, anchor=tk.CENTER)
         tree.column("dias", width=80, anchor=tk.CENTER)
+        tree.column("u_liquidacion", width=100, anchor=tk.CENTER)
         tree.column("u_venta", width=100, anchor=tk.CENTER)
         
         tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -158,7 +160,8 @@ class StockBreakPopup:
                 q[1], # descripcion
                 f"{unidades}", # unidades perdidas (entero)
                 f"{q[4]} d", # dias quiebre
-                q[6] if q[6] else "N/A" # ultima venta
+                q[5].strftime("%Y-%m-%d") if q[5] and hasattr(q[5], 'strftime') else (q[5] if q[5] else "N/A"), # ultima liquidacion (q[5] is u_compra)
+                q[6].strftime("%Y-%m-%d") if q[6] and hasattr(q[6], 'strftime') else (q[6] if q[6] else "N/A") # ultima venta
             ))
 
 # Singleton helper to avoid multiple concurrent popups

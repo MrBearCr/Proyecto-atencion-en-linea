@@ -1547,17 +1547,23 @@ class DatabaseManager:
                     RTRIM(LTRIM(p.C_CODIGO)) as codigo,
                     p.c_Descri as descripcion,
                     '{sede_label}' as sede,
-                    p.Update_date as ultima_compra,
+                    ISNULL(liq.ultima_liquidacion, p.Update_date) as ultima_compra,
                     stats.last_sale as ultima_venta,
                     -- Cálculo de Venta Perdida Proyectada: (Ventas / Días con Stock) * Días en Quiebre
-                    CAST(ROUND(
-                        (ISNULL(stats.sold_units, 0) / 
-                         NULLIF(DATEDIFF(DAY, p.Update_date, stats.last_sale) + 1, 0)) -- Días con stock
-                        * DATEDIFF(DAY, ISNULL(stats.last_sale, p.Update_date), GETDATE()) -- Días en quiebre
-                    , 2) AS FLOAT) as unidades_perdidas,
-                    DATEDIFF(DAY, ISNULL(stats.last_sale, p.Update_date), GETDATE()) as dias_quiebre
+                    CAST(CEILING(
+                        (CAST(ISNULL(stats.sold_units, 0) AS FLOAT) / 
+                         NULLIF(DATEDIFF(DAY, ISNULL(liq.ultima_liquidacion, p.Update_date), stats.last_sale) + 1, 0)) -- Días con stock
+                        * DATEDIFF(DAY, ISNULL(stats.last_sale, ISNULL(liq.ultima_liquidacion, p.Update_date)), GETDATE()) -- Días en quiebre
+                    ) AS INT) as unidades_perdidas,
+                    DATEDIFF(DAY, ISNULL(stats.last_sale, ISNULL(liq.ultima_liquidacion, p.Update_date)), GETDATE()) as dias_quiebre
                 FROM MA_PRODUCTOS p WITH (NOLOCK)
                 {rotation_join}
+                OUTER APPLY (
+                    SELECT MAX(h.d_fechaCambio) as ultima_liquidacion
+                    FROM MA_HISTORICO_COSTO_PRECIO h WITH (NOLOCK)
+                    WHERE h.c_codarticulo = p.C_CODIGO
+                      AND h.c_procesoOrigen = 'REGISTRO DE FACTURA'
+                ) liq
                 CROSS APPLY (
                     SELECT 
                         SUM(ISNULL(n_cantidad, 0)) as total_stock
@@ -1572,7 +1578,7 @@ class DatabaseManager:
                     FROM TR_INVENTARIO i WITH (NOLOCK)
                     WHERE i.c_Codarticulo = p.C_CODIGO 
                         AND i.c_Deposito IN ({placeholders})
-                        AND i.f_fecha >= p.Update_date
+                        AND i.f_fecha >= ISNULL(liq.ultima_liquidacion, p.Update_date)
                         AND (i.c_Concepto = 'VEN' OR i.c_Concepto = 'DEV')
                 ) stats
                 WHERE stock.total_stock <= 0

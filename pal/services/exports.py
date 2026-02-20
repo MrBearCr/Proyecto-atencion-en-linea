@@ -656,12 +656,14 @@ def export_stock_excel(filename: str, datos_exportar: List, seleccionadas: List[
                 # Sede de quiebre (col 7)
                 ws_main.cell(row=row, column=7, value=clean_for_excel(sede_q))
                 # Unid. Perdidas (col 8)
-                ws_main.cell(row=row, column=8, value=float(unid_p))
+                ws_main.cell(row=row, column=8, value=int(unid_p))
                 # Días Quiebre (col 9)
                 ws_main.cell(row=row, column=9, value=int(dias_q))
                 # Últs (col 10, 11)
-                ws_main.cell(row=row, column=10, value=str(u_comp))
-                ws_main.cell(row=row, column=11, value=str(u_vent))
+                u_comp_str = u_comp.strftime("%Y-%m-%d") if u_comp and hasattr(u_comp, 'strftime') else (u_comp if u_comp else "N/A")
+                u_vent_str = u_vent.strftime("%Y-%m-%d") if u_vent and hasattr(u_vent, 'strftime') else (u_vent if u_vent else "N/A")
+                ws_main.cell(row=row, column=10, value=str(u_comp_str))
+                ws_main.cell(row=row, column=11, value=str(u_vent_str))
 
                 # Sumar por grupos alineados con TRA
                 codigo_s = str(codigo).strip()

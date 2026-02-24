@@ -30,7 +30,4 @@ pal/core/__pycache__
 pal/infrastructure/__pycache__
 pal/__pycache__
 posmigra/nexus-example
-
-
-app.py
 pal/theme_config.json

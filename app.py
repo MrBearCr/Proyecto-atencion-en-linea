@@ -43,7 +43,7 @@ from pal.core.config_manager import ConfigManager
 CONFIG_FILE = 'db_config.ini'
 LICENSE_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTdAdOg6pI7tOF-9UdFDzw0P5aSpNRc-jGIYHwOHmXb7qqOtag9QTYAi4JU0U2VoIZLd_TjvK_7cxX9/pub?output=csv"
 LICENSE_CLIENT_NAME = "PALPY"
-APP_VERSION = "1.5.7" # Versión actual de la aplicación
+APP_VERSION = "1.6.4" # Versión actual de la aplicación
 UPDATE_URL_DEFAULT = "https://raw.githubusercontent.com/MrBearCr/nexus/main/updates"  # URL base por defecto para actualizaciones (formato raw)
 
 def load_update_url():
@@ -1329,23 +1329,27 @@ class DatabaseApp:
             )
 
             # GUARDAR PERSISTENCIA (Actuar como Nodo Maestro) - En hilo separado para evitar freeze
-            def _bg_save_persistence():
-                try:
-                    from pal.services.tra import save_rotation_persistence
-                    user_nodo = self.current_user['username'] if self.current_user else "SISTEMA"
-                    dias = (self.tra_fecha_fin - self.tra_fecha_inicio).days or 365
-                    
-                    # Normalizar sede para persistencia (00/% -> ICH)
-                    sede_save = self.tra_sede_codigo
-                    if sede_save in ('00', '%', 'ALL'):
-                        sede_save = 'ICH'
+            # IMPORTANTE: Si es reporte masivo, NO guardar en la base de datos (evita inflar tabla con ventas 0)
+            if not getattr(self, 'tra_include_zero_sales', False):
+                def _bg_save_persistence():
+                    try:
+                        from pal.services.tra import save_rotation_persistence
+                        user_nodo = self.current_user['username'] if self.current_user else "SISTEMA"
+                        dias = (self.tra_fecha_fin - self.tra_fecha_inicio).days or 365
                         
-                    save_rotation_persistence(self.db_manager, self.cached_ventas_tra, sede_save, dias, user_nodo)
-                except Exception as e:
-                    self.log(f"Error guardando persistencia RI: {e}", "DEBUG")
-            
-            import threading
-            threading.Thread(target=_bg_save_persistence, daemon=True, name="RI_Persistence_Fast").start()
+                        # Normalizar sede para persistencia (00/% -> ICH)
+                        sede_save = self.tra_sede_codigo
+                        if sede_save in ('00', '%', 'ALL'):
+                            sede_save = 'ICH'
+                            
+                        save_rotation_persistence(self.db_manager, self.cached_ventas_tra, sede_save, dias, user_nodo)
+                    except Exception as e:
+                        self.log(f"Error guardando persistencia RI: {e}", "DEBUG")
+                
+                import threading
+                threading.Thread(target=_bg_save_persistence, daemon=True, name="RI_Persistence_Fast").start()
+            else:
+                self.log("ℹ️ RI: Persistencia omitida por Reporte Masivo (Ventas 0)", "DEBUG")
             
             # Aplicar filtros finales
             self.root.after(0, self._finalize_tra_loading)
@@ -9413,26 +9417,30 @@ class DatabaseApp:
                     self.log(f"Carga paralela de ventas TRA completada: {total} registros | Neto total escaneado: {neto:.2f}", "SUCCESS")
                     
                     # GUARDAR PERSISTENCIA (Actuar como Nodo Maestro) - En hilo separado para evitar freeze
-                    def _bg_save_persistence_parallel():
-                        try:
-                            from pal.services.tra import save_rotation_persistence
-                            user_nodo = self.current_user['username'] if self.current_user else "SISTEMA"
-                            # Obtener fechas del objeto si están disponibles
-                            f_inicio = getattr(self, 'tra_fecha_inicio', datetime.now())
-                            f_fin = getattr(self, 'tra_fecha_fin', datetime.now())
-                            dias = (f_fin - f_inicio).days or 365
-                            
-                            # Normalizar sede para persistencia (00/% -> ICH)
-                            sede_save = self.tra_sede_codigo
-                            if sede_save in ('00', '%', 'ALL'):
-                                sede_save = 'ICH'
+                    # IMPORTANTE: Si es reporte masivo, NO guardar en la base de datos (evita inflar tabla con ventas 0)
+                    if not getattr(self, 'tra_include_zero_sales', False):
+                        def _bg_save_persistence_parallel():
+                            try:
+                                from pal.services.tra import save_rotation_persistence
+                                user_nodo = self.current_user['username'] if self.current_user else "SISTEMA"
+                                # Obtener fechas del objeto si están disponibles
+                                f_inicio = getattr(self, 'tra_fecha_inicio', datetime.now())
+                                f_fin = getattr(self, 'tra_fecha_fin', datetime.now())
+                                dias = (f_fin - f_inicio).days or 365
                                 
-                            save_rotation_persistence(self.db_manager, self.cached_ventas_tra, sede_save, dias, user_nodo)
-                        except Exception as e:
-                            self.log(f"Error guardando persistencia RI: {e}", "DEBUG")
-                    
-                    import threading
-                    threading.Thread(target=_bg_save_persistence_parallel, daemon=True, name="RI_Persistence_Parallel").start()
+                                # Normalizar sede para persistencia (00/% -> ICH)
+                                sede_save = self.tra_sede_codigo
+                                if sede_save in ('00', '%', 'ALL'):
+                                    sede_save = 'ICH'
+                                    
+                                save_rotation_persistence(self.db_manager, self.cached_ventas_tra, sede_save, dias, user_nodo)
+                            except Exception as e:
+                                self.log(f"Error guardando persistencia RI: {e}", "DEBUG")
+                        
+                        import threading
+                        threading.Thread(target=_bg_save_persistence_parallel, daemon=True, name="RI_Persistence_Parallel").start()
+                    else:
+                        self.log("ℹ️ RI: Persistencia omitida por Reporte Masivo (Ventas 0)", "DEBUG")
 
                     try:
                         self.api_status.config(text="API: Lista", foreground="green")

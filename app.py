@@ -5381,7 +5381,7 @@ class DatabaseApp:
             
             # Si entra a Quiebre de Stock, actualizar automáticamente
             if "Quiebre de Stock" in tab_text:
-                self.actualizar_alertas_stock(force_refresh=True)
+                self.actualizar_alertas_stock(force_refresh=False)
         except Exception as e:
             self.log(f"Error en cambio de pestaña: {e}", "DEBUG")
 
@@ -9233,7 +9233,8 @@ class DatabaseApp:
             
             # Verificar si existe persistencia y si está fresca (TTL de 1 hora)
             # Nota: get_persisted_rotation devuelve el objeto con el timestamp para verificar frescura
-            persisted_info = get_persisted_rotation(self.db_manager, sede=sede_p, dias_rango=dias_context)
+            # IMPORTANTE: Si es reporte masivo, NO usar persistencia (solo tiene rotación)
+            persisted_info = get_persisted_rotation(self.db_manager, sede=sede_p, dias_rango=dias_context) if not getattr(self, 'tra_include_zero_sales', False) else None
             if persisted_info:
                 self.log(f"🚀 TRA: Usando datos de rotación persistidos para '{sede_p}' (Rango: {dias_context}d)", "SUCCESS")
                 datos = self.db_manager.obtener_ventas_persisted_tra(sede=sede_p, dias_rango=dias_context)

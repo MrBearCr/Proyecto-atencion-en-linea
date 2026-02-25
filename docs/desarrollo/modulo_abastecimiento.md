@@ -129,7 +129,14 @@ Sistema de transferencia de mercancía entre sedes/sucursales desde un Centro de
 
 ### Validación de Órdenes de Compra (ODC)
 
-- [ ] **Verificar ODC activas**: Al sugerir transferencia, buscar si el producto tiene ODC vigente hacia la sucursal destino
+- [ ] **Verificar ODC activas**: Al sugerir transferencia, buscar si el producto tiene ODC vigente hacia la sucursal destino.
+  - **Estructura de Datos ODC**:
+    - `MA_ODC`: Cabeceras de ODC. Campos clave: `c_DOCUMENTO` (PK), `d_fecha`, `c_status`, `c_CODLOCALIDAD`.
+    - `TR_ODC`: Detalle de productos. Campos: `c_DOCUMENTO` (FK), `c_CODARTICULO`, `n_cantidad` (cantidad ordenada).
+  - **Lógica Propuesta**:
+    1. Seleccionar todas las ODC con `c_status = 'DPE'` (pendientes).
+    2. Para cada una, obtener sus productos desde `TR_ODC` mediante `c_DOCUMENTO`.
+    3. Enriquecer cada producto obtenido (descripciones, etc.) usando la lógica de `database.py`.
 - [ ] **Si existe ODC activa**:
   - [ ] Mostrar advertencia clara: "⚠️ ADVERTENCIA: Ya existe una ODC activa para este producto"
   - [ ] La sugerencia cambia a "No transferir" o similar
@@ -140,7 +147,7 @@ Sistema de transferencia de mercancía entre sedes/sucursales desde un Centro de
     - [ ] Crear solicitud de autorización
   - [ ] Si usuario SÍ tiene permiso `abastecimiento.autorizar`:
     - [ ] Mostrar botón "Forzar Transferencia"
-- [ ] **Integración**: Consumir datos del módulo de compras existente (tabla ODC)
+- [ ] **Integración**: Consumir datos del módulo de compras existente (tablas `MA_ODC` y `TR_ODC`).
 
 ### Validación de Productos "ROJOS" (Inviables para Traslado)
 
@@ -227,8 +234,9 @@ Sistema de transferencia de mercancía entre sedes/sucursales desde un Centro de
 - [ ] **Consultas existentes**: Usar métodos como `obtener_ventas_persisted_tra()` o `obtener_ventas_por_producto_chunk()`
 
 ### 5.3 Órdenes de Compra
-- [ ] Integrar con módulo de compras (ODC)
-- [ ] Verificar estado ODC (activa/cerrada/cancelada)
+- [ ] Integrar con módulo de compras (ODC) usando tablas `MA_ODC` y `TR_ODC`.
+- [ ] Verificar estado ODC (`c_status = 'DPE'`).
+- [ ] Usar `database.py`: `obtener_tipo_articulo(codigo)` para obtener el tipo del artículo durante el enriquecimiento de datos.
 
 ### 5.4 Notifications
 - [ ] Notificar a supervisor cuando haya solicitudes pendientes de autorización

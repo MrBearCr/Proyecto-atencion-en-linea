@@ -55,13 +55,23 @@ def setup_mbrp_tab(app):
         try:
             sel = (app.mbrp_sede_var.get() or '')
             if sel.startswith('00'):
-                if hasattr(app, 'notification_manager'):
-                    app.notification_manager.show_banner(
-                        "Filtro ICH seleccionado (MBRP): consulta global; puede tardar más en procesar.",
-                        bg="#FFB81C",
-                        fg="black",
-                        duration=5500,
-                    )
+                import tkinter as _tk
+                banner = _tk.Toplevel(app.root)
+                banner.overrideredirect(True)
+                banner.attributes("-topmost", True)
+                banner.configure(bg="#FFB81C")
+                app.root.update_idletasks()
+                rx, ry, rw = app.root.winfo_x(), app.root.winfo_y(), app.root.winfo_width()
+                bw = 420
+                banner.geometry(f"{bw}x60+{rx + (rw - bw)//2}+{ry + 10}")
+                _tk.Label(
+                    banner,
+                    text="⚠️  Filtro ICH (MBRP) — Consulta global seleccionada.\nPuede tardar más en procesar.",
+                    bg="#FFB81C", fg="black",
+                    font=("Segoe UI", 9, "bold"),
+                    justify="center", pady=8
+                ).pack(expand=True, fill=_tk.BOTH)
+                banner.after(4500, banner.destroy)
         except Exception:
             pass
     app.mbrp_sede_combo.bind('<<ComboboxSelected>>', _on_mbrp_sede_selected)

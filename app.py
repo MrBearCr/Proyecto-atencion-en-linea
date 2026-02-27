@@ -25,7 +25,7 @@ from pal.core.auth import AuthManager
 from pal.core.credentials import SecureCredentialsManager
 from pal.core.errors import ErrorCode
 from pal.core.license import LicenseChecker, LicenseError
-from pal.core.log import set_component_level
+from pal.core.log import set_component_level, set_log_callback
 from pal.core.session import SessionManager
 from pal.core.updater import UpdateManager
 UPDATE_MANAGER_AVAILABLE = True
@@ -109,6 +109,7 @@ DB_MODULE_TO_FLAG = {
     'CALENDARIO': 'calendario',
     'ADMIN': 'admin',
     'CLIENTES': 'clientes',
+    'LOGISTICA': 'logistica',
 }
 FLAG_TO_DB_MODULE = {v: k for k, v in DB_MODULE_TO_FLAG.items()}
 
@@ -410,6 +411,8 @@ class DatabaseApp:
                 set_component_level("STOCK", "DEBUG" if self.stock_debug else "WARNING")
                 set_component_level("MBRP", "DEBUG" if self.mbrp_debug else "WARNING")
                 set_component_level("DB", "DEBUG" if self.debug_flags.get('db', False) else "INFO")
+                # Redirigir todos los logs de servicios (pal.core.log) a la UI/consola de la app
+                set_log_callback(self.log)
             except Exception:
                 pass
             try:
@@ -4076,6 +4079,14 @@ class DatabaseApp:
             self.main_notebook.add(self.stock_tab, text="⚠️ Quiebre de Stock")
             from pal.ui.tabs.stock import setup_stock_tab as setup_stock_tab_ui
             setup_stock_tab_ui(self)
+
+        # Pestaña de Logística (Abastecimiento)
+        if self.modules_enabled.get("logistica", False):
+            self.logistica_tab = ttk.Frame(self.main_notebook)
+            self.main_notebook.add(self.logistica_tab, text="🚚 Logística")
+            from pal.ui.tabs.abastecimiento import AbastecimientoTab
+            self.abastecimiento_view = AbastecimientoTab(self.logistica_tab, self)
+            self.abastecimiento_view.pack(expand=True, fill=tk.BOTH)
         
         # Pestaña de Administración (Configuraciones Globales)
         if self.modules_enabled.get("admin", False):
@@ -5966,7 +5977,8 @@ class DatabaseApp:
                 try:
                     if hasattr(self, 'notification_manager'):
                         self.notification_manager.show_banner(
-                            "Filtro ICH (RI): consulta global de todas las sedes; puede tardar más en procesar.",
+                            title="Nota: Filtro ICH (RI)",
+                            message="Consulta global de todas las sedes seleccionada; puede tardar más en procesar.",
                             bg="#FFB81C",
                             fg="black",
                             duration=5500,
@@ -8568,6 +8580,8 @@ class DatabaseApp:
                         missing = self.db_manager.check_security_schema()
                         if missing:
                             self.db_manager.ensure_security_tables()
+                        # Asegurar tablas y permisos de Logística
+                        self.db_manager.ensure_logistica_tables()
                     except Exception as e:
                         self.log(f"Nota: {e}", "INFO")
                     
@@ -8588,6 +8602,10 @@ class DatabaseApp:
                     
                     self.log(f"Módulos disponibles para usuario {self.current_user['username']}: {', '.join(db_mods) or 'ninguno'}", "INFO")
                     
+                    # 4. Verificar autorizaciones pendientes de logística
+                    if "logistica" in self.modules_enabled and self.modules_enabled["logistica"]:
+                        self.root.after(2000, self._check_pending_authorizations)
+
                     # Recrear workspace con módulos actualizados
                     try:
                         # Limpiar dashboard_tab específicamente antes de destruir
@@ -8680,6 +8698,33 @@ class DatabaseApp:
         except Exception as e:
             self.log(f"Error en login: {e}", "ERROR")
             return False, f"Error: {str(e)[:50]}"
+    
+    def _check_pending_authorizations(self):
+        """Verifica si hay autorizaciones de logística pendientes y notifica al usuario."""
+        try:
+            if not self.db_manager or not self.current_user:
+                return
+
+            # Solo notificar a usuarios con permiso de autorizar
+            if not self.permissions.tiene_permiso(self.current_user['id'], 'LOGISTICA', 'autorizar'):
+                return
+
+            # Contar pendientes
+            sql = "SELECT COUNT(*) FROM pal_sugerencias_transferencia WHERE requiere_autorizacion = 1 AND fue_autorizada = 0 AND estado = 'pendiente'"
+            res = self.db_manager.fetch_data(sql)
+            count = res[0][0] if res and res[0] else 0
+
+            if count > 0:
+                self.log(f"📢 Hay {count} autorizaciones de abastecimiento pendientes", "WARNING")
+                if hasattr(self, 'notification_manager'):
+                    self.notification_manager.show_banner(
+                        title="Autorizaciones Pendientes",
+                        message=f"Atención: Hay {count} transferencias pendientes de autorización en Logística.",
+                        bg="#f39c12", # Orange
+                        duration=10000
+                    )
+        except Exception as e:
+            self.log(f"Error verificando autorizaciones: {e}", "ERROR")
     
     def _prompt_change_admin_password(self):
         """
@@ -10328,7 +10373,8 @@ class DatabaseApp:
                 try:
                     if hasattr(self, 'notification_manager'):
                         self.notification_manager.show_banner(
-                            "Filtro ICH (MBRP): consulta global de todas las sedes; puede tardar más en procesar.",
+                            title="Nota: Filtro ICH (MBRP)",
+                            message="Consulta global de todas las sedes seleccionada; puede tardar más en procesar.",
                             bg="#FFB81C",
                             fg="black",
                             duration=5500,

@@ -496,7 +496,7 @@ class NotificationManager:
     def show_banner(
         self,
         title: str,
-        message: str,
+        message: Optional[str] = None,
         priority: NotificationPriority = NotificationPriority.WARNING,
         module: str = "SISTEMA",
         modulo_ruta: Optional[str] = None,
@@ -510,6 +510,11 @@ class NotificationManager:
         Compatibilidad con el método show_banner() usado en tra.py y mbrp.py.
         Internamente crea una notificación con la prioridad indicada.
         """
+        # Si message es None, significa que se llamó con un solo argumento (llamada legacy)
+        if message is None:
+            message = title
+            title = "Aviso"
+
         return self.add_notification(
             title=title,
             message=message,

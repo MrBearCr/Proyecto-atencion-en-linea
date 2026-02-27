@@ -2708,3 +2708,82 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
     except Exception as e:
         logger.error(f"Error en exportación MBRP Excel: {e}")
         raise
+
+def export_abastecimiento_excel(filename: str, sugerencias: List[Dict[str, Any]], sede_destino: str) -> int:
+    """Exporta las sugerencias de abastecimiento a un archivo Excel profesional."""
+    if not EXCEL_AVAILABLE:
+        logger.error("openpyxl no está disponible. No se puede exportar a Excel.")
+        raise ImportError("openpyxl es requerido para exportación Excel")
+        
+    from datetime import datetime
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, Alignment, PatternFill
+        from openpyxl.worksheet.table import Table, TableStyleInfo
+        
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Sugerencias"
+        
+        # Estilos
+        header_font = Font(bold=True, color="FFFFFF")
+        header_fill = PatternFill(start_color="2F5597", end_color="2F5597", fill_type="solid")
+        center_align = Alignment(horizontal="center")
+        
+        # Título y metadata
+        ws.cell(row=1, column=1, value=f"REPORTE DE ABASTECIMIENTO - SEDE DESTINO: {sede_destino}")
+        ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=5)
+        ws.cell(row=1, column=1).font = Font(size=14, bold=True)
+        
+        ws.cell(row=2, column=1, value=f"Fecha de generación: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+        ws.cell(row=3, column=1, value=f"Total de sugerencias: {len(sugerencias)}")
+        
+        # Encabezados de tabla
+        headers = ["CÓDIGO PRODUCTO", "SEDE ORIGEN", "CANT. SUGERIDA", "STOCK DESTINO", "REQ. AUTORIZACIÓN"]
+        for col, text in enumerate(headers, 1):
+            cell = ws.cell(row=5, column=col, value=text)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = center_align
+            
+        # Datos
+        for i, s in enumerate(sugerencias, 6):
+            ws.cell(row=i, column=1, value=clean_for_excel(s.get("producto_codigo", "")))
+            ws.cell(row=i, column=2, value=clean_for_excel(s.get("sucursal_origen_sugerida", "")))
+            
+            c_cant = ws.cell(row=i, column=3, value=s.get("cantidad_sugerida", 0))
+            c_cant.alignment = center_align
+            
+            c_stock = ws.cell(row=i, column=4, value=s.get("stock_actual", 0))
+            c_stock.alignment = center_align
+            
+            aut_text = "SÍ" if s.get("requiere_autorizacion") else "NO"
+            c_aut = ws.cell(row=i, column=5, value=aut_text)
+            c_aut.alignment = center_align
+            
+            # Formato condicional simple: Rojo si requiere autorización
+            if s.get("requiere_autorizacion"):
+                c_aut.font = Font(color="FF0000", bold=True)
+                
+        # Ajustar anchos de columna
+        ws.column_dimensions['A'].width = 20
+        ws.column_dimensions['B'].width = 15
+        ws.column_dimensions['C'].width = 15
+        ws.column_dimensions['D'].width = 15
+        ws.column_dimensions['E'].width = 20
+        
+        # Tabla de Excel
+        if len(sugerencias) > 0:
+            tab = Table(displayName="SugerenciasTable", ref=f"A5:E{5+len(sugerencias)}")
+            style = TableStyleInfo(name="TableStyleMedium9", showFirstColumn=False,
+                                  showLastColumn=False, showRowStripes=True, showColumnStripes=False)
+            tab.tableStyleInfo = style
+            ws.add_table(tab)
+            
+        wb.save(filename)
+        logger.info(f"Reporte de abastecimiento guardado en {filename}")
+        return len(sugerencias)
+        
+    except Exception as e:
+        logger.error(f"Error exportando abastecimiento a Excel: {e}")
+        raise

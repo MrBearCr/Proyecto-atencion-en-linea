@@ -160,8 +160,12 @@ class DatabaseManager:
                     missing = self.check_security_schema()
                     if missing:
                         self._log(f"Security schema missing tables: {', '.join(missing)}", "WARNING")
+                    
+                    # Auto-create logistics tables if security schema is mostly OK
+                    # or at least try to ensure they exist for the new module
+                    self.ensure_logistica_tables()
                 except Exception as se:
-                    self._log(f"Security schema check failed: {se}", "ERROR")
+                    self._log(f"Schema check failed: {se}", "ERROR")
                 return True
         except pyodbc.Error as e:
             error_msg = f"{ErrorCode.DB_CONNECTION_FAILED}: {str(e)}"
@@ -341,7 +345,7 @@ class DatabaseManager:
                     codigo NVARCHAR(50) NOT NULL UNIQUE,
                     modulo NVARCHAR(50) NOT NULL,
                     descripcion NVARCHAR(MAX) NULL,
-                    CONSTRAINT chk_perm_modulo CHECK (modulo IN (N'TRA', N'MBRP', N'STOCK', N'MENSAJES', N'ESTADISTICAS', N'CALENDARIO', N'ADMIN'))
+                    CONSTRAINT chk_perm_modulo CHECK (modulo IN (N'TRA', N'MBRP', N'STOCK', N'MENSAJES', N'ESTADISTICAS', N'CALENDARIO', N'ADMIN', N'LOGISTICA'))
                 );
             END;
 
@@ -396,7 +400,7 @@ class DatabaseManager:
                     CONSTRAINT pk_pal_usuarios_modulos PRIMARY KEY (usuario_id, modulo),
                     CONSTRAINT fk_pal_um_usuario FOREIGN KEY (usuario_id) REFERENCES pal_usuarios(id) ON DELETE CASCADE,
                     CONSTRAINT fk_pal_um_asignado_por FOREIGN KEY (asignado_por) REFERENCES pal_usuarios(id),
-                    CONSTRAINT chk_pal_um_modulo CHECK (modulo IN (N'TRA', N'MBRP', N'STOCK', N'MENSAJES', N'ESTADISTICAS', N'CALENDARIO', N'ADMIN'))
+                    CONSTRAINT chk_pal_um_modulo CHECK (modulo IN (N'TRA', N'MBRP', N'STOCK', N'MENSAJES', N'ESTADISTICAS', N'CALENDARIO', N'ADMIN', N'LOGISTICA'))
                 );
             END;
 
@@ -460,6 +464,10 @@ class DatabaseManager:
                 INSERT INTO pal_roles (nombre, descripcion, es_sistema) VALUES (N'Mensajería', N'Envío y gestión de mensajes', 1);
             IF NOT EXISTS (SELECT 1 FROM pal_roles WHERE nombre = N'Consulta')
                 INSERT INTO pal_roles (nombre, descripcion, es_sistema) VALUES (N'Consulta', N'Solo lectura', 1);
+            IF NOT EXISTS (SELECT 1 FROM pal_roles WHERE nombre = N'Gerente Logistica')
+                INSERT INTO pal_roles (nombre, descripcion, es_sistema) VALUES (N'Gerente Logistica', N'Autorización y gestión total de logística', 1);
+            IF NOT EXISTS (SELECT 1 FROM pal_roles WHERE nombre = N'Subgerente Logistica')
+                INSERT INTO pal_roles (nombre, descripcion, es_sistema) VALUES (N'Subgerente Logistica', N'Autorización y gestión de logística', 1);
 
             -- Seed permissions
             DECLARE @perm TABLE(codigo NVARCHAR(50), modulo NVARCHAR(50), descripcion NVARCHAR(MAX));
@@ -493,7 +501,13 @@ class DatabaseManager:
             ,(N'admin.roles', N'ADMIN', N'Gestionar roles')
             ,(N'admin.permisos', N'ADMIN', N'Gestionar permisos')
             ,(N'admin.sistema', N'ADMIN', N'Configuración general')
-            ,(N'admin.auditoria', N'ADMIN', N'Ver logs de auditoría');
+            ,(N'admin.auditoria', N'ADMIN', N'Ver logs de auditoría')
+            ,(N'logistica.ver', N'LOGISTICA', N'Acceso al módulo de logística')
+            ,(N'abastecimiento.ver', N'LOGISTICA', N'Ver módulo de abastecimiento')
+            ,(N'abastecimiento.generar', N'LOGISTICA', N'Generar sugerencias de transferencia')
+            ,(N'abastecimiento.autorizar', N'LOGISTICA', N'Autorizar transferencias entre sedes')
+            ,(N'abastecimiento.exportar', N'LOGISTICA', N'Exportar reportes a Excel')
+            ,(N'abastecimiento.configurar', N'LOGISTICA', N'Configurar parámetros de abastecimiento');
 
             INSERT INTO pal_permisos (codigo, modulo, descripcion)
             SELECT p.codigo, p.modulo, p.descripcion
@@ -508,6 +522,8 @@ class DatabaseManager:
             DECLARE @rol_stock INT = (SELECT id FROM pal_roles WHERE nombre = N'Operador Stock');
             DECLARE @rol_msg INT = (SELECT id FROM pal_roles WHERE nombre = N'Mensajería');
             DECLARE @rol_consulta INT = (SELECT id FROM pal_roles WHERE nombre = N'Consulta');
+            DECLARE @rol_ger_log INT = (SELECT id FROM pal_roles WHERE nombre = N'Gerente Logistica');
+            DECLARE @rol_sub_log INT = (SELECT id FROM pal_roles WHERE nombre = N'Subgerente Logistica');
 
             DECLARE @rp TABLE(rol_id INT, perm_code NVARCHAR(50));
             INSERT INTO @rp(rol_id, perm_code)
@@ -547,6 +563,12 @@ class DatabaseManager:
                 N'tra.ver', N'mbrp.ver', N'stock.ver', N'estadisticas.ver', N'calendario.ver', N'mensajes.ver'
             );
 
+            INSERT INTO @rp(rol_id, perm_code)
+            SELECT @rol_ger_log, codigo FROM pal_permisos WHERE modulo = N'LOGISTICA';
+
+            INSERT INTO @rp(rol_id, perm_code)
+            SELECT @rol_sub_log, codigo FROM pal_permisos WHERE modulo = N'LOGISTICA';
+
             INSERT INTO pal_roles_permisos (rol_id, permiso_id)
             SELECT r.rol_id, p.id
             FROM @rp r
@@ -576,7 +598,7 @@ class DatabaseManager:
 
             DECLARE @mods TABLE(modulo NVARCHAR(50));
             INSERT INTO @mods(modulo)
-            VALUES (N'TRA'),(N'MBRP'),(N'STOCK'),(N'MENSAJES'),(N'ESTADISTICAS'),(N'CALENDARIO'),(N'ADMIN');
+            VALUES (N'TRA'),(N'MBRP'),(N'STOCK'),(N'MENSAJES'),(N'ESTADISTICAS'),(N'CALENDARIO'),(N'ADMIN'),(N'LOGISTICA');
 
             INSERT INTO pal_usuarios_modulos (usuario_id, modulo, habilitado, asignado_por)
             SELECT @admin_user_id, m.modulo, 1, @admin_user_id
@@ -584,13 +606,172 @@ class DatabaseManager:
             LEFT JOIN pal_usuarios_modulos um ON um.usuario_id = @admin_user_id AND um.modulo = m.modulo
             WHERE um.usuario_id IS NULL;
             """
+            if not self.conn:
+                return
             cursor = self.conn.cursor()
             cursor.execute(sql)
             self.conn.commit()
             cursor.close()
         except Exception as e:
             raise
-        
+
+    def ensure_logistica_tables(self):
+        """Crea las tablas pal_ para el módulo de Logística / Abastecimiento si no existen."""
+        try:
+            sql = """
+            -- Parámetros de abastecimiento (días de stock por categoría)
+            IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'pal_parametros_abastecimiento' AND type = 'U')
+            BEGIN
+                CREATE TABLE pal_parametros_abastecimiento (
+                    id INT IDENTITY(1,1) PRIMARY KEY,
+                    categoria_id NVARCHAR(50) NULL, -- Código de grupo en Profit (NULL = Global)
+                    dias_stock INT DEFAULT 7,
+                    umbral_quiebre DECIMAL(10,2) DEFAULT 50, -- Cantidad mínima física para considerar quiebre
+                    umbral_autorizacion DECIMAL(10,2) DEFAULT 10,
+                    dias_analisis_ventas INT DEFAULT 365, -- Rango de días de rotación a usar (30, 90, 365)
+                    fecha_actualizacion DATETIME DEFAULT GETDATE()
+                );
+            END;
+            ELSE
+            BEGIN
+                IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[pal_parametros_abastecimiento]') AND name = 'umbral_autorizacion')
+                BEGIN
+                    ALTER TABLE [dbo].[pal_parametros_abastecimiento] ADD [umbral_autorizacion] DECIMAL(10,2) DEFAULT 10;
+                END
+                IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[pal_parametros_abastecimiento]') AND name = 'umbral_quiebre')
+                BEGIN
+                    ALTER TABLE [dbo].[pal_parametros_abastecimiento] ADD [umbral_quiebre] DECIMAL(10,2) DEFAULT 50;
+                END
+                IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[pal_parametros_abastecimiento]') AND name = 'dias_analisis_ventas')
+                BEGIN
+                    ALTER TABLE [dbo].[pal_parametros_abastecimiento] ADD [dias_analisis_ventas] INT DEFAULT 365;
+                END
+            END
+
+            -- Compromisos de stock (ya comprometido para transferencia)
+            IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'pal_compromisos_stock' AND type = 'U')
+            BEGIN
+                CREATE TABLE pal_compromisos_stock (
+                    id INT IDENTITY(1,1) PRIMARY KEY,
+                    producto_id NVARCHAR(15), -- Código de producto
+                    sucursal_origen NVARCHAR(50),
+                    sucursal_destino NVARCHAR(50),
+                    cantidad DECIMAL(10,2),
+                    fecha_compromiso DATETIME DEFAULT GETDATE(),
+                    estado NVARCHAR(20) DEFAULT 'pendiente' -- pendiente, confirmado, cancelado
+                );
+            END;
+
+            -- Auditoría de autorizaciones
+            IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'pal_auditoria_autorizaciones' AND type = 'U')
+            BEGIN
+                CREATE TABLE pal_auditoria_autorizaciones (
+                    id INT IDENTITY(1,1) PRIMARY KEY,
+                    usuario_id INT,
+                    producto_codigo NVARCHAR(15),
+                    sucursal_origen NVARCHAR(50),
+                    sucursal_destino NVARCHAR(50),
+                    cantidad_original DECIMAL(10,2),
+                    cantidad_autorizada DECIMAL(10,2),
+                    motivo TEXT,
+                    fecha_autorizacion DATETIME DEFAULT GETDATE()
+                );
+            END;
+
+            -- Sugerencias de transferencia
+            IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'pal_sugerencias_transferencia' AND type = 'U')
+            BEGIN
+                CREATE TABLE pal_sugerencias_transferencia (
+                    id INT IDENTITY(1,1) PRIMARY KEY,
+                    producto_codigo NVARCHAR(15),
+                    sucursal_destino NVARCHAR(50),
+                    sucursal_origen_sugerida NVARCHAR(50),
+                    cantidad_sugerida DECIMAL(10,2),
+                    cantidad_disponible DECIMAL(10,2),
+                    stock_actual DECIMAL(10,2),
+                    dias_stock_actual INT,
+                    dias_stock_necesario INT,
+                    tiene_odc_activa BIT DEFAULT 0,
+                    es_producto_rojo BIT DEFAULT 0,
+                    tipo_solicitud NVARCHAR(20) DEFAULT 'normal', -- normal, odc, producto_rojo
+                    requiere_autorizacion BIT DEFAULT 0,
+                    fue_autorizada BIT DEFAULT 0,
+                    usuario_autoriza INT,
+                    fecha_autorizacion DATETIME,
+                    fecha_generacion DATETIME DEFAULT GETDATE(),
+                    estado NVARCHAR(20) DEFAULT 'pendiente' -- pendiente, aprobada, rechazada, exportada
+                );
+            END;
+            ELSE
+            BEGIN
+                IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[pal_sugerencias_transferencia]') AND name = 'stock_actual')
+                BEGIN
+                    ALTER TABLE [dbo].[pal_sugerencias_transferencia] ADD [stock_actual] DECIMAL(10,2) NULL;
+                END
+            END
+
+            -- Productos no trasladables (Lista ROJA) - Por sede destino
+            IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'pal_productos_no_trasladables' AND type = 'U')
+            BEGIN
+                CREATE TABLE pal_productos_no_trasladables (
+                    id INT IDENTITY(1,1) PRIMARY KEY,
+                    producto_codigo NVARCHAR(15) NOT NULL,
+                    sede_destino NVARCHAR(50) NULL, -- NULL = todas las sedes destino
+                    motivo NVARCHAR(255) NULL,
+                    fecha_registro DATETIME DEFAULT GETDATE(),
+                    usuario_id INT NULL,
+                    activo BIT DEFAULT 1
+                );
+            END;
+            ELSE
+            BEGIN
+                -- Agregar columnas faltantes si la tabla ya existía
+                IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[pal_productos_no_trasladables]') AND name = 'fecha_registro')
+                BEGIN
+                    ALTER TABLE [dbo].[pal_productos_no_trasladables] ADD [fecha_registro] [datetime] NULL DEFAULT (getdate())
+                END
+                
+                IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[pal_productos_no_trasladables]') AND name = 'usuario_id')
+                BEGIN
+                    ALTER TABLE [dbo].[pal_productos_no_trasladables] ADD [usuario_id] [int] NULL
+                END
+
+                IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[pal_productos_no_trasladables]') AND name = 'activo')
+                BEGIN
+                    ALTER TABLE [dbo].[pal_productos_no_trasladables] ADD [activo] [bit] NULL DEFAULT ((1))
+                END
+            END
+
+            -- Índices
+            IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'idx_pal_compromisos_producto_sede')
+                CREATE INDEX idx_pal_compromisos_producto_sede ON pal_compromisos_stock(producto_id, sucursal_destino);
+            
+            IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'idx_pal_sugerencias_estado')
+                CREATE INDEX idx_pal_sugerencias_estado ON pal_sugerencias_transferencia(estado, fecha_generacion);
+
+            -- Asegurar permisos base para Logística
+            IF NOT EXISTS (SELECT * FROM pal_permisos WHERE codigo = 'abastecimiento.ver')
+                INSERT INTO pal_permisos (codigo, modulo, descripcion) VALUES ('abastecimiento.ver', 'LOGISTICA', 'Ver módulo de abastecimiento');
+            IF NOT EXISTS (SELECT * FROM pal_permisos WHERE codigo = 'abastecimiento.generar')
+                INSERT INTO pal_permisos (codigo, modulo, descripcion) VALUES ('abastecimiento.generar', 'LOGISTICA', 'Generar sugerencias de transferencia');
+            IF NOT EXISTS (SELECT * FROM pal_permisos WHERE codigo = 'abastecimiento.autorizar')
+                INSERT INTO pal_permisos (codigo, modulo, descripcion) VALUES ('abastecimiento.autorizar', 'LOGISTICA', 'Autorizar transferencias');
+
+            -- Asegurar roles para Logística
+            IF NOT EXISTS (SELECT * FROM pal_roles WHERE nombre = 'Gerente Logistica')
+                INSERT INTO pal_roles (nombre, descripcion) VALUES ('Gerente Logistica', 'Gestión completa de abastecimiento y transferencias');
+            IF NOT EXISTS (SELECT * FROM pal_roles WHERE nombre = 'Subgerente Logistica')
+                INSERT INTO pal_roles (nombre, descripcion) VALUES ('Subgerente Logistica', 'Generación de sugerencias y visualización');
+            """
+            if not self.conn:
+                return
+            cursor = self.conn.cursor()
+            cursor.execute(sql)
+            self.conn.commit()
+            cursor.close()
+        except Exception as e:
+            self._log(f"Error creando tablas de logística: {e}", "ERROR")
+
     def obtener_alertas_stock(self, limit=None):
         max_retries = 3
         
@@ -1337,53 +1518,144 @@ class DatabaseManager:
     
     def obtener_fechas_criticas_tra(self, codigos, sede_codigo):
         """
-        Obtiene Update_date, última venta y TOTAL VENTAS desde UC hasta hoy.
-        
-        Returns:
-            dict: {codigo: (update_date, last_ven_date, total_sales_since_uc)}
+        Obtiene fecha de actualización, última venta y suma de ventas desde la actualización
+        para un conjunto de productos en una sede.
         """
         if not codigos:
             return {}
             
+        fechas = {}
+        chunk_size = 1000
+        
         try:
-            placeholders = ','.join(['?'] * len(codigos))
-            
-            # Subconsulta para última venta y suma de ventas desde Update_date
-            query = f"""
-                SELECT 
-                    RTRIM(LTRIM(p.C_CODIGO)) as codigo,
-                    p.Update_date,
-                    dates.last_ven,
-                    dates.total_qty
-                FROM MA_PRODUCTOS p WITH (NOLOCK)
-                OUTER APPLY (
-                    SELECT 
-                        MAX(i.f_fecha) as last_ven,
-                        SUM(CASE WHEN i.c_Concepto = 'DEV' THEN i.n_Cantidad * -1 ELSE i.n_Cantidad END) AS total_qty
-                    FROM TR_INVENTARIO i WITH (NOLOCK)
-                    WHERE i.c_Codarticulo = p.C_CODIGO 
-                      AND (i.c_Concepto = 'VEN' OR i.c_Concepto = 'DEV')
-                      AND i.f_fecha >= p.Update_date
-                      AND (i.c_Deposito = ? OR ? IN ('00', 'ICH', 'ALL', '%'))
-                ) dates
-                WHERE p.C_CODIGO IN ({placeholders})
-            """
-            
-            params = [sede_codigo, sede_codigo] + list(codigos)
-            rows = self.fetch_data(query, params)
-            
-            fechas = {}
-            for row in rows:
-                codigo = str(row[0]).strip()
-                update_date = row[1]
-                last_ven = row[2]
-                total_qty = float(row[3] or 0)
-                fechas[codigo] = (update_date, last_ven, total_qty)
+            for i in range(0, len(codigos), chunk_size):
+                chunk = codigos[i:i + chunk_size]
+                placeholders = ','.join(['?'] * len(chunk))
                 
+                query = f"""
+                    SELECT 
+                        RTRIM(LTRIM(p.C_CODIGO)) as codigo,
+                        p.Update_date,
+                        dates.last_ven,
+                        dates.total_qty
+                    FROM MA_PRODUCTOS p WITH (NOLOCK)
+                    OUTER APPLY (
+                        SELECT 
+                            MAX(i.f_fecha) as last_ven,
+                            SUM(CASE WHEN i.c_Concepto = 'DEV' THEN i.n_Cantidad * -1 ELSE i.n_Cantidad END) AS total_qty
+                        FROM TR_INVENTARIO i WITH (NOLOCK)
+                        WHERE i.c_Codarticulo = p.C_CODIGO 
+                          AND (i.c_Concepto = 'VEN' OR i.c_Concepto = 'DEV')
+                          AND i.f_fecha >= p.Update_date
+                          AND (i.c_Deposito = ? OR ? IN ('00', 'ICH', 'ALL', '%'))
+                    ) dates
+                    WHERE p.C_CODIGO IN ({placeholders})
+                """
+                
+                params = [sede_codigo, sede_codigo] + list(chunk)
+                rows = self.fetch_data(query, params)
+                
+                for row in rows:
+                    codigo = str(row[0]).strip()
+                    fechas[codigo] = {
+                        'update_date': row[1],
+                        'last_ven': row[2],
+                        'total_sales': float(row[3] or 0)
+                    }
+                    
             return fechas
         except Exception as e:
             print(f"Error obteniendo fechas críticas TRA: {str(e)}")
+            return fechas
+
+    def obtener_fechas_liquidacion_y_ventas(self, codigos, depositos, dias_estudio=365, dias_obj=30):
+        """
+        Obtiene fecha de última liquidación, fecha de última venta y unidades vendidas
+        por períodos en cascada (dias_obj, dias_obj*2, dias_obj*4 ... dias_obj²) para un
+        conjunto de productos y depósitos. Todo en una sola consulta SQL.
+
+        Returns:
+            dict: {
+                codigo: {
+                    'ultima_liquidacion': date,
+                    'ultima_venta': date,
+                    'periodos': {30: float, 60: float, 120: float, ...}  # unidades por período
+                }
+            }
+        """
+        if not codigos or not depositos:
             return {}
+
+        # Construir ventanas en cascada: [N, 2N, 3N] donde N = dias_obj
+        # Máximo = dias_obj × 3 (sin valores hardcodeados)
+        max_dias = int(dias_obj * 3)
+        periodos = [int(dias_obj), int(dias_obj * 2), max_dias]
+
+        resultado = {}
+        chunk_size = 1000
+
+        try:
+            placeholders_deps = ','.join(['?'] * len(depositos))
+
+            # Agregate CASE WHEN expressions para el OUTER APPLY
+            cases_ven = ',\n                            '.join([
+                f"SUM(CASE WHEN i.c_Concepto = 'VEN' AND i.f_fecha >= DATEADD(day, -{p}, GETDATE()) THEN i.n_cantidad ELSE 0 END)"
+                f" - SUM(CASE WHEN i.c_Concepto = 'DEV' AND i.f_fecha >= DATEADD(day, -{p}, GETDATE()) THEN i.n_cantidad ELSE 0 END)"
+                f" as units_{p}d"
+                for p in periodos
+            ])
+            # Referencias a las columnas del OUTER APPLY en el SELECT exterior
+            select_period_cols = ',\n                        '.join([f"stats.units_{p}d" for p in periodos])
+
+            for i in range(0, len(codigos), chunk_size):
+                chunk = codigos[i:i + chunk_size]
+                placeholders_cods = ','.join(['?'] * len(chunk))
+
+                query = f"""
+                    SELECT
+                        RTRIM(LTRIM(p.C_CODIGO)) as codigo,
+                        ISNULL(liq.ultima_liquidacion, p.Update_date) as ultima_liquidacion,
+                        stats.last_sale as ultima_venta,
+                        {select_period_cols}
+                    FROM MA_PRODUCTOS p WITH (NOLOCK)
+                    OUTER APPLY (
+                        SELECT MAX(h.d_fechaCambio) as ultima_liquidacion
+                        FROM MA_HISTORICO_COSTO_PRECIO h WITH (NOLOCK)
+                        WHERE h.c_codarticulo = p.C_CODIGO
+                          AND h.c_procesoOrigen = 'REGISTRO DE FACTURA'
+                    ) liq
+                    OUTER APPLY (
+                        SELECT
+                            MAX(i.f_fecha) as last_sale,
+                            {cases_ven}
+                        FROM TR_INVENTARIO i WITH (NOLOCK)
+                        WHERE i.c_Codarticulo = p.C_CODIGO
+                            AND i.c_Deposito IN ({placeholders_deps})
+                            AND i.f_fecha >= DATEADD(day, -{max_dias}, GETDATE())
+                            AND (i.c_Concepto = 'VEN' OR i.c_Concepto = 'DEV')
+                    ) stats
+                    WHERE p.C_CODIGO IN ({placeholders_cods})
+                """
+
+                params = list(depositos) + list(chunk)
+                rows = self.fetch_data(query, params)
+
+                for row in rows:
+                    codigo = str(row[0]).strip()
+                    periodos_vals = {}
+                    # Columnas: 0=codigo, 1=ult_liq, 2=ult_venta, 3..N-1=periods, N=dummy
+                    for idx, p in enumerate(periodos):
+                        val = row[3 + idx]
+                        periodos_vals[p] = float(val or 0)
+                    resultado[codigo] = {
+                        'ultima_liquidacion': row[1],
+                        'ultima_venta': row[2],
+                        'periodos': periodos_vals
+                    }
+            return resultado
+        except Exception as e:
+            print(f"Error en obtener_fechas_liquidacion_y_ventas: {str(e)}")
+            return resultado
 
     def obtener_depositos(self):
         """Obtiene lista de depósitos desde MA_DEPOSITO

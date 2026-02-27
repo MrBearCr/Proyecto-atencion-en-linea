@@ -42,8 +42,8 @@ Sistema de transferencia de mercancía entre sedes/sucursales desde un Centro de
 ### 1.2 Configuración de Sedes (YA EXISTE)
 > La configuración de sedes ya existe en Admin > Sedes_Almacenes. Ver `pal_global_settings` (setting_key = "sedes_config").
 
-- [ ] **Agregar campo CDT**: Agregar campo `es_cdt: boolean` al JSON de configuración de sedes
-- [ ] **Actualizar UI**: Agregar checkbox "Es Centro de Distribución" en `pal/ui/tabs/sedes_config.py`
+- [ ] **Agregar campo Almacenes CDT**: Agregar campo `almacenes_cdt: Array<string>` al JSON de configuración de sedes
+- [ ] **Actualizar UI**: Agregar columna o marcas en `pal/ui/tabs/sedes_config.py` para designar depósitos como CDT.
 
 ### 1.3 Variables de Criterios de Stock
 - [ ] **Período de análisis**: Días desde última fecha de liquidación (configurable por producto/categoría)
@@ -262,8 +262,8 @@ Sistema de transferencia de mercancía entre sedes/sucursales desde un Centro de
 ```
 
 **Lo que hay que agregar**:
-- [ ] Campo `es_cdt: boolean` al JSON de cada sede
-- [ ] Actualizar UI en `pal/ui/tabs/sedes_config.py` para mostrar checkbox "Es Centro de Distribución"
+- [ ] Campo `almacenes_cdt: Array<string>` al JSON de cada sede
+- [ ] Actualizar UI en `pal/ui/tabs/sedes_config.py` para permitir marcar depósitos como "CDT" (además de "Tratable").
 
 ### 6.2 Tablas Nuevas
 

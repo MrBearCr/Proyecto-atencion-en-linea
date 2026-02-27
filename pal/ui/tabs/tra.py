@@ -57,13 +57,24 @@ def setup_tra_tab(app):
         try:
             sel = (app.sede_var.get() or '')
             if sel.startswith('00'):
-                if hasattr(app, 'notification_manager'):
-                    app.notification_manager.show_banner(
-                        "Filtro ICH seleccionado: consulta global de todas las sedes; puede tardar más en procesar.",
-                        bg="#FFB81C",
-                        fg="black",
-                        duration=5500,
-                    )
+                import tkinter as _tk
+                banner = _tk.Toplevel(app.root)
+                banner.overrideredirect(True)
+                banner.attributes("-topmost", True)
+                banner.configure(bg="#FFB81C")
+                # Posicionar sobre la ventana principal
+                app.root.update_idletasks()
+                rx, ry, rw = app.root.winfo_x(), app.root.winfo_y(), app.root.winfo_width()
+                bw = 420
+                banner.geometry(f"{bw}x60+{rx + (rw - bw)//2}+{ry + 10}")
+                _tk.Label(
+                    banner,
+                    text="⚠️  Filtro ICH (RI) — Consulta global de todas las sedes.\nPuede tardar más en procesar.",
+                    bg="#FFB81C", fg="black",
+                    font=("Segoe UI", 9, "bold"),
+                    justify="center", pady=8
+                ).pack(expand=True, fill=_tk.BOTH)
+                banner.after(4500, banner.destroy)
         except Exception:
             pass
     app.sede_combo.bind('<<ComboboxSelected>>', _on_sede_selected)

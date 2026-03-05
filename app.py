@@ -5974,17 +5974,6 @@ class DatabaseApp:
             # Mapear ICH a consulta global
             if sede == '00':
                 sede = '%'
-                try:
-                    if hasattr(self, 'notification_manager'):
-                        self.notification_manager.show_banner(
-                            title="Nota: Filtro ICH (RI)",
-                            message="Consulta global de todas las sedes seleccionada; puede tardar más en procesar.",
-                            bg="#FFB81C",
-                            fg="black",
-                            duration=5500,
-                        )
-                except Exception:
-                    pass
             
             # Si ya hay una carga en curso, evitar lanzar otra simultáneamente
             try:
@@ -10370,17 +10359,6 @@ class DatabaseApp:
             # Mapear ICH a consulta global
             if sede == '00':
                 sede = '%'
-                try:
-                    if hasattr(self, 'notification_manager'):
-                        self.notification_manager.show_banner(
-                            title="Nota: Filtro ICH (MBRP)",
-                            message="Consulta global de todas las sedes seleccionada; puede tardar más en procesar.",
-                            bg="#FFB81C",
-                            fg="black",
-                            duration=5500,
-                        )
-                except Exception:
-                    pass
             self.mbrp_sede_codigo = sede
             
             # Invalidar caché de últimas ventas al cargar nuevos datos

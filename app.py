@@ -371,6 +371,7 @@ class DatabaseApp:
          # Carga paralela de stock
             self.stock_full_loading_started = False
             self._stock_loading_in_progress = False
+            self.new_stock_break_codes = set()
 
             self.tra_page_size = 500
             self.tra_current_page = 1
@@ -600,7 +601,7 @@ class DatabaseApp:
     def actualizar_alertas_stock(self, force_refresh=False):
         """Actualiza las alertas de stock respetando permisos y filtros de rotación"""
         if not self.modules_enabled.get("stock", False):
-            if hasattr(self, 'alerts_display_label'):
+            if hasattr(self, 'alerts_display_label') and self.alerts_display_label.winfo_exists():
                 self.alerts_display_label.pack_forget()
             return
 
@@ -653,6 +654,14 @@ class DatabaseApp:
                     if quiebres:
                         quiebres_totales.extend(quiebres)
                 
+                # Detectar nuevos quiebres comparando con los códigos anteriores (si existen)
+                new_codes = {str(q['codigo']).strip() for q in quiebres_totales}
+                if hasattr(self, 'cached_alertas') and self.cached_alertas:
+                    old_codes = {str(q[0]).strip() for q in self.cached_alertas}
+                    self.new_stock_break_codes = new_codes - old_codes
+                else:
+                    self.new_stock_break_codes = set()
+
                 # Convertir a tuplas para compatibilidad
                 self.cached_alertas = [
                     (q['codigo'], q['descripcion'], q['sede'], q['unidades_perdidas'], q['dias_quiebre'], q['ultima_compra'], q['ultima_venta'])
@@ -665,7 +674,7 @@ class DatabaseApp:
                 # POPUP AUTOMÁTICO: Informar si hay quiebres críticos detectados
                 if self.cached_alertas and len(self.cached_alertas) > 0:
                     # Mostrar alerta en el display de alertas
-                    if hasattr(self, 'alerts_display_label'):
+                    if hasattr(self, 'alerts_display_label') and self.alerts_display_label.winfo_exists():
                         self.alerts_display_label.config(text="🚨 Alerta: Quiebres de stock")
                         self.alerts_display_label.pack(side=tk.LEFT, padx=10)
                         self.toggle_stock_blink()
@@ -698,7 +707,7 @@ class DatabaseApp:
                         self.log("ℹ️ Quiebres detectados pero ya fueron revisados previamente.", "DEBUG")
                 else:
                     # Ocultar alerta si no hay quiebres
-                    if hasattr(self, 'alerts_display_label'):
+                    if hasattr(self, 'alerts_display_label') and self.alerts_display_label.winfo_exists():
                         self.alerts_display_label.pack_forget()
                 
                 self.log(f"Quiebres de stock actualizados automáticamente ({len(self.cached_alertas)} encontrados)", "INFO")
@@ -3033,7 +3042,7 @@ class DatabaseApp:
 
     def aplicar_filtro_stock(self):
         """Actualiza la vista del treeview de quiebres aplicando filtros y paginación"""
-        if not hasattr(self, 'stock_tree') or not hasattr(self, 'cached_alertas'):
+        if not hasattr(self, 'stock_tree') or not self.stock_tree.winfo_exists() or not hasattr(self, 'cached_alertas'):
             return
             
         try:
@@ -3101,7 +3110,13 @@ class DatabaseApp:
                 # Crear nueva tupla para visualización con el valor redondeado
                 row_values = (is_fav, q[0], q[1], q[2], u_display, q[4], q[5], q[6])
                 
-                tags = ('favorito',) if codigo in favoritos else ('quiebre',)
+                if codigo in favoritos:
+                    tags = ('favorito',)
+                elif hasattr(self, 'new_stock_break_codes') and codigo in self.new_stock_break_codes:
+                    tags = ('nuevo_quiebre',)
+                else:
+                    tags = ('quiebre',)
+                    
                 self.stock_tree.insert("", tk.END, values=row_values, tags=tags)
                 
         except Exception as e:
@@ -6232,45 +6247,54 @@ class DatabaseApp:
             return 0
     
     def obtener_stock_actual_bulk(self, codigos: list, deposito: str) -> dict:
-        """Obtiene stock actual por código; si deposito es global ('%' o '00'), suma en todas las sedes."""
+        """Obtiene stock actual por código filtrando por los almacenes tratables de la sede seleccionada."""
         try:
             if not codigos:
                 return {}
+            
+            # Obtener los almacenes vendibles (tratables) para esta sede/contexto
+            # Esto implementa el "nuevo motor" de segregación
+            tratables = self.config_manager.get_tratables_by_sede(deposito)
+            if not tratables:
+                # Si no hay configuración, fallback al comportamiento anterior pero logueando advertencia
+                self.log(f"Advertencia: No se encontraron almacenes tratables para {deposito}", "WARNING")
+                return {str(c): 0 for c in codigos}
+
             # Evitar IN () muy grande dividiendo en chunks si es necesario
             MAX_IN = 900  # límite seguro para SQL Server
             resultado = {}
-            global_query = (deposito in (None, '%', '00', 'ICH', 'ALL'))
+            
+            # Preparar placeholders para los depósitos
+            dep_placeholders = ",".join(["?"] * len(tratables))
+            
             for i in range(0, len(codigos), MAX_IN):
                 chunk = codigos[i:i+MAX_IN]
-                placeholders = ",".join(["?"] * len(chunk))
-                if global_query:
-                    sql = (
-                        f"SELECT c_codarticulo, SUM(n_cantidad) "
-                        f"FROM MA_DEPOPROD WITH (NOLOCK) "
-                        f"WHERE c_codarticulo IN ({placeholders}) "
-                        f"GROUP BY c_codarticulo"
-                    )
-                    params = chunk
-                else:
-                    sql = (
-                        f"SELECT c_codarticulo, SUM(n_cantidad) "
-                        f"FROM MA_DEPOPROD WITH (NOLOCK) "
-                        f"WHERE c_coddeposito = ? AND c_codarticulo IN ({placeholders}) "
-                        f"GROUP BY c_codarticulo"
-                    )
-                    params = [deposito] + chunk
+                art_placeholders = ",".join(["?"] * len(chunk))
+                
+                sql = (
+                    f"SELECT c_codarticulo, SUM(n_cantidad) "
+                    f"FROM MA_DEPOPROD WITH (NOLOCK) "
+                    f"WHERE c_coddeposito IN ({dep_placeholders}) "
+                    f"  AND c_codarticulo IN ({art_placeholders}) "
+                    f"GROUP BY c_codarticulo"
+                )
+                
+                params = list(tratables) + list(chunk)
                 rows = self.db_manager.fetch_data(sql, params)
+                
                 for cod, sum_qty in (rows or []):
                     try:
                         resultado[str(cod)] = int(sum_qty or 0)
                     except Exception:
                         resultado[str(cod)] = 0
+                
                 # asegurar claves para todos los códigos del chunk
                 for cod in chunk:
                     resultado.setdefault(str(cod), 0)
+                    
             return resultado
         except Exception as e:
-            self.log(f"Error obteniendo stock actual: {str(e)}", "ERROR")
+            self.log(f"Error obteniendo stock actual bulk: {str(e)}", "ERROR")
             return {}
     
     def calcular_stock_ideal(self, fecha_inicio, fecha_fin):
@@ -9479,12 +9503,15 @@ class DatabaseApp:
 
             self.tra_debug_log("Iniciando carga completa de datos TRA en background (adaptativa)...")
 
+            # Obtener lista de almacenes tratables (Nuevo Motor)
+            sedes_list = self.config_manager.get_tratables_by_sede(self.tra_sede_codigo)
+
             while True:
                 t0 = time.perf_counter()
                 rows = self.db_manager.obtener_ventas_por_producto_chunk(
                     fecha_inicio=self.tra_fecha_inicio,
                     fecha_fin=self.tra_fecha_fin,
-                    sede_codigo=self.tra_sede_codigo,
+                    sede_codigo=sedes_list,
                     start_row=start,
                     fetch_size=int(chunk_size),
                     include_zero_sales=getattr(self, 'tra_include_zero_sales', False),
@@ -10410,6 +10437,9 @@ class DatabaseApp:
             self.log(f"[MBRP] Iniciando carga adaptativa (chunk inicial: {chunk_size})", "INFO")
 
             chunk_count = 0
+            # Obtener lista de almacenes tratables (Nuevo Motor)
+            sedes_list = self.config_manager.get_tratables_by_sede(self.mbrp_sede_codigo)
+
             while True:
                 chunk_count += 1
                 
@@ -10417,7 +10447,7 @@ class DatabaseApp:
                 rows = self.db_manager.obtener_ventas_por_producto_chunk(
                     fecha_inicio=self.mbrp_fecha_inicio,
                     fecha_fin=self.mbrp_fecha_fin,
-                    sede_codigo=self.mbrp_sede_codigo,
+                    sede_codigo=sedes_list,
                     start_row=start,
                     fetch_size=chunk_size,
                     exclude_depts=getattr(self, 'excluded_depts', [])

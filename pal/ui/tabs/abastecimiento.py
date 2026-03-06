@@ -84,9 +84,9 @@ class AbastecimientoTab(ttk.Frame):
         
         # Cargar sedes dinámicas desde ConfigManager
         sedes_data = self.config_manager.get_sedes_config()
-        sedes_list = [f"{s} - {sedes_data[s].get('descripcion', '')}" for s in sedes_data.keys()]
+        sedes_list = ["ICH (Todas las sedes)"] + [f"{s} - {sedes_data[s].get('descripcion', '')}" for s in sedes_data.keys()]
         
-        self.sede_combo = ttk.Combobox(controls, textvariable=self.sede_var, values=sedes_list)
+        self.sede_combo = ttk.Combobox(controls, textvariable=self.sede_var, values=sedes_list, state="readonly", width=40)
         self.sede_combo.pack(side="left", padx=5)
         
         self.btn_calc = ttk.Button(controls, text="Calcular Sugerencias", command=self.on_calcular)
@@ -141,25 +141,33 @@ class AbastecimientoTab(ttk.Frame):
         tree_frame = ttk.Frame(parent_frame)
         tree_frame.pack(fill="both", expand=True, padx=10, pady=10)
         
-        columns = ("producto", "descripcion", "origen", "cantidad", "stock_dest", "autorizacion")
+        # Añadimos columna 'sel' al inicio para el checkbox
+        columns = ("sel", "producto", "descripcion", "destino", "origen", "cantidad", "stock_dest", "autorizacion")
         self.tree = ttk.Treeview(tree_frame, columns=columns, show="headings")
         
+        self.tree.heading("sel", text="[ ]")
         self.tree.heading("producto", text="Código")
         self.tree.heading("descripcion", text="Descripción")
-        self.tree.heading("origen", text="Sede Origen")
+        self.tree.heading("destino", text="Sede Destino")
+        self.tree.heading("origen", text="Sede Origen (CDT)")
         self.tree.heading("cantidad", text="Cant. Sugerida")
         self.tree.heading("stock_dest", text="Stock Destino")
         self.tree.heading("autorizacion", text="Requiere Aut.")
         
+        self.tree.column("sel", width=35, anchor="center")
         self.tree.column("producto", width=100)
         self.tree.column("descripcion", width=250)
+        self.tree.column("destino", width=100)
         self.tree.column("origen", width=90)
         self.tree.column("cantidad", width=90)
         self.tree.column("stock_dest", width=90)
         self.tree.column("autorizacion", width=90)
         
-        self.tree.pack(side="left", fill="both", expand=True)
+        # Toggle checkbox on click
+        self.tree.bind("<Button-1>", self._on_tree_click)
         
+        self.tree.pack(side="left", fill="both", expand=True)
+
         # Controles de paginación
         pag_frame = ttk.Frame(parent_frame)
         pag_frame.pack(fill="x", padx=10, pady=5)
@@ -181,12 +189,19 @@ class AbastecimientoTab(ttk.Frame):
         # Configurar colores para estados especiales
         self.tree.tag_configure('rojo', background='#ffcccc')      # Rojo suave para lista roja
         self.tree.tag_configure('sin_stock', background='#e0b0ff') # Púrpura suave para sin stock CDT
+        self.tree.tag_configure('ajustado', background='#fff9c4')  # Amarillo suave para stock ajustado (proporcional)
         
         # Footer Actions
         footer = ttk.Frame(parent_frame)
         footer.pack(fill="x", padx=10, pady=10)
         
-        ttk.Button(footer, text="✅ Procesar Sugerencias", command=self.on_procesar).pack(side="right", padx=5)
+        btn_sel_all = ttk.Button(footer, text="☑ Seleccionar Todos", command=lambda: self._select_all(True))
+        btn_sel_all.pack(side="left", padx=5)
+        
+        btn_unsel_all = ttk.Button(footer, text="☐ Deseleccionar Todos", command=lambda: self._select_all(False))
+        btn_unsel_all.pack(side="left", padx=5)
+
+        ttk.Button(footer, text="🚀 Procesar Sugerencias", command=self.on_procesar).pack(side="right", padx=5)
         self.btn_export = ttk.Button(footer, text="📊 Exportar a Excel", command=self.on_exportar)
         self.btn_export.pack(side="right", padx=5)
         
@@ -376,16 +391,56 @@ class AbastecimientoTab(ttk.Frame):
                 self.sub_combo['values'] = ['Todos'] + list(subgrupos.keys())
                 self.sub_var.set('Todos')
 
+    def _on_tree_click(self, event):
+        """Maneja el clic en la columna de selección."""
+        region = self.tree.identify_region(event.x, event.y)
+        if region == "cell":
+            column = self.tree.identify_column(event.x)
+            if column == "#1": # Columna 'sel'
+                item_id = self.tree.identify_row(event.y)
+                if item_id:
+                    self._toggle_selection(item_id)
+
+    def _toggle_selection(self, item_id):
+        """Cambia el estado del checkbox para un item."""
+        values = list(self.tree.item(item_id, "values"))
+        current = values[0]
+        # Usamos caracteres Unicode para simular checkbox
+        new_val = "☑" if current == "☐" else "☐"
+        values[0] = new_val
+        self.tree.item(item_id, values=values)
+        
+        # Actualizar en la lista original (filtered_results) para persistencia al paginar
+        codigo = values[1]
+        destino = values[3]
+        for item in self.filtered_results:
+            if item.get("producto_codigo") == codigo and item.get("sucursal_destino") == destino:
+                item["_seleccionado"] = (new_val == "☑")
+                break
+
+    def _select_all(self, state):
+        """Selecciona o deselecciona todos los elementos FILTRADOS."""
+        char = "☑" if state else "☐"
+        for item in self.filtered_results:
+            item["_seleccionado"] = state
+        
+        # Actualizar visualmente la página actual
+        for item_id in self.tree.get_children():
+            values = list(self.tree.item(item_id, "values"))
+            values[0] = char
+            self.tree.item(item_id, values=values)
+
     def on_calcular(self):
         if self.calculando:
             return
 
         sede_full = self.sede_var.get()
         if not sede_full:
-            messagebox.showwarning("Atención", "Seleccione una sede destino.")
+            messagebox.showwarning("Atención", "Seleccione una sede destino o Cálculo Global.")
             return
         
-        sede = sede_full.split(" - ")[0]
+        is_global = "ICH" in sede_full or "GLOBAL" in sede_full
+        sede = "GLOBAL" if is_global else sede_full.split(" - ")[0]
         
         # Bloquear UI
         self.calculando = True
@@ -402,9 +457,9 @@ class AbastecimientoTab(ttk.Frame):
             self.tree.delete(i)
             
         # Iniciar hilo de cálculo
-        threading.Thread(target=self._bg_calcular, args=(sede,), daemon=True).start()
+        threading.Thread(target=self._bg_calcular, args=(sede, is_global), daemon=True).start()
 
-    def _bg_calcular(self, sede):
+    def _bg_calcular(self, sede, is_global=False):
         """Lógica de cálculo en hilo secundario."""
         try:
             from pal.services.abastecimiento import AbastecimientoService
@@ -432,12 +487,21 @@ class AbastecimientoTab(ttk.Frame):
                 sub_cod = subgrupos.get(sub)
 
             # Pass filters to service
-            sugerencias = service.calcular_sugerencias(sede, dept_cod=dept_cod, group_cod=group_cod, sub_cod=sub_cod)
+            if is_global:
+                sugerencias = service.calcular_abastecimiento_global(dept_cod=dept_cod, group_cod=group_cod, sub_cod=sub_cod)
+            else:
+                sugerencias = service.calcular_sugerencias(sede, dept_cod=dept_cod, group_cod=group_cod, sub_cod=sub_cod)
+            
+            # Inicializar estado de selección
+            for s in sugerencias:
+                s["_seleccionado"] = True # Por defecto seleccionados todos
             
             # Notificar a la UI para actualizar
             self.after(0, lambda: self._finalizar_calculo(sugerencias, sede))
         except Exception as e:
             logger.error(f"Error en hilo de abastecimiento: {e}")
+            import traceback
+            traceback.print_exc()
             self.after(0, lambda: self._finalizar_calculo([], sede, error=str(e)))
 
     def _finalizar_calculo(self, sugerencias, sede, error=None):
@@ -523,12 +587,12 @@ class AbastecimientoTab(ttk.Frame):
         self.current_page = max(1, min(self.current_page, self.total_pages))
         
         # UI Feedback
-        if hasattr(self, 'lbl_pagina'):
+        if hasattr(self, 'lbl_pagina') and self.lbl_pagina:
             self.lbl_pagina.config(text=f"Página {self.current_page}/{self.total_pages}")
         
-        if hasattr(self, 'btn_prev'):
+        if hasattr(self, 'btn_prev') and self.btn_prev:
             self.btn_prev.config(state='normal' if self.current_page > 1 else 'disabled')
-        if hasattr(self, 'btn_next'):
+        if hasattr(self, 'btn_next') and self.btn_next:
             self.btn_next.config(state='normal' if self.current_page < self.total_pages else 'disabled')
             
         # Limpiar treeview
@@ -541,15 +605,26 @@ class AbastecimientoTab(ttk.Frame):
         
         for s in pagina_datos:
             tags = []
-            if s.get("es_rojo"):
-                tags.append("rojo")
-            if s.get("sucursal_origen_sugerida") == "SIN STOCK CDT":
-                tags.append("sin_stock")
+            if s.get("es_rojo"): tags.append("rojo")
+            if s.get("sucursal_origen_sugerida") == "SIN STOCK CDT": tags.append("sin_stock")
+            if s.get("ajustado"): tags.append("ajustado")
+
+            sel_char = "☑" if s.get("_seleccionado", True) else "☐"
+            
+            # Formatear Sede Origen: "Stock / Depósito"
+            origen_base = s.get("sucursal_origen_sugerida", "")
+            stock_org = s.get("stock_origen", 0)
+            if origen_base and origen_base != "SIN STOCK CDT":
+                origen_display = f"{int(stock_org)} / {origen_base}"
+            else:
+                origen_display = origen_base
 
             self.tree.insert("", "end", values=(
+                sel_char,
                 s["producto_codigo"],
                 s.get("producto_descripcion", ""),
-                s["sucursal_origen_sugerida"],
+                s.get("sucursal_destino", ""),
+                origen_display,
                 s["cantidad_sugerida"],
                 s["stock_actual"],
                 "Sí" if s["requiere_autorizacion"] else "No"
@@ -582,29 +657,32 @@ class AbastecimientoTab(ttk.Frame):
             messagebox.showerror("Error", f"No se pudo exportar el reporte: {e}")
 
     def on_procesar(self):
-        """Guarda las sugerencias actuales en la base de datos."""
-        if not hasattr(self, 'last_sugerencias') or not self.last_sugerencias:
-            messagebox.showwarning("Atención", "No hay sugerencias calculadas para procesar.")
+        """Guarda SOLO las sugerencias SELECCIONADAS en la base de datos."""
+        # Obtener lista de seleccionadas desde last_sugerencias
+        seleccionadas = [s for s in self.last_sugerencias if s.get("_seleccionado", True)]
+
+        if not seleccionadas:
+            messagebox.showwarning("Atención", "No hay sugerencias seleccionadas para procesar.")
             return
             
-        if not messagebox.askyesno("Confirmar", f"¿Desea procesar y guardar las {len(self.last_sugerencias)} sugerencias para {self.last_sede_destino}?"):
+        if not messagebox.askyesno("Confirmar", f"¿Desea procesar y guardar las {len(seleccionadas)} sugerencias seleccionadas?"):
             return
             
         try:
             from pal.services.abastecimiento import AbastecimientoService
             service = AbastecimientoService(self.app.db_manager)
             
-            if service.save_sugerencias(self.last_sugerencias):
-                messagebox.showinfo("Éxito", "Sugerencias guardadas correctamente. Las que requieren autorización aparecerán en la pestaña correspondiente.")
-                # Limpiar después de procesar
-                self.last_sugerencias = []
-                for i in self.tree.get_children():
-                    self.tree.delete(i)
+            if service.save_sugerencias(seleccionadas):
+                messagebox.showinfo("Éxito", f"{len(seleccionadas)} sugerencias guardadas correctamente.")
+                
+                # Remover las seleccionadas de la lista actual para que no aparezcan de nuevo si el usuario sigue trabajando
+                self.last_sugerencias = [s for s in self.last_sugerencias if not s.get("_seleccionado", False)]
+                self._aplicar_filtro_local()
             else:
-                self.app.log("Error al guardar sugerencias. Revise los detalles en la base de datos.", "ERROR")
+                messagebox.showerror("Error", "Error al guardar sugerencias. Revise los detalles en los logs.")
         except Exception as e:
             logger.error(f"Error en on_procesar: {e}")
-            self.app.log(f"Error inesperado procesando sugerencias: {e}", "ERROR")
+            messagebox.showerror("Error", f"Error inesperado procesando sugerencias: {e}")
 
     def on_configurar(self):
         """Abre ventana para configurar días de stock y umbral de autorización."""
@@ -796,7 +874,7 @@ class AbastecimientoTab(ttk.Frame):
         """Método llamado cuando se selecciona la pestaña principal."""
         # Actualizar lista de sedes
         sedes_data = self.config_manager.get_sedes_config()
-        sedes_list = [f"{s} - {sedes_data[s].get('descripcion', '')}" for s in sedes_data.keys()]
+        sedes_list = ["ICH (Todas las sedes)"] + [f"{s} - {sedes_data[s].get('descripcion', '')}" for s in sedes_data.keys()]
         if self.sede_combo:
             self.sede_combo['values'] = sedes_list
             

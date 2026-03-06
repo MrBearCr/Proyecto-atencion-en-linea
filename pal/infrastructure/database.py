@@ -82,10 +82,7 @@ class DatabaseManager:
         initial_conn_str = (
             f"DRIVER={{SQL Server}};"
             f"SERVER={server};"
-            "Encrypt=no;"          
-            "TrustServerCertificate=yes;"  # Changed to yes for better compatibility
-            "Connection Timeout=30;"       # Increased timeout
-            "MARS_Connection=yes;"         # Enable Multiple Active Result Sets
+            "Connection Timeout=30;"
         )
     
         if user:
@@ -1400,7 +1397,7 @@ class DatabaseManager:
         Args:
             fecha_inicio: Fecha inicio del rango
             fecha_fin: Fecha fin del rango  
-            sede_codigo: Código de sede/depósito
+            sede_codigo: Código de sede/depósito o lista de depósitos
             start_row: Fila inicial (1-indexed)
             fetch_size: Cantidad de filas a obtener
             include_zero_sales: Si True, incluye productos con neto <= 0
@@ -1408,7 +1405,13 @@ class DatabaseManager:
         """
         try:
             # OPTIMIZACIÓN CRÍTICA: CTE + NOLOCK + filtro dinámico por depósito
-            global_query = (sede_codigo in (None, '%', '00', 'ICH', 'ALL'))
+            is_list = isinstance(sede_codigo, (list, tuple))
+            if is_list:
+                depositos_list = list(sede_codigo)
+                global_query = False
+            else:
+                global_query = (sede_codigo in (None, '%', '00', 'ICH', 'ALL'))
+                depositos_list = [sede_codigo] if not global_query else []
             
             # Construir cláusula de exclusión
             exclude_clause = ""
@@ -1428,6 +1431,16 @@ class DatabaseManager:
             # Parametros para la query
             params = [fecha_inicio.strftime("%d-%m-%Y"), fecha_fin.strftime("%d-%m-%Y")]
             
+            # Construir filtro de depósitos
+            dep_filter = ""
+            if is_list:
+                placeholders_dep = ','.join(['?'] * len(depositos_list))
+                dep_filter = f"AND i.c_Deposito IN ({placeholders_dep})"
+                params.extend(depositos_list)
+            elif not global_query:
+                dep_filter = "AND i.c_Deposito = ?"
+                params.append(sede_codigo)
+
             # CTE común - calcula ventas por producto
             cte_part = f"""
                 WITH VentasAgregadas AS (
@@ -1441,15 +1454,12 @@ class DatabaseManager:
                     FROM TR_INVENTARIO i WITH (NOLOCK)
                     WHERE i.f_fecha BETWEEN CONVERT(DATE, ?, 105) AND CONVERT(DATE, ?, 105)
                         AND i.c_Concepto IN ('VEN', 'DEV') 
-                        {'AND i.c_Deposito = ?' if not global_query else ''}
+                        {dep_filter}
                     GROUP BY i.c_Codarticulo
                     {having_clause}
                 )
             """
             
-            if not global_query:
-                params.append(sede_codigo)
-
             # Query principal
             if include_zero_sales:
                 # MODO MASIVO: FROM MA_PRODUCTOS LEFT JOIN Ventas
@@ -1922,28 +1932,32 @@ class DatabaseManager:
         Requiere un diccionario de configuración de sede obtenido de get_sedes_config().
         La contraseña se desencripta usando SecureCredentialsManager.
         """
-        server = sede_config['ip_servidor']
-        database = sede_config['nombre_bd']
-        user = sede_config['usuario_bd']
-        encrypted_password = sede_config['password_bd_enc']
+        if not sede_config:
+            raise Exception("Configuración de sede no proporcionada")
+
+        server = sede_config.get('ip_servidor')
+        database = sede_config.get('nombre_bd')
+        user = sede_config.get('usuario_bd')
+        encrypted_password = sede_config.get('password_bd_enc')
+
+        if not server or not database:
+            raise Exception(f"Configuración incompleta para sede {sede_config.get('nombre_sede', 'Unknown')}")
 
         password = None
         if encrypted_password and self.credentials_manager:
             try:
-                # La contraseña se desencripta aquí
                 password = self.credentials_manager.decrypt(encrypted_password)
             except Exception as e:
-                self._log(f"Error desencriptando contraseña para {sede_config['nombre_sede']}: {e}", "ERROR")
-                raise Exception(f"Fallo al desencriptar contraseña VAD20 para {sede_config['nombre_sede']}")
+                self._log(f"Error desencriptando contraseña para {sede_config.get('nombre_sede')}: {e}", "ERROR")
+                # fallback al password en texto plano si existe o seguir sin pass
+                password = encrypted_password # Intento desesperado si no estaba encriptado realmente
 
-        # Cadena de conexión para la sede VAD20
+        # Cadena de conexión simplificada para mayor compatibilidad
+        # Algunos drivers antiguos fallan con Encrypt/TrustServerCertificate
         conn_str = (
             f"DRIVER={{SQL Server}};"
             f"SERVER={server};"
             f"DATABASE={database};"
-            "Encrypt=no;"
-            "TrustServerCertificate=yes;"
-            "Connection Timeout=15;" # Timeout más corto para conexiones secundarias
         )
 
         if user:
@@ -1951,13 +1965,17 @@ class DatabaseManager:
         else:
             conn_str += "Trusted_Connection=yes;"
         
+        # Agregar timeouts básicos
+        conn_str += "Connection Timeout=30;"
+        
         try:
+            self._log(f"Intentando conectar a VAD20 ({sede_config.get('nombre_sede')}) en {server}...", "INFO")
             temp_conn = pyodbc.connect(conn_str)
-            self._log(f"Conectado exitosamente a VAD20 para sede: {sede_config['nombre_sede']}", "INFO")
+            self._log(f"Conectado exitosamente a VAD20 para sede: {sede_config.get('nombre_sede')}", "INFO")
             return temp_conn
         except Exception as e:
-            self._log(f"Fallo al conectar a VAD20 para sede {sede_config['nombre_sede']}: {e}", "ERROR")
-            raise Exception(f"Fallo al conectar a VAD20 para {sede_config['nombre_sede']}")
+            self._log(f"Fallo al conectar a VAD20 para sede {sede_config.get('nombre_sede')}: {e}", "ERROR")
+            raise Exception(f"Fallo al conectar a VAD20 para {sede_config.get('nombre_sede')}. Verifique IP {server} y red.")
 
     def add_sede(self, sede_data):
         """Agrega una nueva sede a la tabla pal_sedes_configuracion."""
@@ -2086,11 +2104,19 @@ class DatabaseManager:
                     p.C_NUMERO,
                     p.F_Fecha,
                     t.COD_PRINCIPAL,
-                    p.N_Total
+                    p.N_Total,
+                    pr.C_DESCRI,
+                    pr.C_DEPARTAMENTO,
+                    pr.C_GRUPO,
+                    pr.C_SUBGRUPO,
+                    pr.c_marca,
+                    t.CANTIDAD
                 FROM
                     MA_PAGOS p WITH (NOLOCK)
                 JOIN
                     MA_TRANSACCION t WITH (NOLOCK) ON p.C_NUMERO = t.C_numero
+                LEFT JOIN
+                    MA_PRODUCTOS pr WITH (NOLOCK) ON t.COD_PRINCIPAL = pr.C_CODIGO
                 WHERE
                     {where_sql}
                 ORDER BY
@@ -2103,7 +2129,7 @@ class DatabaseManager:
                 
                 # Procesar en Python
                 for r in chunk_rows:
-                    # r: (rif, nombre, numero, fecha, prod_cod, total_bs)
+                    # r: (rif, nombre, numero, fecha, prod_cod, total_bs, desc, dept, grupo, sub, marca, cantidad)
                     fecha = r[3]
                     total_bs = float(r[5]) if r[5] else 0.0
                     
@@ -2112,15 +2138,9 @@ class DatabaseManager:
                     factor = factors_dict.get(key)
                     
                     if factor is None:
-                        # Intentar buscar hacia atrás unos días sutilmente o usar last_known del dict?
-                        # Por simplicidad usamos 1.0 o el último global si es fecha futura?
-                        # Mejor lógica: si no hay factor dia exacto, tomar el mas reciente anterior.
-                        # (Implementación simplificada: si key existe usa, sino usa 1.0 o Warning)
-                        # OJO: El usuario pidió lógica específica en la query original (MAX/TOP 1).
-                        # Simulamos "último disponible"
-                        factor = last_factor # Fallback rudo, idealmente buscaría el previo mas cercano
-                        # Intento de fallback local mejorado:
-                        for d in range(15): # mirar hasta 15 dias atras
+                        # Intentar buscar hacia atrás unos días sutilmente
+                        factor = last_factor
+                        for d in range(15):
                              prev = fecha - datetime.timedelta(days=d)
                              k = (prev.year, prev.month, prev.day)
                              if k in factors_dict:
@@ -2130,11 +2150,11 @@ class DatabaseManager:
                     total_usd = total_bs / factor if factor else 0.0
                     
                     # Estructura de retorno compatible con UI:
-                    # (rif, name, num, date, item_cod, total_bs, total_usd)
+                    # (rif, name, num, date, item_cod, total_bs, total_usd, desc, dept, grupo, sub, marca, qty)
                     all_rows.append(tuple(r) + (total_usd,))
                     
             except Exception as e:
-                self._log(f"Error procesando chunk {f_start}: {e}", "ERROR")
+                self._log(f"Error procesando chunk: {e}", "ERROR")
             
             # Actualizar progreso
             days_in_chunk = (chunk_end - current_date).days + 1

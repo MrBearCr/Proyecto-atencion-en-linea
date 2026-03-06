@@ -2749,7 +2749,16 @@ def export_abastecimiento_excel(filename: str, sugerencias: List[Dict[str, Any]]
         # Datos
         for i, s in enumerate(sugerencias, 6):
             ws.cell(row=i, column=1, value=clean_for_excel(s.get("producto_codigo", "")))
-            ws.cell(row=i, column=2, value=clean_for_excel(s.get("sucursal_origen_sugerida", "")))
+            
+            # Formatear Sede Origen: "Stock / Depósito"
+            origen_base = s.get("sucursal_origen_sugerida", "")
+            stock_org = s.get("stock_origen", 0)
+            if origen_base and origen_base != "SIN STOCK CDT":
+                origen_display = f"{int(stock_org)} / {origen_base}"
+            else:
+                origen_display = origen_base
+                
+            ws.cell(row=i, column=2, value=clean_for_excel(origen_display))
             
             c_cant = ws.cell(row=i, column=3, value=s.get("cantidad_sugerida", 0))
             c_cant.alignment = center_align
@@ -2786,4 +2795,127 @@ def export_abastecimiento_excel(filename: str, sugerencias: List[Dict[str, Any]]
         
     except Exception as e:
         logger.error(f"Error exportando abastecimiento a Excel: {e}")
+        raise
+
+def export_clientes_reporte_excel(filename: str, report_data: List[Dict[str, Any]], sede_nombre: str) -> int:
+    """Exporta el reporte de compras por cliente a un archivo Excel profesional."""
+    if not EXCEL_AVAILABLE:
+        logger.error("openpyxl no está disponible. No se puede exportar a Excel.")
+        raise ImportError("openpyxl es requerido para exportación Excel")
+        
+    from datetime import datetime
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, Alignment, PatternFill
+        from openpyxl.worksheet.table import Table, TableStyleInfo
+        
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Reporte de Clientes"
+        
+        # Estilos
+        header_font = Font(bold=True, color="FFFFFF")
+        header_fill = PatternFill(start_color="2F5597", end_color="2F5597", fill_type="solid")
+        center_align = Alignment(horizontal="center")
+        left_align = Alignment(horizontal="left")
+        right_align = Alignment(horizontal="right")
+        
+        # Título y metadata
+        ws.cell(row=1, column=1, value=f"REPORTE DE COMPRAS POR CLIENTE - SEDE: {sede_nombre}")
+        ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=11)
+        ws.cell(row=1, column=1).font = Font(size=14, bold=True)
+        
+        ws.cell(row=2, column=1, value=f"Fecha de generación: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+        ws.cell(row=3, column=1, value=f"Total de facturas: {len(report_data)}")
+        
+        # Encabezados de tabla
+        headers = [
+            "RIF/ID", "NOMBRE CLIENTE", "FACTURA", "FECHA", "CÓDIGO PROD.", 
+            "DESCRIPCIÓN", "CANTIDAD", "DEPARTAMENTO", "GRUPO", "SUBGRUPO", "MARCA", "TOTAL USD"
+        ]
+        
+        header_row = 5
+        for col, text in enumerate(headers, 1):
+            cell = ws.cell(row=header_row, column=col, value=text)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = center_align
+            
+        # Datos - El reporte tiene una estructura jerárquica, pero para Excel lo aplanaremos
+        current_row = header_row + 1
+        for inv in report_data:
+            rif = inv.get('rif', '')
+            client = inv.get('client_name', '')
+            inv_num = inv.get('invoice_num', '')
+            date = inv.get('invoice_date', '')
+            if hasattr(date, 'strftime'):
+                date = date.strftime('%Y-%m-%d')
+            
+            # Los productos están en una lista de diccionarios (o tuplas con metadata)
+            products = inv.get('products_full', [])
+            total_inv_usd = inv.get('total_usd', 0)
+            
+            # Si no hay productos (raro pero posible), escribir solo la cabecera
+            if not products:
+                ws.cell(row=current_row, column=1, value=clean_for_excel(rif))
+                ws.cell(row=current_row, column=2, value=clean_for_excel(client))
+                ws.cell(row=current_row, column=3, value=clean_for_excel(inv_num))
+                ws.cell(row=current_row, column=4, value=date)
+                ws.cell(row=current_row, column=12, value=total_inv_usd).number_format = '#,##0.00'
+                current_row += 1
+                continue
+                
+            for p in products:
+                # p: (prod_cod, desc, dept, grupo, sub, marca, qty)
+                ws.cell(row=current_row, column=1, value=clean_for_excel(rif))
+                ws.cell(row=current_row, column=2, value=clean_for_excel(client))
+                ws.cell(row=current_row, column=3, value=clean_for_excel(inv_num))
+                ws.cell(row=current_row, column=4, value=date)
+                
+                ws.cell(row=current_row, column=5, value=clean_for_excel(p[0])) # Código
+                ws.cell(row=current_row, column=6, value=clean_for_excel(p[1])) # Descripción
+                
+                c_qty = ws.cell(row=current_row, column=7, value=p[6]) # Cantidad
+                c_qty.alignment = center_align
+                
+                ws.cell(row=current_row, column=8, value=clean_for_excel(p[2])) # Dept
+                ws.cell(row=current_row, column=9, value=clean_for_excel(p[3])) # Grupo
+                ws.cell(row=current_row, column=10, value=clean_for_excel(p[4])) # Subgrupo
+                ws.cell(row=current_row, column=11, value=clean_for_excel(p[5])) # Marca
+                
+                c_usd = ws.cell(row=current_row, column=12, value=total_inv_usd)
+                c_usd.number_format = '#,##0.00'
+                c_usd.alignment = right_align
+                
+                current_row += 1
+                
+        # Ajustar anchos de columna
+        ws.column_dimensions['A'].width = 15 # RIF
+        ws.column_dimensions['B'].width = 35 # Cliente
+        ws.column_dimensions['C'].width = 12 # Factura
+        ws.column_dimensions['D'].width = 12 # Fecha
+        ws.column_dimensions['E'].width = 15 # Código
+        ws.column_dimensions['F'].width = 40 # Descripción
+        ws.column_dimensions['G'].width = 12 # Cantidad
+        ws.column_dimensions['H'].width = 20 # Dept
+        ws.column_dimensions['I'].width = 20 # Grupo
+        ws.column_dimensions['J'].width = 20 # Subgrupo
+        ws.column_dimensions['K'].width = 15 # Marca
+        ws.column_dimensions['L'].width = 15 # Total USD
+        
+        # Tabla de Excel
+        num_rows = current_row - header_row - 1
+        if num_rows > 0:
+            tab = Table(displayName="ReporteClientesTable", ref=f"A5:L{header_row + num_rows}")
+            style = TableStyleInfo(name="TableStyleMedium9", showFirstColumn=False,
+                                  showLastColumn=False, showRowStripes=True, showColumnStripes=False)
+            tab.tableStyleInfo = style
+            ws.add_table(tab)
+            
+        wb.save(filename)
+        logger.info(f"Reporte de clientes guardado en {filename}")
+        return num_rows
+        
+    except Exception as e:
+        logger.error(f"Error exportando reporte de clientes a Excel: {e}")
         raise

@@ -309,6 +309,243 @@ class AbastecimientoService:
             import traceback
             traceback.print_exc()
             return []
+
+    def calcular_abastecimiento_global(self, dept_cod=None, group_cod=None, sub_cod=None):
+        """
+        Calcula abastecimiento para TODAS las sedes simultáneamente,
+        distribuyendo el stock de los CDTs de forma proporcional si es insuficiente.
+        """
+        try:
+            logger.info("Iniciando cálculo de abastecimiento GLOBAL")
+            
+            # 1. Obtener configuración
+            from pal.core.config_manager import ConfigManager
+            config_mgr = ConfigManager(self.db_manager)
+            sedes_config = config_mgr.get_sedes_config()
+            
+            # Identificar CDTs y Sedes Destino
+            cdts_almacenes = []
+            sedes_destino = {} # {nombre_sede: [almacenes_tratables]}
+            
+            for s_name, s_cfg in sedes_config.items():
+                if s_cfg.get("almacenes_cdt"):
+                    cdts_almacenes.extend(s_cfg["almacenes_cdt"])
+                
+                tratables = s_cfg.get("almacenes_tratables", [])
+                if tratables:
+                    # Excluir CDTs de los tratables para el cálculo de necesidad de la sede
+                    almacenes_puros = [a for a in tratables if a not in cdts_almacenes]
+                    if almacenes_puros:
+                        sedes_destino[s_name] = almacenes_puros
+                    else:
+                        sedes_destino[s_name] = tratables
+
+            if not cdts_almacenes:
+                logger.error("No hay CDTs configurados para el cálculo global.")
+                return []
+
+            # 2. Parámetros
+            params_db = self.obtener_parametros()
+            config_params = {p[0]: (p[1], p[2], p[3], p[4]) for p in params_db}
+            default_dias, _, _, _ = config_params.get(None, (30, 50, 10, 365))
+            dias_obj = float(default_dias)
+
+            # 3. Obtener Stock en CDTs (de todos los productos que podrían necesitarse)
+            # Para optimizar, primero buscamos qué productos tienen stock en CDT
+            sql_stock_cdt = f"""
+                SELECT c_codarticulo, SUM(n_cantidad) as stock_total, MAX(c_coddeposito) as cdt_dep
+                FROM MA_DEPOPROD WITH (NOLOCK)
+                WHERE c_coddeposito IN ({','.join(['?']*len(cdts_almacenes))})
+                AND n_cantidad > 0
+                GROUP BY c_codarticulo
+                HAVING SUM(n_cantidad) > 0
+            """
+            res_cdt = self.db_manager.fetch_data(sql_stock_cdt, tuple(cdts_almacenes))
+            stock_cdt_global = {r[0]: {"total": float(r[1]), "deposito": r[2]} for r in res_cdt}
+            codigos_con_stock_cdt = list(stock_cdt_global.keys())
+
+            if not codigos_con_stock_cdt:
+                logger.info("No hay stock disponible en ningún CDT.")
+                return []
+
+            # 4. Obtener Stock en Sedes Destino para estos productos
+            # (Filtramos por jerarquía si se especifica)
+            where_filtros = ""
+            filtros_params = []
+            if dept_cod or group_cod or sub_cod:
+                conds = []
+                if dept_cod: conds.append("p.c_departamento = ?"); filtros_params.append(dept_cod)
+                if group_cod: conds.append("p.c_grupo = ?"); filtros_params.append(group_cod)
+                if sub_cod: conds.append("p.c_subgrupo = ?"); filtros_params.append(sub_cod)
+                where_filtros = " AND " + " AND ".join(conds)
+
+            # Para no saturar, procesamos por lotes de sedes o una query masiva
+            # Vamos a consolidar todos los almacenes tratables de todas las sedes
+            todos_almacenes_destino = []
+            almacen_a_sede = {} # Mapping para saber a qué sede pertenece cada almacén
+            for s_name, almacenes in sedes_destino.items():
+                todos_almacenes_destino.extend(almacenes)
+                for a in almacenes: almacen_a_sede[a] = s_name
+
+            sql_stock_sedes = f"""
+                SELECT d.c_codarticulo, d.c_coddeposito, d.n_cantidad, p.c_descri
+                FROM MA_DEPOPROD d WITH (NOLOCK)
+                JOIN MA_PRODUCTOS p ON d.c_codarticulo = p.c_codigo
+                WHERE d.c_coddeposito IN ({','.join(['?']*len(todos_almacenes_destino))})
+                AND d.c_codarticulo IN ({','.join(['?']*len(codigos_con_stock_cdt[:1000]))}) -- Limitamos para evitar query muy larga
+                {where_filtros}
+            """
+            # Nota: Si hay > 1000 productos con stock CDT, deberíamos hacer chunks. 
+            # Pero para esta fase, simplifiquemos a un chunk representativo o quitemos el filtro de codigos si es manejable.
+            
+            # Mejor opción: Query de stock para TODOS los productos en esas sedes que tengan los filtros
+            sql_stock_sedes_opt = f"""
+                SELECT d.c_codarticulo, d.c_coddeposito, SUM(d.n_cantidad), MAX(p.c_descri)
+                FROM MA_DEPOPROD d WITH (NOLOCK)
+                JOIN MA_PRODUCTOS p ON d.c_codarticulo = p.c_codigo
+                WHERE d.c_coddeposito IN ({','.join(['?']*len(todos_almacenes_destino))})
+                {where_filtros}
+                GROUP BY d.c_codarticulo, d.c_coddeposito
+            """
+            logger.info("Consultando stock en todas las sedes...")
+            res_stock_sedes = self.db_manager.fetch_data(sql_stock_sedes_opt, tuple(todos_almacenes_destino) + tuple(filtros_params))
+            
+            # Organizar stock: {codigo: {sede: stock}}
+            stock_por_sede = {}
+            descripciones = {}
+            for r_cod, r_dep, r_qty, r_desc in res_stock_sedes:
+                s_name = almacen_a_sede.get(r_dep)
+                if not s_name: continue
+                if r_cod not in stock_por_sede: stock_por_sede[r_cod] = {}
+                stock_por_sede[r_cod][s_name] = stock_por_sede[r_cod].get(s_name, 0) + float(r_qty)
+                descripciones[r_cod] = r_desc
+
+            # 5. Obtener Ventas en Cascada para todos los códigos relevantes en todas las sedes
+            codigos_a_analizar = list(stock_por_sede.keys())
+            logger.info(f"Obteniendo ventas para {len(codigos_a_analizar)} productos en todas las sedes...")
+            
+            # Para el cálculo global, necesitamos ventas por sede. 
+            # La función obtener_fechas_liquidacion_y_ventas actual no separa por depósito en el retorno.
+            # Necesitamos una versión o llamar sede por sede (lento) o una nueva query.
+            # Vamos a llamar a la query masiva pero agrupada por sede.
+            
+            datos_ventas_global = self._obtener_ventas_globales_por_sede(codigos_a_analizar, todos_almacenes_destino, dias_obj)
+            
+            # 6. Calcular Necesidades y Distribuir
+            sugerencias_finales = []
+            
+            for codigo in codigos_a_analizar:
+                if codigo not in stock_cdt_global: continue
+                
+                stock_cdt_disp = stock_cdt_global[codigo]["total"]
+                depo_cdt = stock_cdt_global[codigo]["deposito"]
+                
+                demandas = [] # [(sede, deficit, promedio_diario)]
+                total_deficit = 0
+                
+                for s_name in sedes_destino.keys():
+                    v_data = datos_ventas_global.get(codigo, {}).get(s_name)
+                    if not v_data: continue
+                    
+                    promedio = v_data['promedio']
+                    stock_actual = stock_por_sede.get(codigo, {}).get(s_name, 0)
+                    
+                    # Stock Ideal (misma lógica que individual)
+                    stock_ideal = int(round(promedio * dias_obj * 1.25 * 1.15))
+                    deficit = max(0, stock_ideal - stock_actual)
+                    
+                    if deficit > 0:
+                        demandas.append({
+                            "sede": s_name,
+                            "deficit": deficit,
+                            "promedio": promedio,
+                            "stock_actual": stock_actual
+                        })
+                        total_deficit += deficit
+                
+                if not demandas: continue
+                
+                # REGLA DE ORO: Distribución Proporcional
+                factor_ajuste = 1.0
+                if total_deficit > stock_cdt_disp:
+                    factor_ajuste = stock_cdt_disp / total_deficit
+                    logger.debug(f"Overflow para {codigo}: Deficit {total_deficit} > Disponible {stock_cdt_disp}. Ajuste: {factor_ajuste:.2f}")
+
+                for dem in demandas:
+                    cantidad_sugerida = int(dem["deficit"] * factor_ajuste)
+                    if cantidad_sugerida <= 0: continue
+                    
+                    sugerencias_finales.append({
+                        "producto_codigo": codigo,
+                        "producto_descripcion": descripciones.get(codigo, ""),
+                        "sucursal_destino": dem["sede"],
+                        "sucursal_origen_sugerida": depo_cdt,
+                        "cantidad_sugerida": cantidad_sugerida,
+                        "stock_actual": dem["stock_actual"],
+                        "stock_origen": stock_cdt_disp,
+                        "requiere_autorizacion": 0, # Global suele ser CDT -> Sede, usualmente sin auto
+                        "es_rojo": False, # TODO: Verificar lista roja global
+                        "dias_stock_objetivo": dias_obj,
+                        "promedio_diario": round(dem["promedio"], 4),
+                        "ajustado": factor_ajuste < 1.0
+                    })
+            
+            logger.info(f"Cálculo global finalizado. Sugerencias generadas: {len(sugerencias_finales)}")
+            return sugerencias_finales
+
+        except Exception as e:
+            logger.error(f"Error en cálculo global: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
+
+    def _obtener_ventas_globales_por_sede(self, codigos, depositos, dias_obj):
+        """Helper para obtener ventas agrupadas por sede para el cálculo global."""
+        if not codigos or not depositos: return {}
+        
+        # Simplificación: Usamos un promedio de los últimos N días (dias_obj)
+        # para no complicar con la cascada en la primera iteración global.
+        res_final = {} # {codigo: {sede: {promedio: X}}}
+        
+        # Mapeo invertido para saber a qué sede pertenece cada almacén
+        from pal.core.config_manager import ConfigManager
+        config_mgr = ConfigManager(self.db_manager)
+        sedes_config = config_mgr.get_sedes_config()
+        dep_to_sede = {}
+        for s_name, s_cfg in sedes_config.items():
+            for d in s_cfg.get("almacenes_tratables", []):
+                dep_to_sede[d] = s_name
+
+        chunk_size = 500
+        for i in range(0, len(codigos), chunk_size):
+            chunk = codigos[i:i + chunk_size]
+            placeholders_cods = ",".join(["?"] * len(chunk))
+            placeholders_deps = ",".join(["?"] * len(depositos))
+            
+            sql = f"""
+                SELECT c_Codarticulo, c_Deposito, 
+                       SUM(CASE WHEN c_Concepto = 'VEN' THEN n_cantidad ELSE 0 END) - 
+                       SUM(CASE WHEN c_Concepto = 'DEV' THEN n_cantidad ELSE 0 END) as neto
+                FROM TR_INVENTARIO WITH (NOLOCK)
+                WHERE f_fecha >= DATEADD(day, -{int(dias_obj)}, GETDATE())
+                AND c_Codarticulo IN ({placeholders_cods})
+                AND c_Deposito IN ({placeholders_deps})
+                AND c_Concepto IN ('VEN', 'DEV')
+                GROUP BY c_Codarticulo, c_Deposito
+            """
+            rows = self.db_manager.fetch_data(sql, tuple(chunk) + tuple(depositos))
+            
+            for r_cod, r_dep, r_neto in rows:
+                s_name = dep_to_sede.get(r_dep)
+                if not s_name: continue
+                
+                if r_cod not in res_final: res_final[r_cod] = {}
+                if s_name not in res_final[r_cod]: res_final[r_cod][s_name] = {"total": 0, "promedio": 0}
+                
+                res_final[r_cod][s_name]["total"] += float(r_neto)
+                res_final[r_cod][s_name]["promedio"] = res_final[r_cod][s_name]["total"] / dias_obj
+
+        return res_final
             
     def obtener_parametros(self):
         """Obtiene los parámetros configurados: categoria_id, dias_stock, umbral_quiebre, umbral_autorizacion, dias_analisis_ventas."""

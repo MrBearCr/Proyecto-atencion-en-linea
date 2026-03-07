@@ -2,23 +2,38 @@
 
 ## Project Overview
 
-This project is a desktop application for customer management, developed in Python. It provides a graphical user interface (GUI) built with Tkinter for managing client information, sending bulk WhatsApp messages, and other related tasks. The application connects to a SQL Server database to store and retrieve data.
+This project is a desktop application for customer management and logistics, developed in Python. Originally focused on client management and bulk WhatsApp messaging, it has evolved into a robust platform for **Logistic Management**, **Abastecimiento (Supply Chain)**, and **Global Stock Calculation**. The application features a premium GUI built with Tkinter and connects to a SQL Server database.
 
 ### Main Technologies
 
 *   **Language:** Python
 *   **GUI:** Tkinter
 *   **Database:** SQL Server (via `pyodbc`)
+*   **Testing:** `pytest`, `pytest-cov`
 *   **Dependencies:** `cryptography`, `keyring`, `tkcalendar`, `requests`, `matplotlib`, `win10toast`, `Pillow`, `bcrypt`, `packaging`, `pyodbc`
+
+### AI Skills Integration
+
+The development and maintenance of this project are enhanced by a suite of **AI Skills**. These are specialized agentic capabilities that can be invoked for specific tasks:
+
+*   **`systematic-debugging`**: Used for deep-diving into complex stack traces and hardware-specific issues.
+*   **`ui-ux-pro-max`**: Ensures the Tkinter interface maintains a premium, modern aesthetic with consistent theme application.
+*   **`test-driven-development`**: Guides the implementation of new features with comprehensive unit tests.
+*   **`performance-optimization`**: Applied to optimize large dataset processing in modules like `exports.py`.
 
 ### Architecture
 
-The application follows a modular architecture with the core logic separated into the `pal` directory. This directory is further subdivided into:
+The application follows a modular architecture with the core logic separated into the `pal` directory:
 
 *   `core`: Contains the main business logic, including authentication, session management, and permissions.
-*   `infrastructure`: Manages the database connection and data access.
-*   `services`: Implements various services like caching, message sending, data exports, and business-specific modules for filtering and data processing (`filters`, `mbrp`, `stock`, `tra`).
-*   `ui`: Contains the user interface components.
+*   `infrastructure`: Manages the database connection and data access layer.
+*   `services`: Implements critical business modules:
+    *   `abastecimiento.py`: Supply chain and transfer management.
+    *   `stock.py`: Real-time stock tracking and global stock calculation logic.
+    *   `tra.py` / `mbrp.py`: Business-specific data processing.
+    *   `exports.py`: High-performance data exporting services.
+    *   `notifications.py`: WhatsApp and system notifications.
+*   `ui`: Contains the user interface components (tabs, popups, and custom themes).
 
 ## Building and Running
 

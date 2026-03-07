@@ -45,7 +45,7 @@ from pal.core.config_manager import ConfigManager
 CONFIG_FILE = 'db_config.ini'
 LICENSE_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTdAdOg6pI7tOF-9UdFDzw0P5aSpNRc-jGIYHwOHmXb7qqOtag9QTYAi4JU0U2VoIZLd_TjvK_7cxX9/pub?output=csv"
 LICENSE_CLIENT_NAME = "PALPY"
-APP_VERSION = "1.6.4" # Versión actual de la aplicación
+APP_VERSION = "1.6.5" # Versión actual de la aplicación
 UPDATE_URL_DEFAULT = "https://raw.githubusercontent.com/MrBearCr/nexus/main/updates"  # URL base por defecto para actualizaciones (formato raw)
 
 def load_update_url():
@@ -5978,11 +5978,10 @@ class DatabaseApp:
             fecha_fin = self.fecha_fin_entry.get_date()
             
             dias_diferencia = (fecha_fin - fecha_inicio).days
-            if dias_diferencia > 365:
-                messagebox.showwarning(
-                    "Rango muy amplio", 
-                    "Por favor seleccione un rango menor a 1 año para evitar problemas de rendimiento."
-                )
+            # Se ha eliminado la restricción de 1 año; ahora se permite cualquier rango 
+            # pero con previo aviso visual en la UI.
+            if dias_diferencia < 0:
+                messagebox.showerror("Error", "La fecha de fin no puede ser anterior a la de inicio.")
                 return
             
             sede = self.sede_var.get().split(" - ")[0]

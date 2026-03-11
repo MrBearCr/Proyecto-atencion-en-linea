@@ -19,7 +19,10 @@ class AbastecimientoTab(ttk.Frame):
         self.notebook: Optional[ttk.Notebook] = None
         self.tab_abastecimiento: Optional[ttk.Frame] = None
         self.tab_autorizaciones: Optional[ttk.Frame] = None
+        self.tab_pendientes: Optional[ttk.Frame] = None
         self.tree: Optional[ttk.Treeview] = None
+        self.tree_auto: Optional[ttk.Treeview] = None
+        self.tree_pend: Optional[ttk.Treeview] = None
         self.sede_combo: Optional[ttk.Combobox] = None
         self.btn_calc: Optional[ttk.Button] = None
         self.btn_export: Optional[ttk.Button] = None
@@ -74,6 +77,11 @@ class AbastecimientoTab(ttk.Frame):
         self.tab_autorizaciones = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_autorizaciones, text="Autorizaciones")
         self._setup_tab_autorizaciones(self.tab_autorizaciones)
+        
+        # Tab 3: Pendientes de Procesar
+        self.tab_pendientes = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_pendientes, text="Pendientes de Procesar")
+        self._setup_tab_pendientes(self.tab_pendientes)
 
     def _setup_tab_abastecimiento(self, parent_frame):
         # Controls
@@ -772,6 +780,48 @@ class AbastecimientoTab(ttk.Frame):
         ttk.Button(footer, text="✅ Autorizar Seleccionada", command=self.on_autorizar).pack(side="right", padx=5)
         ttk.Button(footer, text="❌ Rechazar", command=self.on_rechazar).pack(side="right", padx=5)
 
+    def _setup_tab_pendientes(self, parent_frame):
+        """Configura la UI para la pestaña de sugerencias pendientes de procesar."""
+        header = ttk.Frame(parent_frame)
+        header.pack(fill="x", padx=10, pady=5)
+        
+        ttk.Label(header, text="⏳ Transferencias Pendientes de Procesar", font=("Helvetica", 12, "bold")).pack(side="left")
+        ttk.Button(header, text="🔄 Refrescar", command=self.refresh_pendientes).pack(side="right")
+        
+        # Treeview para pendientes
+        tree_frame = ttk.Frame(parent_frame)
+        tree_frame.pack(fill="both", expand=True, padx=10, pady=5)
+        
+        columns = ("id", "producto", "destino", "origen", "cantidad", "stock_dest", "fecha")
+        self.tree_pend = ttk.Treeview(tree_frame, columns=columns, show="headings")
+        
+        self.tree_pend.heading("id", text="ID")
+        self.tree_pend.heading("producto", text="Producto")
+        self.tree_pend.heading("destino", text="Destino")
+        self.tree_pend.heading("origen", text="Origen Sug.")
+        self.tree_pend.heading("cantidad", text="Cant.")
+        self.tree_pend.heading("stock_dest", text="Stock Dest.")
+        self.tree_pend.heading("fecha", text="Fecha Aprobación")
+        
+        self.tree_pend.column("id", width=40)
+        self.tree_pend.column("producto", width=120)
+        self.tree_pend.column("destino", width=100)
+        self.tree_pend.column("origen", width=100)
+        self.tree_pend.column("cantidad", width=60)
+        self.tree_pend.column("stock_dest", width=60)
+        self.tree_pend.column("fecha", width=120)
+        
+        self.tree_pend.pack(side="left", fill="both", expand=True)
+        
+        scrolly = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree_pend.yview)
+        self.tree_pend.configure(yscrollcommand=scrolly.set)
+        scrolly.pack(side="right", fill="y")
+        
+        footer = ttk.Frame(parent_frame)
+        footer.pack(fill="x", padx=10, pady=10)
+        
+        ttk.Button(footer, text="📊 Exportar a Excel", command=self.exportar_pendientes).pack(side="right", padx=5)
+
     def refresh_autorizaciones(self):
         """Carga las sugerencias pendientes de autorización."""
         for i in self.tree_auto.get_children():
@@ -790,6 +840,63 @@ class AbastecimientoTab(ttk.Frame):
                 self.tree_auto.insert("", "end", values=r)
         except Exception as e:
             logger.error(f"Error refrescando autorizaciones: {e}")
+
+    def refresh_pendientes(self):
+        """Carga las sugerencias que ya fueron aprobadas pero no procesadas."""
+        for i in self.tree_pend.get_children():
+            self.tree_pend.delete(i)
+            
+        try:
+            query = """
+                SELECT id, producto_codigo, sucursal_destino, sucursal_origen_sugerida, 
+                       cantidad_sugerida, stock_actual, fecha_modificacion
+                FROM pal_sugerencias_transferencia
+                WHERE estado = 'aprobada'
+                ORDER BY fecha_modificacion DESC
+            """
+            rows = self.app.db_manager.fetch_data(query)
+            for r in rows:
+                self.tree_pend.insert("", "end", values=r)
+        except Exception as e:
+            logger.error(f"Error refrescando pendientes: {e}")
+
+    def exportar_pendientes(self):
+        """Exporta las transferencias pendientes a Excel."""
+        items = self.tree_pend.get_children()
+        if not items:
+            messagebox.showwarning("Atención", "No hay transferencias pendientes para exportar.")
+            return
+
+        from tkinter import filedialog
+        from datetime import datetime
+        import openpyxl
+        
+        default_name = f"Transferencias_Pendientes_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+        filename = filedialog.asksaveasfilename(
+            defaultextension=".xlsx",
+            filetypes=[("Excel files", "*.xlsx")],
+            initialfile=default_name
+        )
+        
+        if not filename:
+            return
+
+        try:
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "Pendientes"
+            
+            headers = ["ID", "Producto", "Destino", "Origen", "Cantidad", "Stock Destino", "Fecha Aprobación"]
+            ws.append(headers)
+            
+            for item in items:
+                values = self.tree_pend.item(item)['values']
+                ws.append(values)
+                
+            wb.save(filename)
+            messagebox.showinfo("Éxito", f"Reporte exportado correctamente a:\n{filename}")
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo exportar el reporte: {e}")
 
     def on_autorizar(self):
         """Abre diálogo para autorizar la sugerencia seleccionada."""
@@ -878,11 +985,13 @@ class AbastecimientoTab(ttk.Frame):
         if self.sede_combo:
             self.sede_combo['values'] = sedes_list
             
-        # Si la pestaña de autorizaciones está visible, refrescarla
+        # Si las pestañas secundarias están visibles, refrescarlas
         try:
             current_tab = self.notebook.tab(self.notebook.select(), "text")
             if current_tab == "Autorizaciones":
                 self.refresh_autorizaciones()
+            elif current_tab == "Pendientes de Procesar":
+                self.refresh_pendientes()
         except:
             pass
             

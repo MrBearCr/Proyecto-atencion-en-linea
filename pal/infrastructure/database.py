@@ -2106,9 +2106,9 @@ class DatabaseManager:
                     t.COD_PRINCIPAL,
                     p.N_Total,
                     pr.C_DESCRI,
-                    pr.C_DEPARTAMENTO,
-                    pr.C_GRUPO,
-                    pr.C_SUBGRUPO,
+                    ISNULL(md.C_DESCRIPCIO, pr.C_DEPARTAMENTO),
+                    ISNULL(mg.C_DESCRIPCIO, pr.C_GRUPO),
+                    ISNULL(ms.C_DESCRIPCIO, pr.C_SUBGRUPO),
                     pr.c_marca,
                     t.CANTIDAD
                 FROM
@@ -2117,6 +2117,12 @@ class DatabaseManager:
                     MA_TRANSACCION t WITH (NOLOCK) ON p.C_NUMERO = t.C_numero
                 LEFT JOIN
                     MA_PRODUCTOS pr WITH (NOLOCK) ON t.COD_PRINCIPAL = pr.C_CODIGO
+                LEFT JOIN
+                    MA_DEPARTAMENTOS md WITH (NOLOCK) ON pr.C_DEPARTAMENTO = md.C_CODIGO
+                LEFT JOIN
+                    MA_GRUPOS mg WITH (NOLOCK) ON pr.C_GRUPO = mg.C_CODIGO
+                LEFT JOIN
+                    MA_SUBGRUPOS ms WITH (NOLOCK) ON pr.C_SUBGRUPO = ms.C_CODIGO
                 WHERE
                     {where_sql}
                 ORDER BY

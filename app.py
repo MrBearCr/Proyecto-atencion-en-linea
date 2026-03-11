@@ -671,50 +671,54 @@ class DatabaseApp:
                 self._rebuild_effective_views()
                 self.root.after(0, self.aplicar_filtro_stock)
                 
-                # POPUP AUTOMÁTICO: Informar si hay quiebres críticos detectados
-                if self.cached_alertas and len(self.cached_alertas) > 0:
-                    # Mostrar alerta en el display de alertas
-                    if hasattr(self, 'alerts_display_label') and self.alerts_display_label.winfo_exists():
-                        self.alerts_display_label.config(text="🚨 Alerta: Quiebres de stock")
-                        self.alerts_display_label.pack(side=tk.LEFT, padx=10)
-                        self.toggle_stock_blink()
-
-                    # Agregar notificación al Centro de Notificaciones
-                    if hasattr(self, 'notification_manager') and self.notification_manager:
-                        try:
-                            self.notification_manager.add_notification(
-                                title="🚨 Alerta de Quiebres de Stock",
-                                message=f"Se detectaron {len(self.cached_alertas)} productos en quiebre de stock. Revisa los detalles para más información.",
-                                priority=NotificationPriority.URGENT,
-                                module="STOCK",
-                                modulo_ruta="stock",
-                                accion_etiqueta="Ver Quiebres"
-                            )
-                            # Actualizar display de alertas
-                            self.root.after(100, self._update_alerts_display)
-                        except Exception as e:
-                            self.log(f"Error agregando notificación de quiebres: {e}", "WARNING")
-
-                    # Lógica de revisión: Solo abrir popup si los datos cambiaron (ID diferente)
-                    import hashlib
-                    codigos_actuales = "".join(sorted([str(q[0]) for q in self.cached_alertas]))
-                    current_id = hashlib.md5(codigos_actuales.encode()).hexdigest()
-                    
-                    last_id = getattr(self, 'quiebre_revisado_id', None)
-                    if current_id != last_id:
-                        self.abrir_popup_quiebres()
-                    else:
-                        self.log("ℹ️ Quiebres detectados pero ya fueron revisados previamente.", "DEBUG")
-                else:
-                    # Ocultar alerta si no hay quiebres
-                    if hasattr(self, 'alerts_display_label') and self.alerts_display_label.winfo_exists():
-                        self.alerts_display_label.pack_forget()
+                self._mostrar_alertas_stock_ui()
                 
                 self.log(f"Quiebres de stock actualizados automáticamente ({len(self.cached_alertas)} encontrados)", "INFO")
 
         except Exception as e:
             self.log(f"Error al actualizar alertas: {e}", "ERROR")
-    
+
+    def _mostrar_alertas_stock_ui(self):
+        """Muestra popup y alerta visual si hay quiebres de stock en self.cached_alertas"""
+        # POPUP AUTOMÁTICO: Informar si hay quiebres críticos detectados
+        if hasattr(self, 'cached_alertas') and self.cached_alertas and len(self.cached_alertas) > 0:
+            # Mostrar alerta en el display de alertas
+            if hasattr(self, 'alerts_display_label') and self.alerts_display_label.winfo_exists():
+                self.alerts_display_label.config(text="🚨 Alerta: Quiebres de stock")
+                self.alerts_display_label.pack(side=tk.LEFT, padx=10)
+                self.toggle_stock_blink()
+
+            # Agregar notificación al Centro de Notificaciones
+            if hasattr(self, 'notification_manager') and self.notification_manager:
+                try:
+                    self.notification_manager.add_notification(
+                        title="🚨 Alerta de Quiebres de Stock",
+                        message=f"Se detectaron {len(self.cached_alertas)} productos en quiebre de stock. Revisa los detalles para más información.",
+                        priority=NotificationPriority.URGENT,
+                        module="STOCK",
+                        modulo_ruta="stock",
+                        accion_etiqueta="Ver Quiebres"
+                    )
+                    # Actualizar display de alertas
+                    self.root.after(100, self._update_alerts_display)
+                except Exception as e:
+                    self.log(f"Error agregando notificación de quiebres: {e}", "WARNING")
+
+            # Lógica de revisión: Solo abrir popup si los datos cambiaron (ID diferente)
+            import hashlib
+            codigos_actuales = "".join(sorted([str(q[0]) for q in self.cached_alertas]))
+            current_id = hashlib.md5(codigos_actuales.encode()).hexdigest()
+            
+            last_id = getattr(self, 'quiebre_revisado_id', None)
+            if current_id != last_id:
+                self.abrir_popup_quiebres()
+            else:
+                self.log("ℹ️ Quiebres detectados pero ya fueron revisados previamente.", "DEBUG")
+        else:
+            # Ocultar alerta si no hay quiebres
+            if hasattr(self, 'alerts_display_label') and self.alerts_display_label.winfo_exists():
+                self.alerts_display_label.pack_forget()
+
     def abrir_popup_quiebres(self):
         """Abre el popup de quiebres manualmente desde la alerta o el menú"""
         if not self.modules_enabled.get("stock", False):
@@ -5752,6 +5756,11 @@ class DatabaseApp:
                 # Esto se ejecuta en hilo principal para actualizar UI
                 pass  # search_records ya se ejecutó antes
                 
+            # Renderizar alertas iniciales si el hilo paralelo fue exitoso
+            if (self.modules_enabled.get("stock", False) and 
+                resultados.get("stock_alerts", {}).get("status") == "success"):
+                self._mostrar_alertas_stock_ui()
+                
         except Exception as e:
             self.log(f"Error en tareas post-inicialización: {e}", "ERROR")
     
@@ -6461,16 +6470,22 @@ class DatabaseApp:
             server_enc = config['Database'].get('server', '')
             database_enc = config['Database'].get('database', '')
             user_enc = config['Database'].get('user', '')
+            pass_enc = config['Database'].get('password', '')
 
             # Desencriptar solo si existen datos
             server = self.cred_manager.decrypt(server_enc) if server_enc else ''
             database = self.cred_manager.decrypt(database_enc) if database_enc else ''
             user = self.cred_manager.decrypt(user_enc) if user_enc else ''
+            password = self.cred_manager.decrypt(pass_enc) if pass_enc else None
+            
+            if password:
+                self.cred_manager.store_temp_password(password)
 
             return {
                 'server': server,
                 'database': database,
-                'user': user
+                'user': user,
+                'password': password
             }
         except Exception as e:
             # Mostrar error usando ErrorCode en la interfaz
@@ -6550,7 +6565,7 @@ class DatabaseApp:
             server = settings.get('server')
             database = settings.get('database')
             user = settings.get('user')
-            password = self.cred_manager.get_temp_password()
+            password = self.cred_manager.get_temp_password() or settings.get('password') or ''
             api_token = self.cred_manager.get_whatsapp_token()
 
             if server and database:
@@ -8110,7 +8125,7 @@ class DatabaseApp:
                 self._reset_session_on_db_change()
 
             if self.db_manager.connect(server, database, user, password):
-                self.save_connection_settings(server, database, user, token)
+                self.save_connection_settings(server, database, user, password, token)
                 self.update_status('connected', server=server, api_token=token)
                 # Inicializar servicios de seguridad
                 from pal.core.audit_db import AuditDB
@@ -9088,7 +9103,7 @@ class DatabaseApp:
         else:
             self.pwd_entry.config(show="*")
 
-    def save_connection_settings(self, server: str, database: str, user: str, token: str = None):
+    def save_connection_settings(self, server: str, database: str, user: str, password: str = None, token: str = None):
         """Guarda la configuración en el archivo .ini"""
         try:
             config = configparser.ConfigParser()
@@ -9105,6 +9120,8 @@ class DatabaseApp:
             config['Database']['server'] = self.cred_manager.encrypt(server)
             config['Database']['database'] = self.cred_manager.encrypt(database)
             config['Database']['user'] = self.cred_manager.encrypt(user)
+            if password is not None:
+                config['Database']['password'] = self.cred_manager.encrypt(password)
             
             # Escribir archivo
             with open(CONFIG_FILE, 'w') as configfile:

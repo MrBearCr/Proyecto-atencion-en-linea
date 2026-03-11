@@ -849,10 +849,10 @@ class AbastecimientoTab(ttk.Frame):
         try:
             query = """
                 SELECT id, producto_codigo, sucursal_destino, sucursal_origen_sugerida, 
-                       cantidad_sugerida, stock_actual, fecha_modificacion
+                       cantidad_sugerida, stock_actual, fecha_autorizacion
                 FROM pal_sugerencias_transferencia
                 WHERE estado = 'aprobada'
-                ORDER BY fecha_modificacion DESC
+                ORDER BY fecha_autorizacion DESC
             """
             rows = self.app.db_manager.fetch_data(query)
             for r in rows:

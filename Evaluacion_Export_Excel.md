@@ -6,6 +6,8 @@ Este documento analiza la arquitectura actual de exportación a Excel en el proy
 
 Actualmente, el sistema utiliza **`openpyxl`** de forma directa y procedimental en `pal/services/exports.py`.
 
+> Nota de consistencia: en algunas conversaciones se hace referencia a `pal/services/export.py`, pero el archivo real en el repositorio es `pal/services/exports.py`.
+
 ### Fortalezas del Enfoque Actual
 - **Personalización Extrema**: Permite control total sobre cada celda, formatos condicionales complejos, combinación de celdas (`merged_cells`) y estilos específicos de bordes y colores.
 - **Gráficos Nativos**: Implementa `openpyxl.chart` (PieChart, BarChart) para generar gráficos interactivos dentro de las hojas de Excel.
@@ -57,3 +59,27 @@ Para este proyecto, se recomienda un **enfoque híbrido gradual**:
 
 ---
 **Elaborado por Antigravity AI**
+
+---
+
+## 5. Validación del plan contra el código real (`pal/services/exports.py`)
+
+Resultado general: **el diagnóstico del documento es mayormente correcto**, con algunas precisiones importantes.
+
+### 5.1 Hallazgos validados
+
+- ✅ **Uso intensivo y directo de `openpyxl`**: el módulo importa `Workbook`, estilos, reglas de formato condicional y `Table` directamente.
+- ✅ **Código de gran tamaño y complejidad**: `pal/services/exports.py` tiene ~2800 líneas y contiene múltiples funciones de exportación extensas.
+- ✅ **Lógica de negocio acoplada en la exportación**: durante el renderizado se calculan campos como "Estado Stock" y se mezclan consultas SQL, reglas de negocio y formato Excel.
+- ✅ **Formato avanzado y “premium”**: se usan merges, tablas, estilos, anchos de columna, formato condicional y hojas de resumen.
+- ✅ **Gráficos embebidos**: se importan y construyen `PieChart` y `BarChart` con `openpyxl.chart`.
+
+### 5.2 Ajustes/recomendaciones al plan
+
+- ⚠️ **Corregir naming del archivo**: usar siempre `pal/services/exports.py` para evitar confusión en tareas futuras.
+- ⚠️ **Reducir expectativa de “migración rápida”**: dado el nivel de acoplamiento (datos + formato + negocio + gráficos), la reducción de código con Pandas puede ser alta en la capa de datos, pero no necesariamente en la capa de presentación final.
+- ⚠️ **Aclarar el rol de `dataframe_to_rows`**: aunque está importado, el flujo dominante actual sigue siendo escritura celda a celda; esto refuerza la recomendación de migración gradual por dominios/reporte.
+
+### 5.3 Conclusión de la evaluación
+
+El plan es **técnicamente sólido en su recomendación principal** (enfoque híbrido y gradual), y está **alineado con la realidad del código**. La principal mejora necesaria es de precisión operativa: referenciar el archivo correcto y explicitar que la complejidad de estilos/gráficos limita una migración total inmediata.

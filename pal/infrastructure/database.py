@@ -2058,10 +2058,23 @@ class DatabaseManager:
         """
         import datetime
         
-        # 1. Obtener Factores de la BD Principal (self)
-        # Ampliamos un poco el rango de años por si acaso
+        # 1. Obtener Factores y Metadatos de la BD Principal (self)
         factors_dict = self._get_factors_dict_for_range(fecha_inicio.year, fecha_fin.year)
         
+        # Cargar nombres de departamentos, grupos y subgrupos como mapeos (VAD10 -> Python)
+        try:
+            depts_raw = self.fetch_data("SELECT C_CODIGO, C_DESCRIPCIO FROM MA_DEPARTAMENTOS WITH (NOLOCK)")
+            dept_map = {str(c).strip(): str(d).strip() for c, d in depts_raw if c}
+            
+            groups_raw = self.fetch_data("SELECT C_CODIGO, C_DESCRIPCIO FROM MA_GRUPOS WITH (NOLOCK)")
+            group_map = {str(c).strip(): str(d).strip() for c, d in groups_raw if c}
+            
+            subs_raw = self.fetch_data("SELECT C_CODIGO, C_DESCRIPCIO FROM MA_SUBGRUPOS WITH (NOLOCK)")
+            sub_map = {str(c).strip(): str(d).strip() for c, d in subs_raw if c}
+        except Exception as e:
+            self._log(f"Error cargando metadatos maestros: {e}", "WARNING")
+            dept_map, group_map, sub_map = {}, {}, {}
+
         # Último factor conocido (fallback)
         last_factor = 1.0
         if factors_dict:
@@ -2097,6 +2110,7 @@ class DatabaseManager:
                 
             where_sql = " AND ".join(where_clauses)
             
+            # Query modificado: Omitimos JOINs a tablas de metadatos faltantes en sede
             query = f"""
                 SELECT
                     p.C_RIF,
@@ -2106,9 +2120,9 @@ class DatabaseManager:
                     t.COD_PRINCIPAL,
                     p.N_Total,
                     pr.C_DESCRI,
-                    ISNULL(md.C_DESCRIPCIO, pr.C_DEPARTAMENTO),
-                    ISNULL(mg.C_DESCRIPCIO, pr.C_GRUPO),
-                    ISNULL(ms.C_DESCRIPCIO, pr.C_SUBGRUPO),
+                    pr.C_DEPARTAMENTO, -- Traemos los códigos para mapear en Python
+                    pr.C_GRUPO,
+                    pr.C_SUBGRUPO,
                     pr.c_marca,
                     t.CANTIDAD
                 FROM
@@ -2117,12 +2131,6 @@ class DatabaseManager:
                     MA_TRANSACCION t WITH (NOLOCK) ON p.C_NUMERO = t.C_numero
                 LEFT JOIN
                     MA_PRODUCTOS pr WITH (NOLOCK) ON t.COD_PRINCIPAL = pr.C_CODIGO
-                LEFT JOIN
-                    MA_DEPARTAMENTOS md WITH (NOLOCK) ON pr.C_DEPARTAMENTO = md.C_CODIGO
-                LEFT JOIN
-                    MA_GRUPOS mg WITH (NOLOCK) ON pr.C_GRUPO = mg.C_CODIGO
-                LEFT JOIN
-                    MA_SUBGRUPOS ms WITH (NOLOCK) ON pr.C_SUBGRUPO = ms.C_CODIGO
                 WHERE
                     {where_sql}
                 ORDER BY
@@ -2135,9 +2143,25 @@ class DatabaseManager:
                 
                 # Procesar en Python
                 for r in chunk_rows:
-                    # r: (rif, nombre, numero, fecha, prod_cod, total_bs, desc, dept, grupo, sub, marca, cantidad)
+                    # r: (rif, nombre, numero, fecha, prod_cod, total_bs, desc, dept_code, group_code, sub_code, marca, cantidad)
                     fecha = r[3]
                     total_bs = float(r[5]) if r[5] else 0.0
+                    
+                    # Resolver nombres desde mapeos de la BD Principal
+                    d_code = str(r[7]).strip() if r[7] else ""
+                    g_code = str(r[8]).strip() if r[8] else ""
+                    s_code = str(r[9]).strip() if r[9] else ""
+                    
+                    dept_name = dept_map.get(d_code, d_code)
+                    group_name = group_map.get(g_code, g_code)
+                    sub_name = sub_map.get(s_code, s_code)
+                    
+                    # Reconstruir la fila con los nombres resueltos para la UI
+                    # (rif, name, num, date, prod_code, total_bs, desc, dept_name, group_name, sub_name, marca, qty)
+                    row_with_names = (
+                        r[0], r[1], r[2], r[3], r[4], r[5], r[6],
+                        dept_name, group_name, sub_name, r[10], r[11]
+                    )
                     
                     # Buscar factor
                     key = (fecha.year, fecha.month, fecha.day)
@@ -2156,8 +2180,8 @@ class DatabaseManager:
                     total_usd = total_bs / factor if factor else 0.0
                     
                     # Estructura de retorno compatible con UI:
-                    # (rif, name, num, date, item_cod, total_bs, total_usd, desc, dept, grupo, sub, marca, qty)
-                    all_rows.append(tuple(r) + (total_usd,))
+                    # (rif, name, num, date, item_cod, total_bs, desc, dept, grupo, sub, marca, qty, total_usd)
+                    all_rows.append(row_with_names + (total_usd,))
                     
             except Exception as e:
                 self._log(f"Error procesando chunk: {e}", "ERROR")

@@ -338,7 +338,14 @@ class ClientesReportesTab(ttk.Frame):
             
         try:
             sede_nombre = self.selected_sede_config['nombre_sede'] if self.selected_sede_config else "Desconocida"
-            num_rows = export_clientes_reporte_excel(filename, self.current_report_data, sede_nombre)
+            num_rows = export_clientes_reporte_excel(
+                filename, 
+                self.current_report_data, 
+                sede_nombre,
+                db_manager=self.controller.db_manager,
+                fecha_inicio=self.fecha_inicio_entry.get_date(),
+                fecha_fin=self.fecha_fin_entry.get_date()
+            )
             
             messagebox.showinfo("Exportación Exitosa", f"Se han exportado {num_rows} registros a:\n{filename}")
             

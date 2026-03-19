@@ -86,16 +86,19 @@ class ClientesReportesTab(ttk.Frame):
         tree_frame = ttk.Frame(self)
         tree_frame.pack(side=tk.BOTTOM, fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-        # Configurar estilo para selección highlight
+        # Configurar estilo para selección highlight y altura de fila (RI style)
         style = ttk.Style()
-        style.configure('Clientes.Treeview', rowheight=22)
+        style.configure('Clientes.Treeview', font=('', 11), rowheight=25)
         style.map('Clientes.Treeview',
                   background=[('selected', '#0D47A1')],
                   foreground=[('selected', 'white')])
 
         # Definir las columnas para el Treeview (para elementos padre)
         columns = ["RIF/ID", "Nombre Cliente", "Factura", "Fecha", "N° Items", "Total USD"]
-        self.report_tree = ttk.Treeview(tree_frame, columns=columns, show='headings', style='Clientes.Treeview')
+        self.report_tree = ttk.Treeview(tree_frame, columns=columns, show='tree headings', style='Clientes.Treeview')
+        
+        # Configurar columna de árbol (#0) para expandir
+        self.report_tree.column("#0", width=30, stretch=tk.NO)
         
         # Configurar encabezados y columnas
         for col in columns:
@@ -119,8 +122,23 @@ class ClientesReportesTab(ttk.Frame):
         vsb.grid(row=0, column=1, sticky="ns")
         hsb.grid(row=1, column=0, sticky="ew")
 
+        # Configurar tags para filas de productos (hijos) - Estilo RI
+        self.report_tree.tag_configure('prod_child', background='#F0F0F0', foreground='#555555')
+        
+        # Vincular doble clic para expandir/colapsar
+        self.report_tree.bind('<Double-1>', self._on_double_click)
+
         tree_frame.grid_rowconfigure(0, weight=1)
         tree_frame.grid_columnconfigure(0, weight=1)
+
+    def _on_double_click(self, event):
+        """Maneja el doble clic para expandir o colapsar una factura."""
+        item = self.report_tree.identify_row(event.y)
+        if item:
+            if self.report_tree.item(item, "open"):
+                self.report_tree.item(item, open=False)
+            else:
+                self.report_tree.item(item, open=True)
 
     def load_sedes_config(self):
         """Carga la configuración de sedes desde la base de datos central."""
@@ -300,11 +318,13 @@ class ClientesReportesTab(ttk.Frame):
             parent_iid = self.report_tree.insert("", tk.END, values=parent_values, open=False) 
             for p_tuple in invoice_data['products_full']:
                 # p_tuple: (code, desc, dept, grupo, sub, marca, qty)
-                # Mostramos [Cant] x Código - Descripción
+                # Mostramos [Cant] x Código - Descripción alineado con el nombre (segunda columna)
                 p_code, p_desc, p_qty = p_tuple[0], p_tuple[1], p_tuple[6]
                 qty_str = f"{p_qty:g}" if p_qty is not None else "0" # g format remove trailing zeros
-                display_text = f"{qty_str} x {p_code} - {p_desc if p_desc else ''}".strip()
-                self.report_tree.insert(parent_iid, tk.END, values=(display_text, "", "", "", "", ""))
+                display_text = f"◈ {qty_str} x {p_code} - {p_desc if p_desc else ''}"
+                # Usamos el tag 'prod_child' para el estilo grisáceo similar a RI
+                # El formato RI suele poner la info en la segunda columna (values[1])
+                self.report_tree.insert(parent_iid, tk.END, values=("", display_text, "", "", "", ""), tags=('prod_child',))
 
         messagebox.showinfo("Reporte Generado", f"Se encontraron {len(invoices_list)} facturas.")
 

@@ -45,7 +45,7 @@ from pal.core.config_manager import ConfigManager
 CONFIG_FILE = 'db_config.ini'
 LICENSE_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTdAdOg6pI7tOF-9UdFDzw0P5aSpNRc-jGIYHwOHmXb7qqOtag9QTYAi4JU0U2VoIZLd_TjvK_7cxX9/pub?output=csv"
 LICENSE_CLIENT_NAME = "PALPY"
-APP_VERSION = "1.6.5" # Versión actual de la aplicación
+APP_VERSION = "1.6.71" # Versión actual de la aplicación
 UPDATE_URL_DEFAULT = "https://raw.githubusercontent.com/MrBearCr/nexus/main/updates"  # URL base por defecto para actualizaciones (formato raw)
 
 def load_update_url():
@@ -724,18 +724,23 @@ class DatabaseApp:
         if not self.modules_enabled.get("stock", False):
             return
 
-        if hasattr(self, 'cached_alertas') and self.cached_alertas:
-            from pal.ui.popups import StockBreakPopup
-            # Pasar la instancia de la app para poder llamar a marcar_revisado
-            popup = StockBreakPopup(self.root, self.cached_alertas)
-            # Modificar el botón del popup para que llame a la revisión
-            if hasattr(popup, 'top'):
-                # Buscamos el botón de cierre para inyectar la lógica de revisión
-                for widget in popup.top.winfo_children():
-                    if isinstance(widget, tk.Frame): # El footer
-                        for btn in widget.winfo_children():
-                            if isinstance(btn, tk.Button) and "Entendido" in btn.cget("text"):
-                                btn.configure(command=lambda: self.marcar_quiebres_como_revisados(popup))
+        from pal.ui.popups.stock_break_popup import show_stock_break_popup
+        # Usar los códigos de quiebre de stock actuales si están disponibles
+        new_codes = getattr(self, 'new_stock_break_codes', set())
+        show_stock_break_popup(self.root, self.cached_alertas, new_codes=new_codes)
+        
+        # Recuperar la instancia del popup para inyectar la lógica de cierre (marcar como revisado)
+        from pal.ui.popups.stock_break_popup import _active_popup
+        popup = _active_popup
+        
+        # Modificar el botón del popup para que llame a la revisión
+        if popup and hasattr(popup, 'top'):
+            # Buscamos el botón de cierre para inyectar la lógica de revisión
+            for widget in popup.top.winfo_children():
+                if isinstance(widget, tk.Frame): # El footer
+                    for btn in widget.winfo_children():
+                        if isinstance(btn, tk.Button) and "Entendido" in btn.cget("text"):
+                            btn.configure(command=lambda: self.marcar_quiebres_como_revisados(popup))
 
     def marcar_quiebres_como_revisados(self, popup_instance):
         """Marca los quiebres actuales como revisados para no molestar con el popup"""
@@ -768,7 +773,12 @@ class DatabaseApp:
 
     def _handle_alert_click(self):
         """Maneja el clic en el display de alertas."""
-        # Obtener la primera notificación urgente/warning no leída
+        # Si hay quiebres de stock activos, abrir el popup directamente (prioridad)
+        if hasattr(self, 'cached_alertas') and self.cached_alertas:
+            self.abrir_popup_quiebres()
+            return
+
+        # Si no hay quiebres, ver si hay otras notificaciones urgentes
         if hasattr(self, 'notification_manager') and self.notification_manager:
             notifications = self.notification_manager.get_notifications()
             for notif in notifications:
@@ -777,9 +787,6 @@ class DatabaseApp:
                     if notif.modulo_ruta and hasattr(self, 'navigate_to_module'):
                         self.navigate_to_module(notif.modulo_ruta)
                     return
-        
-        # Si no hay notificación específica, abrir popup de quiebres
-        self.abrir_popup_quiebres()
 
     def _update_alerts_display(self):
         """Actualiza el display de alertas basado en notificaciones."""

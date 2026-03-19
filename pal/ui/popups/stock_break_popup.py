@@ -7,21 +7,29 @@ class StockBreakPopup:
     Ventana emergente moderna para mostrar alertas de quiebre de stock (Lost Sales).
     Agrupa los quiebres por sede usando pestañas.
     """
-    def __init__(self, parent, data_list):
+    def __init__(self, parent, data_list, new_codes=None):
         self.top = tk.Toplevel(parent)
         self.top.title("⚠️ Alertas de Quiebre de Stock (Ventas Perdidas)")
         self.top.geometry("1000x650")
         self.top.minsize(900, 500)
         self.top.attributes("-topmost", True)
         
+        self.new_codes = new_codes or set()
+        
         # Agrupar lista de tuplas por Sede (index 2)
         # Formato esperado: (codigo, descripcion, sede, unidades_perdidas, dias_quiebre, u_compra, u_venta)
         self.quiebres_por_sede = {}
+        self.nuevos_quiebres = []
+        
         for q in data_list:
             sede = q[2]
             if sede not in self.quiebres_por_sede:
                 self.quiebres_por_sede[sede] = []
             self.quiebres_por_sede[sede].append(q)
+            
+            # Verificar si es nuevo
+            if str(q[0]).strip() in self.new_codes:
+                self.nuevos_quiebres.append(q)
 
         # Centrar ventana
         self.top.update_idletasks()
@@ -82,6 +90,13 @@ class StockBreakPopup:
         self.notebook = ttk.Notebook(self.top)
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
+        # 1. Pestaña de NUEVOS (si existen)
+        if self.nuevos_quiebres:
+            tab_nuevos = ttk.Frame(self.notebook)
+            self.notebook.add(tab_nuevos, text=f" NUEVOS ({len(self.nuevos_quiebres)}) ")
+            self.create_quiebre_table(tab_nuevos, self.nuevos_quiebres)
+
+        # 2. Pestañas por Sede
         for sede_name, quiebres in self.quiebres_por_sede.items():
             if not quiebres:
                 continue
@@ -117,7 +132,7 @@ class StockBreakPopup:
         table_frame = tk.Frame(container)
         table_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-        cols = ("codigo", "descripcion", "perdidas", "dias", "u_liquidacion", "u_venta")
+        cols = ("codigo", "descripcion", "sede", "perdidas", "dias", "u_liquidacion", "u_venta")
         tree = ttk.Treeview(
             table_frame, 
             columns=cols, 
@@ -132,13 +147,15 @@ class StockBreakPopup:
         
         tree.heading("codigo", text="Código")
         tree.heading("descripcion", text="Descripción")
+        tree.heading("sede", text="Sede")
         tree.heading("perdidas", text="Venta Perdida")
         tree.heading("dias", text="Días en 0")
         tree.heading("u_liquidacion", text="Últ. Liquid.")
         tree.heading("u_venta", text="Última Venta")
         
         tree.column("codigo", width=100, anchor=tk.CENTER)
-        tree.column("descripcion", width=300, anchor=tk.W)
+        tree.column("descripcion", width=250, anchor=tk.W)
+        tree.column("sede", width=100, anchor=tk.CENTER)
         tree.column("perdidas", width=100, anchor=tk.CENTER)
         tree.column("dias", width=80, anchor=tk.CENTER)
         tree.column("u_liquidacion", width=100, anchor=tk.CENTER)
@@ -147,6 +164,9 @@ class StockBreakPopup:
         tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         vsb.pack(side=tk.RIGHT, fill=tk.Y)
         
+        # Tags for highliting
+        tree.tag_configure('nuevo', background='#e8f5e9') # Verde suave
+
         # Insert data (formato tupla de app.py)
         # (codigo, descripcion, sede, unidades_perdidas, dias_quiebre, u_compra, u_venta)
         for q in data:
@@ -154,24 +174,28 @@ class StockBreakPopup:
                 unidades = int(round(float(q[3])))
             except (ValueError, TypeError):
                 unidades = 0
+            
+            codigo = str(q[0]).strip()
+            tags = ('nuevo',) if codigo in self.new_codes else ()
                 
             tree.insert("", tk.END, values=(
                 q[0], # codigo
                 q[1], # descripcion
+                q[2], # sede
                 f"{unidades}", # unidades perdidas (entero)
                 f"{q[4]} d", # dias quiebre
                 q[5].strftime("%Y-%m-%d") if q[5] and hasattr(q[5], 'strftime') else (q[5] if q[5] else "N/A"), # ultima liquidacion (q[5] is u_compra)
                 q[6].strftime("%Y-%m-%d") if q[6] and hasattr(q[6], 'strftime') else (q[6] if q[6] else "N/A") # ultima venta
-            ))
+            ), tags=tags)
 
 # Singleton helper to avoid multiple concurrent popups
 _active_popup = None
 
-def show_stock_break_popup(parent, quiebres_por_sede):
+def show_stock_break_popup(parent, quiebres_por_sede, new_codes=None):
     global _active_popup
     if _active_popup and _active_popup.top.winfo_exists():
         # Update existing popup? For now just bring to front
         _active_popup.top.lift()
         return
     
-    _active_popup = StockBreakPopup(parent, quiebres_por_sede)
+    _active_popup = StockBreakPopup(parent, quiebres_por_sede, new_codes)

@@ -317,16 +317,30 @@ class SplashScreen(tk.Toplevel):
                 ok, msg = self._login_handler(user, pwd)
                 def _done():
                     if ok:
-                        self.login_status.config(text="¡Bienvenido!", fg="green")
+                        self.login_status.config(text="¡Bienvenido!", fg="#10B981") # Use accent_color
                         self.login_success.set()
                     else:
-                        self.login_status.config(text=msg or "Credenciales inválidas", fg="red")
-                        self.btn_login.config(state=tk.NORMAL, bg=self.accent_color)
+                        # Clear password for security and feedback
+                        self.password.delete(0, tk.END)
+                        
+                        # Visual error feedback
+                        self.login_status.config(text=msg or "Credenciales inválidas", fg="#EF4444") # Red
+                        self.username.config(highlightbackground="#EF4444")
+                        self.password.config(highlightbackground="#EF4444")
+                        
+                        self.btn_login.config(state=tk.NORMAL, bg=self.brand_blue)
+                        
+                        # Reset border color after 2 seconds
+                        def reset_borders():
+                            if self.winfo_exists():
+                                self.username.config(highlightbackground=self.input_border)
+                                self.password.config(highlightbackground=self.input_border)
+                        self.after(2000, reset_borders)
                 self.after(0, _done)
             except Exception as e:
                 def _err():
-                    self.login_status.config(text=f"Error: {e}", fg="red")
-                    self.btn_login.config(state=tk.NORMAL, bg=self.accent_color)
+                    self.login_status.config(text=f"Error de sistema: {e}", fg="#EF4444")
+                    self.btn_login.config(state=tk.NORMAL, bg=self.brand_blue)
                 self.after(0, _err)
         Thread(target=_run, daemon=True).start()
 

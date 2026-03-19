@@ -715,7 +715,31 @@ class AbastecimientoTab(ttk.Frame):
 
         tk.Label(frame, text="Días de Stock Objetivo (Inventario):").grid(row=0, column=0, sticky=tk.W, pady=5)
         var_dias = tk.StringVar(value=str(global_params[1]))
-        tk.Entry(frame, textvariable=var_dias, width=10).grid(row=0, column=1, pady=5)
+        ent_dias = tk.Entry(frame, textvariable=var_dias, width=10)
+        ent_dias.grid(row=0, column=1, pady=5)
+
+        lbl_status_tag = tk.Label(frame, text="", font=("Segoe UI", 9, "bold"))
+        lbl_status_tag.grid(row=0, column=2, padx=10, sticky="w")
+
+        def update_status_tag(*args):
+            try:
+                val = int(var_dias.get())
+                if val < 25:
+                    txt, col = "Posible quiebre", "#d32f2f"
+                elif 25 <= val <= 59:
+                    txt, col = "Alerta Compra", "#ff9800"
+                elif 60 <= val <= 90:
+                    txt, col = "Optimo", "#4caf50"
+                elif 91 <= val <= 119:
+                    txt, col = "Critico", "#e53935"
+                else:
+                    txt, col = "Sobre Stock", "#9c27b0"
+                lbl_status_tag.config(text=f"({txt})", fg=col)
+            except:
+                lbl_status_tag.config(text="")
+
+        var_dias.trace_add("write", update_status_tag)
+        update_status_tag()
 
         tk.Label(frame, text="Umbral Autorización (Cantidad Máx):").grid(row=1, column=0, sticky=tk.W, pady=5)
         var_auto = tk.StringVar(value=str(global_params[3]))
@@ -837,7 +861,21 @@ class AbastecimientoTab(ttk.Frame):
             """
             rows = self.app.db_manager.fetch_data(query)
             for r in rows:
-                self.tree_auto.insert("", "end", values=r)
+                # Formatear datos para la UI
+                r_list = list(r)
+                # r_list[4] es cantidad_sugerida (Decimal)
+                # r_list[5] es stock_actual (Decimal)
+                # r_list[6] es fecha_generacion (datetime)
+                
+                try:
+                    r_list[4] = f"{float(r_list[4]):.2f}" if r_list[4] is not None else "0.00"
+                    r_list[5] = f"{float(r_list[5]):.2f}" if r_list[5] is not None else "0.00"
+                    if r_list[6] and hasattr(r_list[6], 'strftime'):
+                        r_list[6] = r_list[6].strftime("%Y-%m-%d %H:%M")
+                except:
+                    pass
+                    
+                self.tree_auto.insert("", "end", values=r_list)
         except Exception as e:
             logger.error(f"Error refrescando autorizaciones: {e}")
 
@@ -856,7 +894,16 @@ class AbastecimientoTab(ttk.Frame):
             """
             rows = self.app.db_manager.fetch_data(query)
             for r in rows:
-                self.tree_pend.insert("", "end", values=r)
+                # Formatear datos para la UI
+                r_list = list(r)
+                try:
+                    r_list[4] = f"{float(r_list[4]):.2f}" if r_list[4] is not None else "0.00"
+                    r_list[5] = f"{float(r_list[5]):.2f}" if r_list[5] is not None else "0.00"
+                    if r_list[6] and hasattr(r_list[6], 'strftime'):
+                        r_list[6] = r_list[6].strftime("%Y-%m-%d %H:%M")
+                except:
+                    pass
+                self.tree_pend.insert("", "end", values=r_list)
         except Exception as e:
             logger.error(f"Error refrescando pendientes: {e}")
 

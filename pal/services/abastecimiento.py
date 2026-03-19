@@ -79,7 +79,11 @@ class AbastecimientoService:
             # Convertir a dict para fácil acceso {categoria_id: (dias_stock, quiebre, auto, analisis)}
             # categoria_id=None es el global
             config_params = {p[0]: (p[1], p[2], p[3], p[4]) for p in params_db}
-            default_dias, default_quiebre, default_umbral, default_analisis = config_params.get(None, (7, 50, 10, 365))
+            default_dias, default_quiebre, default_umbral, default_analisis = config_params.get(None, (25, 50, 0, 365))
+            
+            # Aplicar valores por defecto si son 0 o None (según requerimiento: 25 días si es 0)
+            if not default_dias: default_dias = 25
+            if default_umbral is None: default_umbral = 0
 
             # 4a. Identificar CDTs (necesario antes para excluirlos del stock sede)
             cdts_pre = []
@@ -163,10 +167,10 @@ class AbastecimientoService:
                 return []
 
             # 8. Consultar datos críticos — búsqueda en cascada de períodos
-            # Obtenemos parámetros globales
-            params_vals = config_params.get(None, (30, 50, 10, 365))
-            dias_obj = float(params_vals[0] if params_vals[0] is not None else 30)
-            umbral_auto = float(params_vals[2] if params_vals[2] is not None else 10)
+            # Obtenemos parámetros globales (Default 25 días si es 0, umbral 0 = desactivado)
+            params_vals = config_params.get(None, (25, 50, 0, 365))
+            dias_obj = float(params_vals[0] if params_vals[0] else 25)
+            umbral_auto = float(params_vals[2] if params_vals[2] is not None else 0)
 
             # Ventanas en cascada: [N, 2N, 3N] — máximo = dias_obj × 3
             max_dias = int(dias_obj * 3)
@@ -296,7 +300,7 @@ class AbastecimientoService:
                                 "cantidad_sugerida": cantidad_a_mover,
                                 "stock_actual": stock_actual,
                                 "stock_origen": cdt_qty,
-                                "requiere_autorizacion": 1 if cantidad_a_mover > umbral_auto else 0,
+                                "requiere_autorizacion": 1 if es_rojo or (umbral_auto > 0 and cantidad_a_mover > umbral_auto) else 0,
                                 "es_rojo": es_rojo,
                                 "dias_stock_objetivo": dias_obj,
                                 "promedio_diario": round(promedio_diario, 4)
@@ -344,11 +348,21 @@ class AbastecimientoService:
                 logger.error("No hay CDTs configurados para el cálculo global.")
                 return []
 
-            # 2. Parámetros
+            # 2. Parámetros (Default 25 días si es 0, umbral 0 = desactivado)
             params_db = self.obtener_parametros()
             config_params = {p[0]: (p[1], p[2], p[3], p[4]) for p in params_db}
-            default_dias, _, _, _ = config_params.get(None, (30, 50, 10, 365))
-            dias_obj = float(default_dias)
+            default_dias, _, default_umbral, _ = config_params.get(None, (25, 50, 0, 365))
+            
+            dias_obj = float(default_dias if default_dias else 25)
+            umbral_auto = float(default_umbral if default_umbral is not None else 0)
+            
+            # 2a. Cargar Lista Roja para validación global
+            sql_rojos = "SELECT producto_codigo, sede_destino FROM pal_productos_no_trasladables WHERE activo = 1"
+            res_rojos = self.db_manager.fetch_data(sql_rojos)
+            dict_rojos = {}
+            for pr_cod, sd_dest in res_rojos:
+                if pr_cod not in dict_rojos: dict_rojos[pr_cod] = set()
+                dict_rojos[pr_cod].add(sd_dest)
 
             # 3. Obtener Stock en CDTs (de todos los productos que podrían necesitarse)
             # Para optimizar, primero buscamos qué productos tienen stock en CDT
@@ -465,15 +479,31 @@ class AbastecimientoService:
                 
                 if not demandas: continue
                 
-                # REGLA DE ORO: Distribución Proporcional
-                factor_ajuste = 1.0
+                # REGLA DE ORO: Si excede stock CDT -> Repartición por Peso de Ventas
                 if total_deficit > stock_cdt_disp:
-                    factor_ajuste = stock_cdt_disp / total_deficit
-                    logger.debug(f"Overflow para {codigo}: Deficit {total_deficit} > Disponible {stock_cdt_disp}. Ajuste: {factor_ajuste:.2f}")
+                    total_ventas_prod = sum(v_data.get('total', 0) for v_data in datos_ventas_global.get(codigo, {}).values())
+                    if total_ventas_prod > 0:
+                        for dem in demandas:
+                            v_data = datos_ventas_global.get(codigo, {}).get(dem['sede'], {})
+                            venta_sede = v_data.get('total', 0)
+                            ratio = venta_sede / total_ventas_prod
+                            dem['cantidad_sugerida'] = min(dem['deficit'], int(round(ratio * stock_cdt_disp)))
+                    else:
+                        # Fallback a proporcional por déficit si no hay ventas registradas
+                        factor_ajuste = stock_cdt_disp / total_deficit
+                        for dem in demandas:
+                            dem['cantidad_sugerida'] = int(dem['deficit'] * factor_ajuste)
+                else:
+                    for dem in demandas:
+                        dem['cantidad_sugerida'] = dem['deficit']
 
                 for dem in demandas:
-                    cantidad_sugerida = int(dem["deficit"] * factor_ajuste)
+                    cantidad_sugerida = dem["cantidad_sugerida"]
                     if cantidad_sugerida <= 0: continue
+                    
+                    # Validar si es ROJO para esta sede
+                    rojos_prod = dict_rojos.get(codigo, set())
+                    es_rojo = (dem["sede"] in rojos_prod) or (None in rojos_prod)
                     
                     sugerencias_finales.append({
                         "producto_codigo": codigo,
@@ -483,11 +513,11 @@ class AbastecimientoService:
                         "cantidad_sugerida": cantidad_sugerida,
                         "stock_actual": dem["stock_actual"],
                         "stock_origen": stock_cdt_disp,
-                        "requiere_autorizacion": 0, # Global suele ser CDT -> Sede, usualmente sin auto
-                        "es_rojo": False, # TODO: Verificar lista roja global
+                        "requiere_autorizacion": 1 if es_rojo or (umbral_auto > 0 and cantidad_sugerida > umbral_auto) else 0,
+                        "es_rojo": es_rojo,
                         "dias_stock_objetivo": dias_obj,
                         "promedio_diario": round(dem["promedio"], 4),
-                        "ajustado": factor_ajuste < 1.0
+                        "ajustado": total_deficit > stock_cdt_disp
                     })
             
             logger.info(f"Cálculo global finalizado. Sugerencias generadas: {len(sugerencias_finales)}")

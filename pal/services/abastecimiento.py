@@ -138,7 +138,12 @@ class AbastecimientoService:
             logger.info("Cargando productos rojos...")
             sql_rojos = "SELECT producto_codigo FROM pal_productos_no_trasladables WHERE (sede_destino = ? OR sede_destino IS NULL) AND activo = 1"
             res_rojos = self.db_manager.fetch_data(sql_rojos, (sede_destino,))
-            productos_rojos = {r[0] for r in res_rojos}
+            # Normalizar: quitar ceros a la izquierda y espacios
+            productos_rojos = set()
+            for r in res_rojos:
+                cod_norm = str(r[0]).strip().lstrip('0')
+                if not cod_norm: cod_norm = "0"
+                productos_rojos.add(cod_norm)
             logger.info(f"Productos rojos obtenidos: {len(productos_rojos)}")
 
             # 6. Identificar CDTs
@@ -153,16 +158,17 @@ class AbastecimientoService:
                 return []
             logger.info(f"CDTs identificados: {cdts}")
             
-            # 7. Cargar compromisos actuales para evitar duplicar sugerencias
+            # 7. Cargar compromisos actuales para evitar sobre-solicitar
             logger.info("Cargando compromisos...")
-            sql_comp = "SELECT producto_codigo FROM pal_sugerencias_transferencia WHERE sucursal_destino = ? AND estado IN ('pendiente', 'aprobada')"
+            sql_comp = "SELECT producto_codigo, cantidad_sugerida FROM pal_sugerencias_transferencia WHERE sucursal_destino = ? AND estado IN ('pendiente', 'aprobada')"
             res_comp = self.db_manager.fetch_data(sql_comp, (sede_destino,))
-            compromisos_activos = {c[0] for c in res_comp}
-            logger.info(f"Compromisos cargados: {len(compromisos_activos)}")
+            dict_compromisos = {}
+            for c_cod, c_qty in res_comp:
+                dict_compromisos[c_cod] = dict_compromisos.get(c_cod, 0) + float(c_qty)
+            logger.info(f"Compromisos cargados para {len(dict_compromisos)} productos")
 
-            # Solo procesamos productos que no tengan compromisos activos
-            # (YA NO filtramos los rojos aquí porque queremos mostrarlos en la UI)
-            codigos_filtrados = [item[0] for item in stock_dest if item[0] not in compromisos_activos]
+            # Ya NO filtramos codigos aquí, los procesaremos y restaremos en la fórmula de necesidad
+            codigos_filtrados = [item[0] for item in stock_dest]
             
             if not codigos_filtrados:
                 logger.info("No hay nuevos productos que requieran abastecimiento tras filtros.")
@@ -170,8 +176,9 @@ class AbastecimientoService:
 
             # 8. Consultar datos críticos — búsqueda en cascada de períodos
             # Obtenemos parámetros globales (Default 25 días si es 0, umbral 0 = desactivado)
-            params_vals = config_params.get(None, (25, 50, 0, 365))
+            params_vals = config_params.get(None, (25, 25, 0, 365))
             dias_obj = float(params_vals[0] if params_vals[0] else 25)
+            umb_quiebre = float(params_vals[1] if params_vals[1] else 25)
             umbral_auto = float(params_vals[2] if params_vals[2] is not None else 0)
 
             # Ventanas en cascada: [N, 2N, 3N] — máximo = dias_obj × 3
@@ -216,10 +223,12 @@ class AbastecimientoService:
                 desc_corta = str(item[3] or item[4] or "SIN DESCRIPCIÓN")
                 desc_larga = str(item[4] or "SIN DESCRIPCIÓN")
 
-                if codigo in compromisos_activos:
-                    continue
+                qty_compromiso = dict_compromisos.get(codigo, 0)
 
-                es_rojo = codigo in productos_rojos
+                # Normalización para check de Lista Roja
+                cod_norm = str(codigo).strip().lstrip('0')
+                if not cod_norm: cod_norm = "0"
+                es_rojo = cod_norm in productos_rojos
 
                 datos_ri = dict_fechas.get(codigo)
                 if not datos_ri:
@@ -256,18 +265,18 @@ class AbastecimientoService:
                 if stock_actual > 0 and dias_desde_ultima_venta > max_dias:
                     continue
 
-                # FILTRO: "Posible Quiebre" (< dias_obj días de cobertura)
+                # FILTRO: "Gatillo de Resurtido" (Solo si cobertura < umb_quiebre)
                 dias_para_quiebre = stock_actual / promedio_diario if promedio_diario > 0 else (0 if stock_actual <= 0 else 999)
 
-                if dias_para_quiebre >= dias_obj and not es_rojo:
+                if dias_para_quiebre >= umb_quiebre and not es_rojo:
                     continue
 
                 # Stock Ideal = promedio_diario × dias_obj × 1.25 (seguridad) × 1.15 (logistica)
                 stock_ideal_teorico = promedio_diario * dias_obj * 1.25 * 1.15
                 stock_ideal = max(0, int(round(stock_ideal_teorico)))
                 
-                # Necesidad = Ideal - Actual
-                necesidad = stock_ideal - stock_actual
+                # Necesidad = Ideal - Actual - Comprometido
+                necesidad = stock_ideal - stock_actual - qty_compromiso
 
                 if necesidad > 0:
                     # Redondear hacia arriba para reabastecimiento
@@ -368,8 +377,12 @@ class AbastecimientoService:
             res_rojos = self.db_manager.fetch_data(sql_rojos)
             dict_rojos = {}
             for pr_cod, sd_dest in res_rojos:
-                if pr_cod not in dict_rojos: dict_rojos[pr_cod] = set()
-                dict_rojos[pr_cod].add(sd_dest)
+                # Normalización: quitar ceros y espacios
+                cod_norm = str(pr_cod).strip().lstrip('0')
+                if not cod_norm: cod_norm = "0"
+                
+                if cod_norm not in dict_rojos: dict_rojos[cod_norm] = set()
+                dict_rojos[cod_norm].add(sd_dest)
                 
             # 2b. Cargar compromisos actuales (Sugerencias Pendientes o Aprobadas)
             sql_comp = "SELECT producto_codigo, sucursal_destino, cantidad_sugerida FROM pal_sugerencias_transferencia WHERE estado IN ('pendiente', 'aprobada')"
@@ -475,13 +488,18 @@ class AbastecimientoService:
                     stock_actual = stock_por_sede.get(codigo, {}).get(s_name, 0)
                     qty_compromiso = dict_compromisos.get(codigo, {}).get(s_name, 0)
                     
-                    # Validar si es ROJO para esta sede
-                    rojos_prod = dict_rojos.get(codigo, set())
+                    # Validar si es ROJO para esta sede (con normalización)
+                    cod_norm = str(codigo).strip().lstrip('0')
+                    if not cod_norm: cod_norm = "0"
+                    
+                    rojos_prod = dict_rojos.get(cod_norm, set())
                     es_rojo = (s_name in rojos_prod) or (None in rojos_prod)
                     
-                    # FILTRO: "Posible Quiebre" (< dias_obj días de cobertura)
+                    # FILTRO: "Gatillo de Resurtido" (Solo si cobertura < umbral_quiebre)
                     dias_para_quiebre = stock_actual / promedio if promedio > 0 else (0 if stock_actual <= 0 else 999)
-                    if dias_para_quiebre >= dias_obj and not es_rojo:
+                    # Usamos el global para el ICH por ahora
+                    global_quiebre = float(config_params.get(None, (25, 25, 0, 365))[1])
+                    if dias_para_quiebre >= global_quiebre and not es_rojo:
                         continue
                     
                     # Stock Ideal (misma lógica que individual)
@@ -709,25 +727,44 @@ class AbastecimientoService:
             logger.error(f"Error registrando autorización: {e}")
             return False
 
-    def save_sugerencias(self, sugerencias):
+    def save_sugerencias(self, sugerencias, usuario_id=None):
         """Guarda las sugerencias generadas en la tabla pal_sugerencias_transferencia."""
         try:
             sql = """
                 INSERT INTO pal_sugerencias_transferencia 
                 (producto_codigo, sucursal_destino, sucursal_origen_sugerida, cantidad_sugerida, 
-                 cantidad_disponible, stock_actual, requiere_autorizacion, estado)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                 cantidad_disponible, stock_actual, requiere_autorizacion, estado, fue_autorizada, 
+                 fecha_autorizacion, usuario_autoriza, cantidad_pre_ajuste, es_producto_rojo, tipo_solicitud)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
+            from datetime import datetime
             for s in sugerencias:
+                es_auto = (s.get("requiere_autorizacion", 1) == 0)
+                estado_final = 'aprobada' if es_auto else 'pendiente'
+                fue_aut = 1 if es_auto else 0
+                fecha_aut = datetime.now() if es_auto else None
+                u_aut = usuario_id if es_auto else None
+                cant_sug = s["cantidad_sugerida"]
+                cant_orig = s.get("_cantidad_original", cant_sug)
+                
+                es_rojo = 1 if s.get("es_rojo", False) else 0
+                tipo_sol = 'producto_rojo' if es_rojo else 'normal'
+                
                 params = (
                     s["producto_codigo"],
                     s["sucursal_destino"],
                     s["sucursal_origen_sugerida"],
-                    s["cantidad_sugerida"],
+                    cant_sug,
                     s["stock_origen"],
                     s["stock_actual"],
                     s["requiere_autorizacion"],
-                    'pendiente'
+                    estado_final,
+                    fue_aut,
+                    fecha_aut,
+                    u_aut,
+                    cant_orig,
+                    es_rojo,
+                    tipo_sol
                 )
                 self.db_manager.execute_query(sql, params)
             return True

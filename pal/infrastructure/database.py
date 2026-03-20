@@ -694,6 +694,7 @@ class DatabaseManager:
                     requiere_autorizacion BIT DEFAULT 0,
                     fue_autorizada BIT DEFAULT 0,
                     usuario_autoriza INT,
+                    cantidad_pre_ajuste DECIMAL(10,2) NULL,
                     fecha_autorizacion DATETIME,
                     fecha_generacion DATETIME DEFAULT GETDATE(),
                     estado NVARCHAR(20) DEFAULT 'pendiente' -- pendiente, aprobada, rechazada, exportada
@@ -704,6 +705,10 @@ class DatabaseManager:
                 IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[pal_sugerencias_transferencia]') AND name = 'stock_actual')
                 BEGIN
                     ALTER TABLE [dbo].[pal_sugerencias_transferencia] ADD [stock_actual] DECIMAL(10,2) NULL;
+                END
+                IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[pal_sugerencias_transferencia]') AND name = 'cantidad_pre_ajuste')
+                BEGIN
+                    ALTER TABLE [dbo].[pal_sugerencias_transferencia] ADD [cantidad_pre_ajuste] DECIMAL(10,2) NULL;
                 END
             END
 

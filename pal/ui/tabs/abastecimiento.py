@@ -182,8 +182,9 @@ class AbastecimientoTab(ttk.Frame):
         self.tree.column("stock_dest", width=90)
         self.tree.column("autorizacion", width=90)
         
-        # Toggle checkbox on click
+        # Toggle checkbox on click y menú contextual
         self.tree.bind("<Button-1>", self._on_tree_click)
+        self.tree.bind("<Button-3>", self._mostrar_menu_contextual_abastecimiento)
         
         self.tree.pack(side="left", fill="both", expand=True)
 
@@ -205,10 +206,18 @@ class AbastecimientoTab(ttk.Frame):
             self.tree.configure(yscrollcommand=scrollbar.set)
         scrollbar.pack(side="right", fill="y")
         
-        # Configurar colores para estados especiales
-        self.tree.tag_configure('rojo', background='#ffcccc')      # Rojo suave para lista roja
-        self.tree.tag_configure('sin_stock', background='#e0b0ff') # Púrpura suave para sin stock CDT
-        self.tree.tag_configure('ajustado', background='#fff9c4')  # Amarillo suave para stock ajustado (proporcional)
+        # Treeview Tags - Pintado de FONDO (como solicitó el usuario)
+        self.tree.tag_configure('rojo', background='#ffcccc')
+        self.tree.tag_configure('sin_stock', background='#e0b0ff')
+        self.tree.tag_configure('ajustado', background='#fff9c4')
+        self.tree.tag_configure("aumentado", background="#ffcc80") # Naranja
+        self.tree.tag_configure("disminuido", background="#81d4fa") # Azul
+        
+        # Estilo corregido: Solo definimos el color de SELECCIÓN. 
+        # Al NO definir '!selected', permitimos que los Tags pinten el fondo de la fila.
+        style = ttk.Style()
+        style.configure("Treeview", fieldbackground="white")
+        style.map('Treeview', background=[('selected', '#347083')]) 
         
         # Footer Actions
         footer = ttk.Frame(parent_frame)
@@ -538,6 +547,11 @@ class AbastecimientoTab(ttk.Frame):
                 if self.btn_export: self.btn_export.config(state="normal")
                 return
 
+            # Inicializar cantidad original para detectar cambios manuales
+            for s in sugerencias:
+                if "_cantidad_original" not in s:
+                    s["_cantidad_original"] = s["cantidad_sugerida"]
+
             self.last_sugerencias = sugerencias
             self.last_sede_destino = sede
             
@@ -627,9 +641,24 @@ class AbastecimientoTab(ttk.Frame):
             if s.get("es_rojo"): tags.append("rojo")
             if s.get("sucursal_origen_sugerida") == "SIN STOCK CDT": tags.append("sin_stock")
             if s.get("ajustado"): tags.append("ajustado")
+            
+            # Comparar con la cantidad original decidida por el sistema
+            cant_sug = float(s.get("cantidad_sugerida", 0))
+            cant_orig = float(s.get("_cantidad_original", cant_sug))
+            
+            if cant_sug > cant_orig:
+                tags.append("aumentado")
+                logger.info(f"Producto {s['producto_codigo']} ({s.get('sucursal_destino', 'N/A')}) marcado como AUMENTADO: {cant_sug} > {cant_orig}")
+            elif cant_sug < cant_orig:
+                tags.append("disminuido")
+                logger.info(f"Producto {s['producto_codigo']} ({s.get('sucursal_destino', 'N/A')}) marcado como DISMINUIDO: {cant_sug} < {cant_orig}")
 
             sel_char = "☑" if s.get("_seleccionado", True) else "☐"
             
+            # Formatear Código con ceros si es numérico (zfill 6)
+            cod_raw = str(s["producto_codigo"]).strip()
+            cod_display = cod_raw.zfill(6) if cod_raw.isdigit() else cod_raw
+
             # Formatear Sede Origen: "Stock / Depósito"
             origen_base = s.get("sucursal_origen_sugerida", "")
             stock_org = s.get("stock_origen", 0)
@@ -640,7 +669,7 @@ class AbastecimientoTab(ttk.Frame):
 
             self.tree.insert("", "end", values=(
                 sel_char,
-                s["producto_codigo"],
+                cod_display,
                 s.get("producto_descripcion", ""),
                 s.get("sucursal_destino", ""),
                 origen_display,
@@ -691,7 +720,10 @@ class AbastecimientoTab(ttk.Frame):
             from pal.services.abastecimiento import AbastecimientoService
             service = AbastecimientoService(self.app.db_manager)
             
-            if service.save_sugerencias(seleccionadas):
+            # Obtener ID de usuario (corregido de current_user_id a current_user['id'])
+            user_id = self.app.current_user['id'] if self.app.current_user else None
+            
+            if service.save_sugerencias(seleccionadas, usuario_id=user_id):
                 messagebox.showinfo("Éxito", f"{len(seleccionadas)} sugerencias guardadas correctamente.")
                 
                 # Remover las seleccionadas de la lista actual para que no aparezcan de nuevo si el usuario sigue trabajando
@@ -810,6 +842,9 @@ class AbastecimientoTab(ttk.Frame):
         self.tree_auto.configure(yscrollcommand=scrolly.set)
         scrolly.pack(side="right", fill="y")
         
+        # Tags de color para autorizaciones
+        self.tree_auto.tag_configure('rojo', background='#ffcccc')
+        
         # Actions
         footer = ttk.Frame(parent_frame)
         footer.pack(fill="x", padx=10, pady=10)
@@ -856,6 +891,9 @@ class AbastecimientoTab(ttk.Frame):
         self.tree_pend.configure(yscrollcommand=scrolly.set)
         scrolly.pack(side="right", fill="y")
         
+        # Tags de color para pendientes
+        self.tree_pend.tag_configure('rojo', background='#ffcccc')
+        
         footer = ttk.Frame(parent_frame)
         footer.pack(fill="x", padx=10, pady=10)
         
@@ -870,7 +908,7 @@ class AbastecimientoTab(ttk.Frame):
             query = """
                 SELECT t.id, t.producto_codigo, COALESCE(p.cu_descripcion_corta, p.C_DESCRI, 'SIN DESCRIPCIÓN') as descripcion,
                        t.sucursal_destino, t.sucursal_origen_sugerida, 
-                       t.cantidad_sugerida, t.stock_actual, t.fecha_generacion
+                       t.cantidad_sugerida, t.stock_actual, t.fecha_generacion, t.es_producto_rojo
                 FROM pal_sugerencias_transferencia t
                 LEFT JOIN MA_PRODUCTOS p ON t.producto_codigo = p.C_CODIGO COLLATE DATABASE_DEFAULT
                 WHERE t.requiere_autorizacion = 1 AND t.estado = 'pendiente'
@@ -879,10 +917,10 @@ class AbastecimientoTab(ttk.Frame):
             rows = self.app.db_manager.fetch_data(query)
             for r in rows:
                 # Formatear datos para la UI
-                r_list = list(r)
-                # r_list[5] es cantidad_sugerida (Decimal)
-                # r_list[6] es stock_actual (Decimal)
-                # r_list[7] es fecha_generacion (datetime)
+                r_list = list(r)[:8] # Tomamos los primeros 8 para los valores visibles
+                tags = []
+                if r[8]: # es_producto_rojo
+                    tags.append('rojo')
                 
                 try:
                     r_list[5] = f"{float(r_list[5]):.2f}" if r_list[5] is not None else "0.00"
@@ -892,7 +930,7 @@ class AbastecimientoTab(ttk.Frame):
                 except:
                     pass
                     
-                self.tree_auto.insert("", "end", values=r_list)
+                self.tree_auto.insert("", "end", values=r_list, tags=tags)
         except Exception as e:
             logger.error(f"Error refrescando autorizaciones: {e}")
 
@@ -905,7 +943,7 @@ class AbastecimientoTab(ttk.Frame):
             query = """
                 SELECT t.id, t.producto_codigo, COALESCE(p.cu_descripcion_corta, p.C_DESCRI, 'SIN DESCRIPCIÓN') as descripcion,
                        t.sucursal_destino, t.sucursal_origen_sugerida, 
-                       t.cantidad_sugerida, t.stock_actual, t.fecha_autorizacion
+                       t.cantidad_sugerida, t.stock_actual, t.fecha_autorizacion, t.cantidad_pre_ajuste, t.es_producto_rojo
                 FROM pal_sugerencias_transferencia t
                 LEFT JOIN MA_PRODUCTOS p ON t.producto_codigo = p.C_CODIGO COLLATE DATABASE_DEFAULT
                 WHERE t.estado = 'aprobada'
@@ -914,15 +952,20 @@ class AbastecimientoTab(ttk.Frame):
             rows = self.app.db_manager.fetch_data(query)
             for r in rows:
                 # Formatear datos para la UI
-                r_list = list(r)
+                r_list = list(r)[:8] # Solo tomamos hasta fecha_autorizacion para la vista
+                tags = []
+                if r[9]: # es_producto_rojo
+                    tags.append('rojo')
+                
                 try:
-                    r_list[5] = f"{float(r_list[5]):.2f}" if r_list[5] is not None else "0.00"
+                    cant_sug = float(r_list[5]) if r_list[5] is not None else 0.0
+                    r_list[5] = f"{cant_sug:.2f}"
                     r_list[6] = f"{float(r_list[6]):.2f}" if r_list[6] is not None else "0.00"
                     if r_list[7] and hasattr(r_list[7], 'strftime'):
                         r_list[7] = r_list[7].strftime("%Y-%m-%d %H:%M")
                 except:
                     pass
-                self.tree_pend.insert("", "end", values=r_list)
+                self.tree_pend.insert("", "end", values=r_list, tags=tags)
         except Exception as e:
             logger.error(f"Error refrescando pendientes: {e}")
 
@@ -1004,8 +1047,8 @@ class AbastecimientoTab(ttk.Frame):
                 from pal.services.abastecimiento import AbastecimientoService
                 service = AbastecimientoService(self.app.db_manager)
                 
-                # Obtener usuario actual del app
-                user_id = getattr(self.app, 'current_user_id', None)
+                # Obtener usuario actual del app (corregido de current_user_id a current_user['id'])
+                user_id = self.app.current_user['id'] if self.app.current_user else None
                 
                 if service.registrar_autorizacion(s_id, user_id, nueva_cant, motivo):
                     messagebox.showinfo("Éxito", "Autorización registrada correctamente.", parent=modal)
@@ -1072,3 +1115,64 @@ class AbastecimientoTab(ttk.Frame):
             valores_dept = ['Todos'] + list(self.app.tra_dept_dict.keys())
             if self.dept_combo:
                 self.dept_combo['values'] = valores_dept
+    def _mostrar_menu_contextual_abastecimiento(self, event):
+        """Muestra menú contextual en la tabla de resultados de abastecimiento."""
+        item_id = self.tree.identify_row(event.y)
+        if item_id:
+            self.tree.selection_set(item_id)
+            menu = tk.Menu(self, tearoff=0)
+            menu.add_command(label="Cambiar monto a transferir", command=self._cambiar_monto_abastecimiento)
+            menu.tk_popup(event.x_root, event.y_root)
+
+    def _cambiar_monto_abastecimiento(self):
+        """Permite cambiar el monto de una sugerencia antes de procesarla."""
+        selected = self.tree.selection()
+        if not selected: return
+        
+        item_data = self.tree.item(selected[0])
+        values = item_data['values']
+        # values: (sel_char, producto, descripcion, destino, origen, cantidad, stock_dest, autorizacion)
+        # Aseguramos que los valores del tree sean tratados como strings limpios
+        prod_codigo = str(values[1]).strip()
+        desc_prod = values[2]
+        dest_sede = str(values[3]).strip()
+        cant_actual = values[5]
+        
+        from tkinter import simpledialog
+        prompt = f"Producto: {prod_codigo}\n{desc_prod}\nSede: {dest_sede}\n\nNueva cantidad para transferir:"
+        logger.info(f"Abriendo diálogo de ajuste para [{prod_codigo}] en sede [{dest_sede}]. Cantidad actual: {cant_actual}")
+        
+        nuevo_monto = simpledialog.askfloat("Modificar Cantidad", prompt, initialvalue=float(cant_actual), parent=self)
+        
+        if nuevo_monto is not None and nuevo_monto >= 0:
+            # Buscar en last_sugerencias para actualizar
+            encontrado = False
+            
+            # Normalizar el código buscado (quitar ceros si es numérico)
+            p_buscado_norm = prod_codigo.lstrip('0') if prod_codigo.isdigit() else prod_codigo
+            if not p_buscado_norm: p_buscado_norm = "0" # Caso código "000"
+            
+            for s in self.last_sugerencias:
+                s_prod = str(s.get("producto_codigo", "")).strip()
+                s_dest = str(s.get("sucursal_destino", "")).strip()
+                
+                # Normalizar el código de la lista interna
+                s_prod_norm = s_prod.lstrip('0') if s_prod.isdigit() else s_prod
+                if not s_prod_norm: s_prod_norm = "0"
+                
+                # Comparación robusta: Código (sin ceros) y Sede (en MAYÚSCULAS)
+                if s_prod_norm == p_buscado_norm and s_dest.upper() == dest_sede.upper():
+                    logger.info(f"Ajuste confirmado: {s_prod} en {s_dest}: {s['cantidad_sugerida']} -> {nuevo_monto}")
+                    s["cantidad_sugerida"] = nuevo_monto
+                    encontrado = True
+                    break
+            
+            if not encontrado:
+                logger.warning(f"No se encontró la sugerencia para [{prod_codigo}] (norm: [{p_buscado_norm}]) en la sede [{dest_sede}] en last_sugerencias.")
+                messagebox.showwarning("Atención", f"No se pudo localizar el producto {prod_codigo} en la lista interna para actualizarlo.")
+            
+            # Refrescar UI (esto actualiza filtered_results y el treeview)
+            self._aplicar_filtro_local()
+        else:
+            logger.info("Ajuste de monto cancelado por el usuario.")
+

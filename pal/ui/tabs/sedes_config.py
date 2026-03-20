@@ -67,6 +67,7 @@ class SedesAlmacenesTab(ttk.Frame):
         ttk.Label(header_frame, text="Almacén", width=30).pack(side=tk.LEFT)
         ttk.Label(header_frame, text="Tratable", width=10).pack(side=tk.LEFT)
         ttk.Label(header_frame, text="CDT", width=10).pack(side=tk.LEFT)
+        ttk.Label(header_frame, text="Transito", width=10).pack(side=tk.LEFT)
         
         # Canvas para scrollear checkboxes si son muchos
         self.canvas = tk.Canvas(self.deposits_frame)
@@ -126,10 +127,15 @@ class SedesAlmacenesTab(ttk.Frame):
             var_cdt = tk.BooleanVar()
             cb_cdt = ttk.Checkbutton(row, variable=var_cdt)
             cb_cdt.pack(side=tk.LEFT, padx=15)
+
+            var_transito = tk.BooleanVar()
+            cb_transito = ttk.Checkbutton(row, variable=var_transito)
+            cb_transito.pack(side=tk.LEFT, padx=15)
             
             self.deposit_vars[code] = {
                 "tratable": var_tratable,
-                "cdt": var_cdt
+                "cdt": var_cdt,
+                "transito": var_transito
             }
             
     def _on_sede_select(self, event):
@@ -147,6 +153,7 @@ class SedesAlmacenesTab(ttk.Frame):
         # Marcar checkboxes
         active_deposits = set(data.get("almacenes_tratables", []))
         cdt_deposits = set(data.get("almacenes_cdt", []))
+        transito_deposits = set(data.get("almacenes_transito", []))
         
         for code, vars in self.deposit_vars.items():
             vars["tratable"].set(code in active_deposits)
@@ -154,6 +161,11 @@ class SedesAlmacenesTab(ttk.Frame):
                  vars["cdt"].set(code in cdt_deposits)
             else:
                  vars["cdt"].set(False)
+            
+            if "almacenes_transito" in data:
+                vars["transito"].set(code in transito_deposits)
+            else:
+                vars["transito"].set(False)
 
     def _add_sede(self):
         from tkinter import simpledialog
@@ -167,7 +179,8 @@ class SedesAlmacenesTab(ttk.Frame):
                 "descripcion": "",
                 "zona": "",
                 "almacenes_tratables": [],
-                "almacenes_cdt": []
+                "almacenes_cdt": [],
+                "almacenes_transito": []
             }
             self.sedes_listbox.insert(tk.END, name)
             self.sedes_listbox.selection_clear(0, tk.END)
@@ -193,12 +206,14 @@ class SedesAlmacenesTab(ttk.Frame):
         # Recoger datos del form
         selected_tratables = [code for code, vars in self.deposit_vars.items() if vars["tratable"].get()]
         selected_cdt = [code for code, vars in self.deposit_vars.items() if vars["cdt"].get()]
+        selected_transito = [code for code, vars in self.deposit_vars.items() if vars["transito"].get()]
         
         self.sedes_data[current_name] = {
             "descripcion": self.var_sede_desc.get(),
             "zona": self.var_sede_zona.get(),
             "almacenes_tratables": selected_tratables,
-            "almacenes_cdt": selected_cdt
+            "almacenes_cdt": selected_cdt,
+            "almacenes_transito": selected_transito
         }
         
         # Guardar en BD via ConfigManager

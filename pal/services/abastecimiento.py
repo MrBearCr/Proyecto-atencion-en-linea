@@ -119,9 +119,11 @@ class AbastecimientoService:
                     where_filtros = " AND " + " AND ".join(filtros_cond)
 
             sql_stock_destino = f"""
-                SELECT d.c_codarticulo, SUM(d.n_cantidad) as stock_actual, MAX(p.c_grupo) as cat_id, MAX(p.c_descri) as descripcion
+                SELECT d.c_codarticulo, SUM(d.n_cantidad) as stock_actual, MAX(p.c_grupo) as cat_id, 
+                       MAX(p.cu_descripcion_corta) as desc_corta,
+                       MAX(p.C_DESCRI) as desc_larga
                 FROM MA_DEPOPROD d WITH (NOLOCK)
-                JOIN MA_PRODUCTOS p ON d.c_codarticulo = p.c_codigo
+                JOIN MA_PRODUCTOS p WITH (NOLOCK) ON d.c_codarticulo = p.c_codigo
                 WHERE d.c_coddeposito IN ({dest_placeholders}){where_filtros}
                 GROUP BY d.c_codarticulo
             """
@@ -210,6 +212,9 @@ class AbastecimientoService:
             for item in stock_dest:
                 codigo = item[0]
                 stock_actual = float(item[1])
+                # Usar desc_corta preferentemente para la UI, fallback a desc_larga
+                desc_corta = str(item[3] or item[4] or "SIN DESCRIPCIÓN")
+                desc_larga = str(item[4] or "SIN DESCRIPCIÓN")
 
                 if codigo in compromisos_activos:
                     continue
@@ -276,7 +281,8 @@ class AbastecimientoService:
                         # para que aparezca en morado en la UI
                         sugerencias.append({
                             "producto_codigo": codigo,
-                            "producto_descripcion": item[3],
+                            "producto_descripcion": desc_corta,
+                            "producto_descripcion_larga": desc_larga,
                             "sucursal_destino": sede_destino,
                             "sucursal_origen_sugerida": "SIN STOCK CDT",
                             "cantidad_sugerida": necesidad_final,
@@ -294,7 +300,8 @@ class AbastecimientoService:
                             
                             sugerencias.append({
                                 "producto_codigo": codigo,
-                                "producto_descripcion": item[3],
+                                "producto_descripcion": desc_corta,
+                                "producto_descripcion_larga": desc_larga,
                                 "sucursal_destino": sede_destino,
                                 "sucursal_origen_sugerida": cdt_dep,
                                 "cantidad_sugerida": cantidad_a_mover,
@@ -363,6 +370,16 @@ class AbastecimientoService:
             for pr_cod, sd_dest in res_rojos:
                 if pr_cod not in dict_rojos: dict_rojos[pr_cod] = set()
                 dict_rojos[pr_cod].add(sd_dest)
+                
+            # 2b. Cargar compromisos actuales (Sugerencias Pendientes o Aprobadas)
+            sql_comp = "SELECT producto_codigo, sucursal_destino, cantidad_sugerida FROM pal_sugerencias_transferencia WHERE estado IN ('pendiente', 'aprobada')"
+            res_comp = self.db_manager.fetch_data(sql_comp)
+            dict_compromisos = {} # {codigo: {sede: cantidad}}
+            for c_cod, c_sede, c_qty in res_comp:
+                if c_cod not in dict_compromisos: dict_compromisos[c_cod] = {}
+                dict_compromisos[c_cod][c_sede] = dict_compromisos[c_cod].get(c_sede, 0) + float(c_qty)
+                
+            periodos_cascada = [int(dias_obj), int(dias_obj * 2), int(dias_obj * 3)]
 
             # 3. Obtener Stock en CDTs (de todos los productos que podrían necesitarse)
             # Para optimizar, primero buscamos qué productos tienen stock en CDT
@@ -401,22 +418,12 @@ class AbastecimientoService:
                 todos_almacenes_destino.extend(almacenes)
                 for a in almacenes: almacen_a_sede[a] = s_name
 
-            sql_stock_sedes = f"""
-                SELECT d.c_codarticulo, d.c_coddeposito, d.n_cantidad, p.c_descri
-                FROM MA_DEPOPROD d WITH (NOLOCK)
-                JOIN MA_PRODUCTOS p ON d.c_codarticulo = p.c_codigo
-                WHERE d.c_coddeposito IN ({','.join(['?']*len(todos_almacenes_destino))})
-                AND d.c_codarticulo IN ({','.join(['?']*len(codigos_con_stock_cdt[:1000]))}) -- Limitamos para evitar query muy larga
-                {where_filtros}
-            """
-            # Nota: Si hay > 1000 productos con stock CDT, deberíamos hacer chunks. 
-            # Pero para esta fase, simplifiquemos a un chunk representativo o quitemos el filtro de codigos si es manejable.
-            
             # Mejor opción: Query de stock para TODOS los productos en esas sedes que tengan los filtros
             sql_stock_sedes_opt = f"""
-                SELECT d.c_codarticulo, d.c_coddeposito, SUM(d.n_cantidad), MAX(p.c_descri)
+                SELECT d.c_codarticulo, d.c_coddeposito, SUM(d.n_cantidad), 
+                       MAX(p.cu_descripcion_corta), MAX(p.C_DESCRI)
                 FROM MA_DEPOPROD d WITH (NOLOCK)
-                JOIN MA_PRODUCTOS p ON d.c_codarticulo = p.c_codigo
+                JOIN MA_PRODUCTOS p WITH (NOLOCK) ON d.c_codarticulo = p.c_codigo
                 WHERE d.c_coddeposito IN ({','.join(['?']*len(todos_almacenes_destino))})
                 {where_filtros}
                 GROUP BY d.c_codarticulo, d.c_coddeposito
@@ -426,13 +433,16 @@ class AbastecimientoService:
             
             # Organizar stock: {codigo: {sede: stock}}
             stock_por_sede = {}
-            descripciones = {}
-            for r_cod, r_dep, r_qty, r_desc in res_stock_sedes:
+            descripciones = {} # {codigo: {corta: 'desc', larga: 'desc'}}
+            for r_cod, r_dep, r_qty, r_desc_corta, r_desc_larga in res_stock_sedes:
                 s_name = almacen_a_sede.get(r_dep)
                 if not s_name: continue
                 if r_cod not in stock_por_sede: stock_por_sede[r_cod] = {}
                 stock_por_sede[r_cod][s_name] = stock_por_sede[r_cod].get(s_name, 0) + float(r_qty)
-                descripciones[r_cod] = r_desc
+                descripciones[r_cod] = {
+                    "corta": str(r_desc_corta or r_desc_larga or "SIN DESCRIPCIÓN"),
+                    "larga": str(r_desc_larga or "SIN DESCRIPCIÓN")
+                }
 
             # 5. Obtener Ventas en Cascada para todos los códigos relevantes en todas las sedes
             codigos_a_analizar = list(stock_por_sede.keys())
@@ -443,7 +453,7 @@ class AbastecimientoService:
             # Necesitamos una versión o llamar sede por sede (lento) o una nueva query.
             # Vamos a llamar a la query masiva pero agrupada por sede.
             
-            datos_ventas_global = self._obtener_ventas_globales_por_sede(codigos_a_analizar, todos_almacenes_destino, dias_obj)
+            datos_ventas_global = self._obtener_ventas_globales_por_sede(codigos_a_analizar, todos_almacenes_destino, periodos_cascada)
             
             # 6. Calcular Necesidades y Distribuir
             sugerencias_finales = []
@@ -463,10 +473,20 @@ class AbastecimientoService:
                     
                     promedio = v_data['promedio']
                     stock_actual = stock_por_sede.get(codigo, {}).get(s_name, 0)
+                    qty_compromiso = dict_compromisos.get(codigo, {}).get(s_name, 0)
+                    
+                    # Validar si es ROJO para esta sede
+                    rojos_prod = dict_rojos.get(codigo, set())
+                    es_rojo = (s_name in rojos_prod) or (None in rojos_prod)
+                    
+                    # FILTRO: "Posible Quiebre" (< dias_obj días de cobertura)
+                    dias_para_quiebre = stock_actual / promedio if promedio > 0 else (0 if stock_actual <= 0 else 999)
+                    if dias_para_quiebre >= dias_obj and not es_rojo:
+                        continue
                     
                     # Stock Ideal (misma lógica que individual)
                     stock_ideal = int(round(promedio * dias_obj * 1.25 * 1.15))
-                    deficit = max(0, stock_ideal - stock_actual)
+                    deficit = max(0, int(stock_ideal - stock_actual - qty_compromiso))
                     
                     if deficit > 0:
                         demandas.append({
@@ -507,7 +527,8 @@ class AbastecimientoService:
                     
                     sugerencias_finales.append({
                         "producto_codigo": codigo,
-                        "producto_descripcion": descripciones.get(codigo, ""),
+                        "producto_descripcion": descripciones.get(codigo, {}).get("corta", "SIN DESCRIPCIÓN"),
+                        "producto_descripcion_larga": descripciones.get(codigo, {}).get("larga", "SIN DESCRIPCIÓN"),
                         "sucursal_destino": dem["sede"],
                         "sucursal_origen_sugerida": depo_cdt,
                         "cantidad_sugerida": cantidad_sugerida,
@@ -529,15 +550,12 @@ class AbastecimientoService:
             traceback.print_exc()
             return []
 
-    def _obtener_ventas_globales_por_sede(self, codigos, depositos, dias_obj):
-        """Helper para obtener ventas agrupadas por sede para el cálculo global."""
-        if not codigos or not depositos: return {}
+    def _obtener_ventas_globales_por_sede(self, codigos, depositos, periodos_cascada):
+        """Helper para obtener ventas agrupadas por sede con búsqueda en cascada para el cálculo global."""
+        if not codigos or not depositos or not periodos_cascada: return {}
         
-        # Simplificación: Usamos un promedio de los últimos N días (dias_obj)
-        # para no complicar con la cascada en la primera iteración global.
         res_final = {} # {codigo: {sede: {promedio: X}}}
         
-        # Mapeo invertido para saber a qué sede pertenece cada almacén
         from pal.core.config_manager import ConfigManager
         config_mgr = ConfigManager(self.db_manager)
         sedes_config = config_mgr.get_sedes_config()
@@ -545,6 +563,11 @@ class AbastecimientoService:
         for s_name, s_cfg in sedes_config.items():
             for d in s_cfg.get("almacenes_tratables", []):
                 dep_to_sede[d] = s_name
+
+        max_dias = max(periodos_cascada)
+        p1 = periodos_cascada[0]
+        p2 = periodos_cascada[1] if len(periodos_cascada) > 1 else p1
+        p3 = periodos_cascada[2] if len(periodos_cascada) > 2 else p2
 
         chunk_size = 500
         for i in range(0, len(codigos), chunk_size):
@@ -554,10 +577,15 @@ class AbastecimientoService:
             
             sql = f"""
                 SELECT c_Codarticulo, c_Deposito, 
-                       SUM(CASE WHEN c_Concepto = 'VEN' THEN n_cantidad ELSE 0 END) - 
-                       SUM(CASE WHEN c_Concepto = 'DEV' THEN n_cantidad ELSE 0 END) as neto
+                       SUM(CASE WHEN f_fecha >= DATEADD(day, -{p1}, GETDATE()) AND c_Concepto = 'VEN' THEN n_cantidad ELSE 0 END) - 
+                       SUM(CASE WHEN f_fecha >= DATEADD(day, -{p1}, GETDATE()) AND c_Concepto = 'DEV' THEN n_cantidad ELSE 0 END) as neto_p1,
+                       SUM(CASE WHEN f_fecha >= DATEADD(day, -{p2}, GETDATE()) AND c_Concepto = 'VEN' THEN n_cantidad ELSE 0 END) - 
+                       SUM(CASE WHEN f_fecha >= DATEADD(day, -{p2}, GETDATE()) AND c_Concepto = 'DEV' THEN n_cantidad ELSE 0 END) as neto_p2,
+                       SUM(CASE WHEN f_fecha >= DATEADD(day, -{p3}, GETDATE()) AND c_Concepto = 'VEN' THEN n_cantidad ELSE 0 END) - 
+                       SUM(CASE WHEN f_fecha >= DATEADD(day, -{p3}, GETDATE()) AND c_Concepto = 'DEV' THEN n_cantidad ELSE 0 END) as neto_p3,
+                       MAX(CASE WHEN c_Concepto = 'VEN' THEN f_fecha ELSE NULL END) as ultima_venta
                 FROM TR_INVENTARIO WITH (NOLOCK)
-                WHERE f_fecha >= DATEADD(day, -{int(dias_obj)}, GETDATE())
+                WHERE f_fecha >= DATEADD(day, -{max_dias}, GETDATE())
                 AND c_Codarticulo IN ({placeholders_cods})
                 AND c_Deposito IN ({placeholders_deps})
                 AND c_Concepto IN ('VEN', 'DEV')
@@ -565,15 +593,38 @@ class AbastecimientoService:
             """
             rows = self.db_manager.fetch_data(sql, tuple(chunk) + tuple(depositos))
             
-            for r_cod, r_dep, r_neto in rows:
+            temp_agrup = {}
+            for r_cod, r_dep, net_p1, net_p2, net_p3, last_ven in rows:
                 s_name = dep_to_sede.get(r_dep)
                 if not s_name: continue
+                if r_cod not in temp_agrup: temp_agrup[r_cod] = {}
+                if s_name not in temp_agrup[r_cod]: 
+                    temp_agrup[r_cod][s_name] = {'p1':0, 'p2':0, 'p3':0, 'last_ven': None}
                 
+                t = temp_agrup[r_cod][s_name]
+                t['p1'] += float(net_p1 or 0)
+                t['p2'] += float(net_p2 or 0)
+                t['p3'] += float(net_p3 or 0)
+                if last_ven:
+                    if not t['last_ven'] or last_ven > t['last_ven']:
+                        t['last_ven'] = last_ven
+
+            for r_cod, sedes_data in temp_agrup.items():
                 if r_cod not in res_final: res_final[r_cod] = {}
-                if s_name not in res_final[r_cod]: res_final[r_cod][s_name] = {"total": 0, "promedio": 0}
-                
-                res_final[r_cod][s_name]["total"] += float(r_neto)
-                res_final[r_cod][s_name]["promedio"] = res_final[r_cod][s_name]["total"] / dias_obj
+                for s_name, data in sedes_data.items():
+                    promedio = 0
+                    if data['p1'] > 0:
+                        promedio = data['p1'] / p1
+                    elif data['p2'] > 0:
+                        promedio = data['p2'] / p2
+                    elif data['p3'] > 0:
+                        promedio = data['p3'] / p3
+                    
+                    res_final[r_cod][s_name] = {
+                        "total": data['p1'] if promedio > 0 else 0,
+                        "promedio": promedio,
+                        "ultima_venta": data['last_ven']
+                    }
 
         return res_final
             

@@ -790,17 +790,21 @@ class DatabaseManager:
                 query = """
                     SELECT 
                         c_codarticulo AS codigo,
-                        MAX(p.C_DESCRI) AS descripcion,
+                        COALESCE(p.cu_descripcion_corta, 'SIN DESCRIPCIÓN') AS descripcion,
+                        'Dep. 0301' AS sede,
                         CAST(SUM(n_cantidad) AS INT) AS stock,  
                     CASE
                         WHEN SUM(n_cantidad) BETWEEN 15 AND 20 THEN 'Leve'  
                         WHEN SUM(n_cantidad) BETWEEN 8 AND 14 THEN 'Media'
                         ELSE 'Crítica'
-                    END AS nivel
+                    END AS nivel,
+                    '' AS dummy1,
+                    '' AS dummy2,
+                    COALESCE(p.C_DESCRI, 'SIN DESCRIPCIÓN') AS descripcion_larga
                     FROM MA_DEPOPROD d
                         INNER JOIN MA_PRODUCTOS p ON d.c_codarticulo = p.C_CODIGO
                         WHERE c_coddeposito = '0301'
-                        GROUP BY c_codarticulo
+                        GROUP BY c_codarticulo, p.cu_descripcion_corta, p.C_DESCRI
                     HAVING SUM(n_cantidad) <= 20  
                     ORDER BY CAST(SUM(n_cantidad) AS INT) ASC
                     """
@@ -1203,11 +1207,12 @@ class DatabaseManager:
                         SELECT 
                             d.c_codarticulo,
                             SUM(d.n_cantidad) as stock_total,
-                            COALESCE(p.cu_descripcion_corta, 'SIN DESCRIPCIÓN') as C_DESCRI
+                            COALESCE(p.cu_descripcion_corta, 'SIN DESCRIPCIÓN') as C_DESCRI,
+                            COALESCE(p.C_DESCRI, 'SIN DESCRIPCIÓN') as C_DESCRI_FULL
                         FROM MA_DEPOPROD d
                         INNER JOIN MA_PRODUCTOS p ON d.c_codarticulo = p.C_CODIGO
                         WHERE d.c_coddeposito = ?
-                        GROUP BY d.c_codarticulo, p.cu_descripcion_corta
+                        GROUP BY d.c_codarticulo, p.cu_descripcion_corta, p.C_DESCRI
                         HAVING SUM(d.n_cantidad) < 21
                     ),
                     stock_ranked AS (
@@ -1220,10 +1225,11 @@ class DatabaseManager:
                                 WHEN stock_total BETWEEN 8 AND 14 THEN 'Media'
                                 ELSE 'Crítica'
                             END AS nivel,
-                            ROW_NUMBER() OVER (ORDER BY stock_total ASC) as rn
+                            ROW_NUMBER() OVER (ORDER BY stock_total ASC) as rn,
+                            C_DESCRI_FULL AS desc_larga
                         FROM stock_summary
                     )
-                    SELECT codigo, descripcion, stock, nivel
+                    SELECT codigo, desc_corta, 'Dep. ' + CAST(? AS VARCHAR) as sede, stock, nivel, '' as dummy1, '' as dummy2, desc_larga
                     FROM stock_ranked
                     WHERE rn BETWEEN ? AND ?
                     """
@@ -1357,7 +1363,11 @@ class DatabaseManager:
                         WHEN i.c_Concepto = 'VEN' THEN i.n_Cantidad
                         WHEN i.c_Concepto = 'DEV' THEN -i.n_Cantidad 
                         ELSE 0 
-                    END) AS neto
+                    END) AS neto,
+                    0.0 AS precio,
+                    0.0 AS impuesto1,
+                    0.0 AS costo,
+                    COALESCE(p.C_DESCRI, 'SIN DESCRIPCIÓN') AS descripcion_larga
                 FROM TR_INVENTARIO i
                 LEFT JOIN MA_PRODUCTOS p ON i.c_Codarticulo = p.C_CODIGO
                 WHERE i.f_fecha BETWEEN CONVERT(DATE, ?, 105) AND CONVERT(DATE, ?, 105)
@@ -1370,7 +1380,8 @@ class DatabaseManager:
                     p.C_DESCRI,
                     p.C_DEPARTAMENTO,
                     p.C_GRUPO,
-                    p.C_SUBGRUPO
+                    p.C_SUBGRUPO,
+                    p.C_DESCRI
                 ORDER BY neto DESC
             """
             
@@ -1473,7 +1484,9 @@ class DatabaseManager:
                         COALESCE(v.neto, 0) AS neto,
                         COALESCE(p.n_precio1, 0) AS precio,
                         COALESCE(p.n_impuesto1, 0) AS impuesto1,
-                        COALESCE(p.n_costoact, 0) AS costo
+                        COALESCE(p.n_costoact, 0) AS costo,
+                        COALESCE(p.C_DESCRI, 'SIN DESCRIPCIÓN') AS descripcion_larga,
+                        p.C_DESCRI as desc_larga_raw
                     FROM MA_PRODUCTOS p WITH (NOLOCK)
                     LEFT JOIN VentasAgregadas v ON p.C_CODIGO = v.codigo
                     WHERE 1=1 {exclude_clause}
@@ -1492,7 +1505,9 @@ class DatabaseManager:
                         v.neto,
                         COALESCE(p.n_precio1, 0) AS precio,
                         COALESCE(p.n_impuesto1, 0) AS impuesto1,
-                        COALESCE(p.n_costoact, 0) AS costo
+                        COALESCE(p.n_costoact, 0) AS costo,
+                        COALESCE(p.C_DESCRI, 'SIN DESCRIPCIÓN') AS descripcion_larga,
+                        p.C_DESCRI as desc_larga_raw
                     FROM VentasAgregadas v
                     LEFT JOIN MA_PRODUCTOS p WITH (NOLOCK) ON v.codigo = p.C_CODIGO
                     WHERE 1=1 {exclude_clause}
@@ -1827,7 +1842,8 @@ class DatabaseManager:
             query = f"""
                 SELECT 
                     RTRIM(LTRIM(p.C_CODIGO)) as codigo,
-                    p.c_Descri as descripcion,
+                    COALESCE(p.cu_descripcion_corta, 'SIN DESCRIPCIÓN') as descripcion,
+                    COALESCE(p.C_DESCRI, 'SIN DESCRIPCIÓN') as descripcion_larga,
                     '{sede_label}' as sede,
                     ISNULL(liq.ultima_liquidacion, p.Update_date) as ultima_compra,
                     stats.last_sale as ultima_venta,
@@ -1879,15 +1895,18 @@ class DatabaseManager:
             
             quiebres = []
             for row in rows:
-                quiebres.append({
-                    'codigo': row[0],
-                    'descripcion': row[1],
-                    'sede': row[2],
-                    'ultima_compra': row[3],
-                    'ultima_venta': row[4],
-                    'unidades_perdidas': float(row[5]),
-                    'dias_quiebre': row[6]
-                })
+                # Retornar como tupla para compatibilidad con Treeview en app.py
+                # Estructura: (codigo, descripcion, sede, unidades_perdidas, dias_quiebre, ultima_compra, ultima_venta, descripcion_larga)
+                quiebres.append((
+                    str(row[0]).strip(),      # codigo
+                    str(row[1]).strip(),      # descripcion (corta)
+                    row[3],                   # sede
+                    float(row[6] or 0),       # unidades_perdidas
+                    int(row[7] or 0),         # dias_quiebre
+                    row[4],                   # ultima_compra (datetime)
+                    row[5],                   # ultima_venta (datetime)
+                    str(row[2]).strip()       # descripcion_larga
+                ))
             return quiebres
             
         except Exception as e:
@@ -2119,12 +2138,13 @@ class DatabaseManager:
                     p.F_Fecha,
                     t.COD_PRINCIPAL,
                     p.N_Total,
-                    pr.C_DESCRI,
-                    pr.C_DEPARTAMENTO, -- Traemos los códigos para mapear en Python
+                    COALESCE(pr.cu_descripcion_corta, pr.C_DESCRI, 'SIN DESCRIPCIÓN') AS desc_corta,
+                    pr.C_DEPARTAMENTO, 
                     pr.C_GRUPO,
                     pr.C_SUBGRUPO,
                     pr.c_marca,
-                    t.CANTIDAD
+                    t.CANTIDAD,
+                    pr.C_DESCRI AS desc_larga
                 FROM
                     MA_PAGOS p WITH (NOLOCK)
                 JOIN
@@ -2143,7 +2163,7 @@ class DatabaseManager:
                 
                 # Procesar en Python
                 for r in chunk_rows:
-                    # r: (rif, nombre, numero, fecha, prod_cod, total_bs, desc, dept_code, group_code, sub_code, marca, cantidad)
+                    # r: (rif, nombre, numero, fecha, prod_cod, total_bs, desc_corta, dept_code, group_code, sub_code, marca, cantidad, desc_larga)
                     fecha = r[3]
                     total_bs = float(r[5]) if r[5] else 0.0
                     
@@ -2157,10 +2177,10 @@ class DatabaseManager:
                     sub_name = sub_map.get(s_code, s_code)
                     
                     # Reconstruir la fila con los nombres resueltos para la UI
-                    # (rif, name, num, date, prod_code, total_bs, desc, dept_name, group_name, sub_name, marca, qty)
+                    # (rif, name, num, date, prod_code, total_bs, desc_corta, dept_name, group_name, sub_name, marca, qty, desc_larga)
                     row_with_names = (
                         r[0], r[1], r[2], r[3], r[4], r[5], r[6],
-                        dept_name, group_name, sub_name, r[10], r[11]
+                        dept_name, group_name, sub_name, r[10], r[11], r[12]
                     )
                     
                     # Buscar factor

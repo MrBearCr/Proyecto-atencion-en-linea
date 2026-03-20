@@ -288,21 +288,64 @@ def export_stock_excel(filename: str, datos_exportar: List, seleccionadas: List[
         except Exception as e:
             logger.error(f"Error crítico cargando metadatos para exportación: {e}")
         
-        # Definición de grupos de depósitos para alineación con TRA (RI)
-        GRUPOS_DEPOSITOS = {
-            'Cabudare': ['0301', '0302'],
-            'Barinas':  ['0101', '0102', '0108'],
-            'Guanare':  ['0401', '0402'],
-            'CDT':      ['0106'],
-            'Transito': ['0104', '0110', '0112']
-        }
+        # --- INICIO LÓGICA DINÁMICA DE DEPÓSITOS ---
+        # Intentar cargar configuración dinámica de sedes
+        sedes_config = {}
+        if db_manager:
+            try:
+                from pal.core.config_manager import ConfigManager
+                config_mgr = ConfigManager(db_manager)
+                sedes_config = config_mgr.get_sedes_config()
+            except Exception as e:
+                logger.warning(f"[EXPORT] No se pudo cargar sedes_config: {e}")
+
+        # Definición de grupos de depósitos
+        if sedes_config:
+            GRUPOS_DEPOSITOS = {}
+            # 1. Grupos por Sede (Tratables)
+            for s_name, s_cfg in sedes_config.items():
+                deps = s_cfg.get('almacenes_tratables', [])
+                if deps:
+                    # Usar prefijo 'Stock ' para consistencia 
+                    GRUPOS_DEPOSITOS[f'Stock {s_name}'] = deps
+            
+            # 2. CDT consolidado
+            cdts = []
+            for s_cfg in sedes_config.values():
+                cdts.extend(s_cfg.get('almacenes_cdt', []))
+            if cdts:
+                GRUPOS_DEPOSITOS['CDT'] = sorted(list(set(cdts)))
+            
+            # 3. Transito consolidado 
+            transitos = []
+            for s_cfg in sedes_config.values():
+                transitos.extend(s_cfg.get('almacenes_transito', []))
+            if transitos:
+                GRUPOS_DEPOSITOS['Transito SEDES'] = sorted(list(set(transitos)))
+            
+            logger.info(f"[EXPORT] Usando {len(GRUPOS_DEPOSITOS)} grupos de depósitos dinámicos")
+        else:
+            # Fallback a definición  (Legacy/ICH)
+            logger.info("[EXPORT] Usando grupos de depósitos hardcoded (fallback)")
+            GRUPOS_DEPOSITOS = {
+                'Stock Cabudare': ['0301', '0302'],
+                'Stock Barinas':  ['0101', '0102', '0108'],
+                'Stock Guanare':  ['0401', '0402'],
+                'CDT':            ['0106'],
+                'Transito SEDES': ['0104', '0110', '0112']
+            }
         
-        # Columnas modernas alineadas con RI (TRA)
+        # Columnas fijas
         headers = [
             'Código', 'Descripción', 'Departamento', 'Grupo', 'Subgrupo', 'Marca', 
-            'Sede de Quiebre', 'Unid. Perdidas', 'Días Quiebre', 'Últ. Liquidación', 'Últ. Venta',
-            'Stock Cabudare', 'Stock Barinas', 'Stock Guanare', 'CDT', 'Transito SEDES', 'Stock Total'
+            'Sede de Quiebre', 'Unid. Perdidas', 'Días Quiebre', 'Últ. Liquidación', 'Últ. Venta'
         ]
+        
+        # Columnas de Stock Dinámicas
+        for group_name in GRUPOS_DEPOSITOS.keys():
+            headers.append(group_name)
+        
+        headers.append('Stock Total')
 
         if mostrar_proveedores:
             headers.append('Últ. Proveedor')
@@ -431,16 +474,17 @@ def export_stock_excel(filename: str, datos_exportar: List, seleccionadas: List[
                 # Manejar tanto diccionarios (nuevos) como tuplas (antiguos)
                 if isinstance(item, dict):
                     codigo = item.get('codigo', '')
-                    desc = item.get('descripcion', '')
+                    # Usar descripción larga si está disponible
+                    desc = item.get('descripcion_larga', item.get('descripcion', ''))
                     sede_q = item.get('sede_detectada', '')
                     unid_p = item.get('unidades_perdidas', 0)
                     dias_q = item.get('dias_quiebre', 0)
                     u_comp = item.get('ultima_compra', '')
                     u_vent = item.get('ultima_venta', '')
                 else:
-                    # Estructura q: (codigo, descripcion, sede, unidades_perdidas, dias_quiebre, ultima_compra, ultima_venta)
+                    # Estructura q: (codigo, descripcion, sede, unidades_perdidas, dias_quiebre, ultima_compra, ultima_venta, descripcion_larga)
                     codigo = item[0]
-                    desc = item[1]
+                    desc = item[7] if len(item) > 7 else item[1]
                     sede_q = item[2] if len(item) > 2 else ''
                     unid_p = item[3] if len(item) > 3 else 0
                     dias_q = item[4] if len(item) > 4 else 0
@@ -479,22 +523,20 @@ def export_stock_excel(filename: str, datos_exportar: List, seleccionadas: List[
                 ws_main.cell(row=row, column=10, value=str(u_comp_str))
                 ws_main.cell(row=row, column=11, value=str(u_vent_str))
 
-                # Sumar por grupos alineados con TRA
+                # Escribir columnas de stock dinámicas (empiezan en col 12)
                 codigo_s = str(codigo).strip()
                 dep_qty = existencias_map.get(codigo_s, {})
-                s_cab = sum(int(dep_qty.get(d, 0)) for d in GRUPOS_DEPOSITOS['Cabudare'])
-                s_bar = sum(int(dep_qty.get(d, 0)) for d in GRUPOS_DEPOSITOS['Barinas'])
-                s_gua = sum(int(dep_qty.get(d, 0)) for d in GRUPOS_DEPOSITOS['Guanare'])
-                s_cdt = sum(int(dep_qty.get(d, 0)) for d in GRUPOS_DEPOSITOS['CDT'])
-                s_tra = sum(int(dep_qty.get(d, 0)) for d in GRUPOS_DEPOSITOS['Transito'])
-                s_tot = s_cab + s_bar + s_gua + s_cdt + s_tra
                 
-                ws_main.cell(row=row, column=12, value=s_cab)
-                ws_main.cell(row=row, column=13, value=s_bar)
-                ws_main.cell(row=row, column=14, value=s_gua)
-                ws_main.cell(row=row, column=15, value=s_cdt)
-                ws_main.cell(row=row, column=16, value=s_tra)
-                ws_main.cell(row=row, column=17, value=s_tot)
+                current_stock_col = 12
+                s_tot = 0
+                for group_name, group_deps in GRUPOS_DEPOSITOS.items():
+                    s_grp = sum(int(dep_qty.get(d, 0)) for d in group_deps)
+                    ws_main.cell(row=row, column=current_stock_col, value=s_grp)
+                    s_tot += s_grp
+                    current_stock_col += 1
+                
+                # Stock Total
+                ws_main.cell(row=row, column=current_stock_col, value=s_tot)
 
                 current_dyn_col = 18
                 if mostrar_proveedores:
@@ -993,7 +1035,10 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
                 marca_val = marca_map.get(str(codigo).strip(), '')
                 
                 ws_main.cell(row=row, column=1, value=clean_for_excel(codigo))
-                ws_main.cell(row=row, column=2, value=clean_for_excel(desc))
+                # Usar descripción larga para Excel si está disponible
+                # Después de clasificar_rotacion, la descripción larga queda en el índice 10
+                desc_excel = fila[10] if len(fila) >= 11 else (fila[9] if len(fila) >= 10 else desc)
+                ws_main.cell(row=row, column=2, value=clean_for_excel(desc_excel))
                 ws_main.cell(row=row, column=3, value=clean_for_excel(marca_val)) # Marca
                 ws_main.cell(row=row, column=4, value=clean_for_excel(dept_desc))
                 ws_main.cell(row=row, column=5, value=clean_for_excel(grupo_desc))
@@ -2164,7 +2209,9 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
 
                 codigo = fila_list[0]
                 codigo_str = str(codigo).strip()
-                desc = fila_list[1]
+                # Preferir descripción larga para Excel si está disponible
+                # Después de clasificar_rotacion, la descripción larga queda en el índice 10
+                desc = fila_list[10] if len(fila_list) >= 11 else (fila_list[9] if len(fila_list) >= 10 else fila_list[1])
 
                 # Jerarquía (códigos) para filtros: depto, grupo, subgrupo
                 dept = fila_list[2] if len(fila_list) > 2 else None
@@ -2596,7 +2643,7 @@ def export_abastecimiento_excel(filename: str, sugerencias: List[Dict[str, Any]]
         ws.cell(row=3, column=1, value=f"Total de sugerencias: {len(sugerencias)}")
         
         # Encabezados de tabla
-        headers = ["CÓDIGO PRODUCTO", "SEDE ORIGEN", "CANT. SUGERIDA", "STOCK DESTINO", "REQ. AUTORIZACIÓN"]
+        headers = ["CÓDIGO PRODUCTO", "DESCRIPCIÓN", "SEDE ORIGEN", "CANT. SUGERIDA", "STOCK DESTINO", "REQ. AUTORIZACIÓN"]
         for col, text in enumerate(headers, 1):
             cell = ws.cell(row=5, column=col, value=text)
             cell.font = header_font
@@ -2606,6 +2653,7 @@ def export_abastecimiento_excel(filename: str, sugerencias: List[Dict[str, Any]]
         # Datos
         for i, s in enumerate(sugerencias, 6):
             ws.cell(row=i, column=1, value=clean_for_excel(s.get("producto_codigo", "")))
+            ws.cell(row=i, column=2, value=clean_for_excel(s.get("producto_descripcion_larga", s.get("producto_descripcion", ""))))
             
             # Formatear Sede Origen: "Stock / Depósito"
             origen_base = s.get("sucursal_origen_sugerida", "")
@@ -2741,14 +2789,14 @@ def export_clientes_reporte_excel(filename: str, report_data: List[Dict[str, Any
                 continue
                 
             for p in products:
-                # p: (prod_cod, desc, dept, grupo, sub, marca, qty)
+                # p: (prod_cod, desc_corta, dept, grupo, sub, marca, qty, desc_larga)
                 ws.cell(row=current_row, column=1, value=clean_for_excel(rif))
                 ws.cell(row=current_row, column=2, value=clean_for_excel(client))
                 ws.cell(row=current_row, column=3, value=clean_for_excel(inv_num))
                 ws.cell(row=current_row, column=4, value=date)
                 
                 ws.cell(row=current_row, column=5, value=clean_for_excel(p[0])) # Código
-                ws.cell(row=current_row, column=6, value=clean_for_excel(p[1])) # Descripción
+                ws.cell(row=current_row, column=6, value=clean_for_excel(p[7])) # Descripción (Larga)
                 
                 c_qty = ws.cell(row=current_row, column=7, value=p[6]) # Cantidad
                 c_qty.alignment = center_align

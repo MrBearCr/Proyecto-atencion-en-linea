@@ -246,9 +246,9 @@ class ClientesReportesTab(ttk.Frame):
             # Procesar datos (agrupación de facturas y sus productos)
             invoices = {}
             for row in report_data_raw:
-                # row: (rif, name, num, date, prod_code, total_bs, desc, dept, grupo, sub, marca, total_usd, cantidad)
+                # row: (rif, name, num, date, prod_code, total_bs, desc_corta, dept, grupo, sub, marca, qty, total_usd, desc_larga)
                 rif, client_name, invoice_num, invoice_date, product_code, n_total_bs, \
-                p_desc, p_dept, p_grupo, p_sub, p_marca, p_qty, total_usd = row
+                p_desc_corta, p_dept, p_grupo, p_sub, p_marca, p_qty, total_usd, p_desc_larga = row
                 
                 invoice_key = (rif, invoice_num)
                 
@@ -266,7 +266,8 @@ class ClientesReportesTab(ttk.Frame):
                 
                 # Añadir/Agregar el producto
                 if product_code:
-                    metadata_key = (product_code, p_desc, p_dept, p_grupo, p_sub, p_marca)
+                    # Metadata incluye ambas descripciones para UI y Excel
+                    metadata_key = (product_code, p_desc_corta, p_dept, p_grupo, p_sub, p_marca, p_desc_larga)
                     current_qty = float(p_qty) if p_qty else 0.0
                     
                     if metadata_key not in invoices[invoice_key]['products_map']:
@@ -279,8 +280,9 @@ class ClientesReportesTab(ttk.Frame):
             for inv in invoices_list:
                 # Reconstruir products_full desde el map
                 inv['products_full'] = []
-                for (code, desc, dept, grupo, sub, marca), total_qty in inv['products_map'].items():
-                    inv['products_full'].append((code, desc, dept, grupo, sub, marca, total_qty))
+                for (code, desc_c, dept, grupo, sub, marca, desc_l), total_qty in inv['products_map'].items():
+                    # (code, desc_corta, dept, grupo, sub, marca, total_qty, desc_larga)
+                    inv['products_full'].append((code, desc_c, dept, grupo, sub, marca, total_qty, desc_l))
                 
                 # Ordenar productos por código
                 inv['products_full'].sort(key=lambda x: x[0])

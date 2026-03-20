@@ -655,18 +655,14 @@ class DatabaseApp:
                         quiebres_totales.extend(quiebres)
                 
                 # Detectar nuevos quiebres comparando con los códigos anteriores (si existen)
-                new_codes = {str(q['codigo']).strip() for q in quiebres_totales}
+                new_codes = {str(q[0]).strip() for q in quiebres_totales}
                 if hasattr(self, 'cached_alertas') and self.cached_alertas:
                     old_codes = {str(q[0]).strip() for q in self.cached_alertas}
                     self.new_stock_break_codes = new_codes - old_codes
                 else:
                     self.new_stock_break_codes = set()
 
-                # Convertir a tuplas para compatibilidad
-                self.cached_alertas = [
-                    (q['codigo'], q['descripcion'], q['sede'], q['unidades_perdidas'], q['dias_quiebre'], q['ultima_compra'], q['ultima_venta'])
-                    for q in quiebres_totales
-                ]
+                self.cached_alertas = quiebres_totales
                 self.last_refresh = datetime.now()
                 self._rebuild_effective_views()
                 self.root.after(0, self.aplicar_filtro_stock)
@@ -1599,12 +1595,12 @@ class DatabaseApp:
                     # Verificar si hay alguno nuevo para disparar el popup
                     for q in quiebres:
                         # La llave ahora incluye sede para notificar individualmente por ocurrencia
-                        notif_key = f"QUIEBRE_{q['codigo']}_{sede_name}"
+                        notif_key = f"QUIEBRE_{q[0]}_{sede_name}"
                         if notif_key not in self.ultimas_notificaciones:
-                            self.log(f"⚠️ ¡QUIEBRE! {q['codigo']} ({q['descripcion']}) - Sede: {sede_name} | Perdidas: {int(q['unidades_perdidas'])}", "WARNING")
+                            self.log(f"⚠️ ¡QUIEBRE! {q[0]} ({q[1]}) - Sede: {sede_name} | Perdidas: {int(q[3])}", "WARNING")
                             self.ultimas_notificaciones.add(notif_key)
                             # Mostrar notificación tipo toast individual
-                            self.mostrar_notificacion_quiebre(q['codigo'], q['descripcion'], sede_name)
+                            self.mostrar_notificacion_quiebre(q[0], q[1], sede_name)
                             found_new_quiebre = True
                 
         except Exception as e:
@@ -3980,7 +3976,13 @@ class DatabaseApp:
                 '0101': 'Barinas'
             }
         
-        for idx, (codigo, desc, sede_codigo, unid_perd, dias, ult_compra, ult_venta) in enumerate(datos):
+        for idx, row_data in enumerate(datos):
+            # unpack exactly 8 elements
+            if len(row_data) >= 8:
+                codigo, desc, sede_codigo, unid_perd, dias, ult_compra, ult_venta, desc_larga = row_data[:8]
+            else:
+                codigo, desc, sede_codigo, unid_perd, dias, ult_compra, ult_venta = row_data[:7]
+            
             es_favorito = codigo in favoritos
             estado = "✓" if es_favorito else "☐"
 
@@ -5700,12 +5702,8 @@ class DatabaseApp:
             # Use new quiebre detection logic
             quiebres = self.db_manager.obtener_quiebres_directos(all_warehouses)
             if quiebres:
-                # Convert dict format to tuple format for compatibility
-                self.cached_alertas = [
-                    (q['codigo'], q['descripcion'], q['sede'], q['unidades_perdidas'], 
-                     q['dias_quiebre'], q['ultima_compra'], q['ultima_venta'])
-                    for q in quiebres
-                ]
+                # Direct assignment as the SQL returns tuples directly (len 8)
+                self.cached_alertas = quiebres
                 self.last_refresh = datetime.now()
                 self.log(f"Quiebres stock cargados: {len(quiebres)} registros", "SUCCESS")
             else:

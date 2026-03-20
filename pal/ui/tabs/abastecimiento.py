@@ -67,6 +67,7 @@ class AbastecimientoTab(ttk.Frame):
         # Notebook for Sub-modules
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(fill="both", expand=True, padx=10, pady=5)
+        self.notebook.bind("<<NotebookTabChanged>>", self._on_subtab_changed)
         
         # Tab 1: Abastecimiento
         self.tab_abastecimiento = ttk.Frame(self.notebook)
@@ -82,6 +83,16 @@ class AbastecimientoTab(ttk.Frame):
         self.tab_pendientes = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_pendientes, text="Pendientes de Procesar")
         self._setup_tab_pendientes(self.tab_pendientes)
+
+    def _on_subtab_changed(self, event=None):
+        try:
+            current_tab = self.notebook.tab(self.notebook.select(), "text")
+            if current_tab == "Autorizaciones":
+                self.refresh_autorizaciones()
+            elif current_tab == "Pendientes de Procesar":
+                self.refresh_pendientes()
+        except:
+            pass
 
     def _setup_tab_abastecimiento(self, parent_frame):
         # Controls
@@ -772,19 +783,21 @@ class AbastecimientoTab(ttk.Frame):
         tree_frame = ttk.Frame(parent_frame)
         tree_frame.pack(fill="both", expand=True, padx=10, pady=5)
         
-        columns = ("id", "producto", "destino", "origen", "cantidad", "stock_dest", "fecha")
-        self.tree_auto = ttk.Treeview(tree_frame, columns=columns, show="headings")
+        columns = ("id", "producto", "descripcion", "destino", "origen", "cantidad", "stock_dest", "fecha")
+        self.tree_auto = ttk.Treeview(tree_frame, columns=columns, show="headings", displaycolumns=("producto", "descripcion", "destino", "origen", "cantidad", "stock_dest", "fecha"))
         
         self.tree_auto.heading("id", text="ID")
-        self.tree_auto.heading("producto", text="Producto")
+        self.tree_auto.heading("producto", text="Código")
+        self.tree_auto.heading("descripcion", text="Descripción")
         self.tree_auto.heading("destino", text="Destino")
         self.tree_auto.heading("origen", text="Origen Sug.")
         self.tree_auto.heading("cantidad", text="Cant.")
         self.tree_auto.heading("stock_dest", text="Stock Dest.")
         self.tree_auto.heading("fecha", text="Fecha")
         
-        self.tree_auto.column("id", width=40)
-        self.tree_auto.column("producto", width=120)
+        self.tree_auto.column("id", width=0, stretch=False)
+        self.tree_auto.column("producto", width=90)
+        self.tree_auto.column("descripcion", width=250)
         self.tree_auto.column("destino", width=100)
         self.tree_auto.column("origen", width=100)
         self.tree_auto.column("cantidad", width=60)
@@ -816,19 +829,21 @@ class AbastecimientoTab(ttk.Frame):
         tree_frame = ttk.Frame(parent_frame)
         tree_frame.pack(fill="both", expand=True, padx=10, pady=5)
         
-        columns = ("id", "producto", "destino", "origen", "cantidad", "stock_dest", "fecha")
-        self.tree_pend = ttk.Treeview(tree_frame, columns=columns, show="headings")
+        columns = ("id", "producto", "descripcion", "destino", "origen", "cantidad", "stock_dest", "fecha")
+        self.tree_pend = ttk.Treeview(tree_frame, columns=columns, show="headings", displaycolumns=("producto", "descripcion", "destino", "origen", "cantidad", "stock_dest", "fecha"))
         
         self.tree_pend.heading("id", text="ID")
-        self.tree_pend.heading("producto", text="Producto")
+        self.tree_pend.heading("producto", text="Código")
+        self.tree_pend.heading("descripcion", text="Descripción")
         self.tree_pend.heading("destino", text="Destino")
         self.tree_pend.heading("origen", text="Origen Sug.")
         self.tree_pend.heading("cantidad", text="Cant.")
         self.tree_pend.heading("stock_dest", text="Stock Dest.")
         self.tree_pend.heading("fecha", text="Fecha Aprobación")
         
-        self.tree_pend.column("id", width=40)
-        self.tree_pend.column("producto", width=120)
+        self.tree_pend.column("id", width=0, stretch=False)
+        self.tree_pend.column("producto", width=90)
+        self.tree_pend.column("descripcion", width=250)
         self.tree_pend.column("destino", width=100)
         self.tree_pend.column("origen", width=100)
         self.tree_pend.column("cantidad", width=60)
@@ -853,25 +868,27 @@ class AbastecimientoTab(ttk.Frame):
             
         try:
             query = """
-                SELECT id, producto_codigo, sucursal_destino, sucursal_origen_sugerida, 
-                       cantidad_sugerida, stock_actual, fecha_generacion
-                FROM pal_sugerencias_transferencia
-                WHERE requiere_autorizacion = 1 AND estado = 'pendiente'
-                ORDER BY fecha_generacion DESC
+                SELECT t.id, t.producto_codigo, COALESCE(p.cu_descripcion_corta, p.C_DESCRI, 'SIN DESCRIPCIÓN') as descripcion,
+                       t.sucursal_destino, t.sucursal_origen_sugerida, 
+                       t.cantidad_sugerida, t.stock_actual, t.fecha_generacion
+                FROM pal_sugerencias_transferencia t
+                LEFT JOIN MA_PRODUCTOS p ON t.producto_codigo = p.C_CODIGO COLLATE DATABASE_DEFAULT
+                WHERE t.requiere_autorizacion = 1 AND t.estado = 'pendiente'
+                ORDER BY t.fecha_generacion DESC
             """
             rows = self.app.db_manager.fetch_data(query)
             for r in rows:
                 # Formatear datos para la UI
                 r_list = list(r)
-                # r_list[4] es cantidad_sugerida (Decimal)
-                # r_list[5] es stock_actual (Decimal)
-                # r_list[6] es fecha_generacion (datetime)
+                # r_list[5] es cantidad_sugerida (Decimal)
+                # r_list[6] es stock_actual (Decimal)
+                # r_list[7] es fecha_generacion (datetime)
                 
                 try:
-                    r_list[4] = f"{float(r_list[4]):.2f}" if r_list[4] is not None else "0.00"
                     r_list[5] = f"{float(r_list[5]):.2f}" if r_list[5] is not None else "0.00"
-                    if r_list[6] and hasattr(r_list[6], 'strftime'):
-                        r_list[6] = r_list[6].strftime("%Y-%m-%d %H:%M")
+                    r_list[6] = f"{float(r_list[6]):.2f}" if r_list[6] is not None else "0.00"
+                    if r_list[7] and hasattr(r_list[7], 'strftime'):
+                        r_list[7] = r_list[7].strftime("%Y-%m-%d %H:%M")
                 except:
                     pass
                     
@@ -886,21 +903,23 @@ class AbastecimientoTab(ttk.Frame):
             
         try:
             query = """
-                SELECT id, producto_codigo, sucursal_destino, sucursal_origen_sugerida, 
-                       cantidad_sugerida, stock_actual, fecha_autorizacion
-                FROM pal_sugerencias_transferencia
-                WHERE estado = 'aprobada'
-                ORDER BY fecha_autorizacion DESC
+                SELECT t.id, t.producto_codigo, COALESCE(p.cu_descripcion_corta, p.C_DESCRI, 'SIN DESCRIPCIÓN') as descripcion,
+                       t.sucursal_destino, t.sucursal_origen_sugerida, 
+                       t.cantidad_sugerida, t.stock_actual, t.fecha_autorizacion
+                FROM pal_sugerencias_transferencia t
+                LEFT JOIN MA_PRODUCTOS p ON t.producto_codigo = p.C_CODIGO COLLATE DATABASE_DEFAULT
+                WHERE t.estado = 'aprobada'
+                ORDER BY t.fecha_autorizacion DESC
             """
             rows = self.app.db_manager.fetch_data(query)
             for r in rows:
                 # Formatear datos para la UI
                 r_list = list(r)
                 try:
-                    r_list[4] = f"{float(r_list[4]):.2f}" if r_list[4] is not None else "0.00"
                     r_list[5] = f"{float(r_list[5]):.2f}" if r_list[5] is not None else "0.00"
-                    if r_list[6] and hasattr(r_list[6], 'strftime'):
-                        r_list[6] = r_list[6].strftime("%Y-%m-%d %H:%M")
+                    r_list[6] = f"{float(r_list[6]):.2f}" if r_list[6] is not None else "0.00"
+                    if r_list[7] and hasattr(r_list[7], 'strftime'):
+                        r_list[7] = r_list[7].strftime("%Y-%m-%d %H:%M")
                 except:
                     pass
                 self.tree_pend.insert("", "end", values=r_list)
@@ -933,7 +952,7 @@ class AbastecimientoTab(ttk.Frame):
             ws = wb.active
             ws.title = "Pendientes"
             
-            headers = ["ID", "Producto", "Destino", "Origen", "Cantidad", "Stock Destino", "Fecha Aprobación"]
+            headers = ["ID", "Producto", "Descripción", "Destino", "Origen", "Cantidad", "Stock Destino", "Fecha Aprobación"]
             ws.append(headers)
             
             for item in items:
@@ -955,7 +974,7 @@ class AbastecimientoTab(ttk.Frame):
         item = self.tree_auto.item(selected[0])
         s_id = item['values'][0]
         prod = item['values'][1]
-        cant_sug = item['values'][4]
+        cant_sug = item['values'][5]
         
         # Modal de autorización
         modal = tk.Toplevel(self)
@@ -992,6 +1011,7 @@ class AbastecimientoTab(ttk.Frame):
                     messagebox.showinfo("Éxito", "Autorización registrada correctamente.", parent=modal)
                     modal.destroy()
                     self.refresh_autorizaciones()
+                    self.refresh_pendientes()
                 else:
                     messagebox.showerror("Error", "No se pudo registrar la autorización.", parent=modal)
             except ValueError:

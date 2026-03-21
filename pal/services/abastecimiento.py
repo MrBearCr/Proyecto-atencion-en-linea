@@ -728,46 +728,143 @@ class AbastecimientoService:
             return False
 
     def save_sugerencias(self, sugerencias, usuario_id=None):
-        """Guarda las sugerencias generadas en la tabla pal_sugerencias_transferencia."""
+        """
+        Guarda las sugerencias generadas agrupándolas en órdenes de transferencia (Maestros).
+        """
         try:
-            sql = """
-                INSERT INTO pal_sugerencias_transferencia 
-                (producto_codigo, sucursal_destino, sucursal_origen_sugerida, cantidad_sugerida, 
-                 cantidad_disponible, stock_actual, requiere_autorizacion, estado, fue_autorizada, 
-                 fecha_autorizacion, usuario_autoriza, cantidad_pre_ajuste, es_producto_rojo, tipo_solicitud)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """
             from datetime import datetime
+            
+            # 1. Agrupar sugerencias por sede destino
+            agrupadas = {}
             for s in sugerencias:
-                es_auto = (s.get("requiere_autorizacion", 1) == 0)
-                estado_final = 'aprobada' if es_auto else 'pendiente'
-                fue_aut = 1 if es_auto else 0
-                fecha_aut = datetime.now() if es_auto else None
-                u_aut = usuario_id if es_auto else None
-                cant_sug = s["cantidad_sugerida"]
-                cant_orig = s.get("_cantidad_original", cant_sug)
+                destino = s["sucursal_destino"]
+                if destino not in agrupadas:
+                    agrupadas[destino] = []
+                agrupadas[destino].append(s)
+            
+            for sede, items in agrupadas.items():
+                # 2. Generar número de transferencia único para esta sede
+                numero_transf = self.generar_numero_transferencia()
                 
-                es_rojo = 1 if s.get("es_rojo", False) else 0
-                tipo_sol = 'producto_rojo' if es_rojo else 'normal'
+                # 3. Crear el Maestro
+                sql_maestro = """
+                    INSERT INTO pal_transferencias_maestro 
+                    (numero_transf, sucursal_destino, usuario_crea, estado, fecha_creacion)
+                    VALUES (?, ?, ?, 'en_transito', GETDATE())
+                """
+                self.db_manager.execute_query(sql_maestro, (numero_transf, sede, usuario_id))
                 
-                params = (
-                    s["producto_codigo"],
-                    s["sucursal_destino"],
-                    s["sucursal_origen_sugerida"],
-                    cant_sug,
-                    s["stock_origen"],
-                    s["stock_actual"],
-                    s["requiere_autorizacion"],
-                    estado_final,
-                    fue_aut,
-                    fecha_aut,
-                    u_aut,
-                    cant_orig,
-                    es_rojo,
-                    tipo_sol
-                )
-                self.db_manager.execute_query(sql, params)
+                # Obtener el ID del maestro recién creado
+                res_id = self.db_manager.fetch_data("SELECT IDENT_CURRENT('pal_transferencias_maestro')")
+                maestro_id = int(res_id[0][0]) if res_id else None
+                
+                # 4. Insertar ítems vinculados al maestro
+                sql_item = """
+                    INSERT INTO pal_sugerencias_transferencia 
+                    (producto_codigo, sucursal_destino, sucursal_origen_sugerida, cantidad_sugerida, 
+                     cantidad_disponible, stock_actual, requiere_autorizacion, estado, fue_autorizada, 
+                     fecha_autorizacion, usuario_autoriza, cantidad_pre_ajuste, es_producto_rojo, 
+                     tipo_solicitud, maestro_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """
+                
+                for s in items:
+                    es_auto = (s.get("requiere_autorizacion", 1) == 0)
+                    estado_final = 'en_transito' if es_auto else 'pendiente'
+                    fue_aut = 1 if es_auto else 0
+                    fecha_aut = datetime.now() if es_auto else None
+                    u_aut = usuario_id if es_auto else None
+                    cant_sug = s["cantidad_sugerida"]
+                    cant_orig = s.get("_cantidad_original", cant_sug)
+                    
+                    es_rojo = 1 if s.get("es_rojo", False) else 0
+                    tipo_sol = 'producto_rojo' if es_rojo else 'normal'
+                    
+                    params = (
+                        s["producto_codigo"],
+                        s["sucursal_destino"],
+                        s["sucursal_origen_sugerida"],
+                        cant_sug,
+                        s["stock_origen"],
+                        s["stock_actual"],
+                        s["requiere_autorizacion"],
+                        estado_final,
+                        fue_aut,
+                        fecha_aut,
+                        u_aut,
+                        cant_orig,
+                        es_rojo,
+                        tipo_sol,
+                        maestro_id
+                    )
+                    self.db_manager.execute_query(sql_item, params)
+                    
             return True
         except Exception as e:
-            logger.error(f"Error guardando sugerencias: {e}")
+            logger.error(f"Error guardando sugerencias agrupadas: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+    def generar_numero_transferencia(self):
+        """Genera el siguiente número correlativo de transferencia (TRS-000001)."""
+        try:
+            sql = "SELECT MAX(id) FROM pal_transferencias_maestro"
+            res = self.db_manager.fetch_data(sql)
+            next_id = 1
+            if res and res[0][0]:
+                next_id = int(res[0][0]) + 1
+            
+            return f"TRS-{str(next_id).zfill(6)}"
+        except Exception as e:
+            logger.error(f"Error generando número de transferencia: {e}")
+            return f"TRS-{datetime.now().strftime('%H%M%S')}"
+
+    def get_ordenes_activas(self):
+        """Obtiene las órdenes de transferencia que están en tránsito."""
+        try:
+            sql = """
+                SELECT m.id, m.numero_transf, m.sucursal_destino, m.fecha_creacion, m.estado,
+                       (SELECT COUNT(*) FROM pal_sugerencias_transferencia WHERE maestro_id = m.id) as total_items,
+                       u.nombre_completo as usuario_nombre
+                FROM pal_transferencias_maestro m
+                LEFT JOIN pal_usuarios u ON m.usuario_crea = u.id
+                WHERE m.estado = 'en_transito'
+                ORDER BY m.fecha_creacion DESC
+            """
+            return self.db_manager.fetch_data(sql) or []
+        except Exception as e:
+            logger.error(f"Error obteniendo órdenes activas: {e}")
+            return []
+
+    def get_detalle_orden(self, maestro_id):
+        """Obtiene los productos individuales de una orden de transferencia."""
+        try:
+            sql = """
+                SELECT t.id, t.producto_codigo, COALESCE(p.cu_descripcion_corta, p.C_DESCRI, 'SIN DESCRIPCIÓN') as descripcion,
+                       t.cantidad_sugerida, t.sucursal_origen_sugerida, t.es_producto_rojo
+                FROM pal_sugerencias_transferencia t
+                LEFT JOIN MA_PRODUCTOS p ON t.producto_codigo = p.C_CODIGO COLLATE DATABASE_DEFAULT
+                WHERE t.maestro_id = ?
+            """
+            return self.db_manager.fetch_data(sql, (maestro_id,)) or []
+        except Exception as e:
+            logger.error(f"Error obteniendo detalle de orden {maestro_id}: {e}")
+            return []
+
+    def cerrar_transferencia(self, maestro_id, usuario_id):
+        """Cierra una orden de transferencia, marcándola como recibida."""
+        try:
+            # 1. Actualizar maestro
+            sql_m = "UPDATE pal_transferencias_maestro SET estado = 'recibida' WHERE id = ?"
+            self.db_manager.execute_query(sql_m, (maestro_id,))
+            
+            # 2. Actualizar ítems
+            sql_i = "UPDATE pal_sugerencias_transferencia SET estado = 'completada' WHERE maestro_id = ?"
+            self.db_manager.execute_query(sql_i, (maestro_id,))
+            
+            logger.info(f"Orden de transferencia {maestro_id} cerrada por usuario {usuario_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Error cerrando transferencia {maestro_id}: {e}")
             return False

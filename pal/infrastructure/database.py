@@ -710,7 +710,24 @@ class DatabaseManager:
                 BEGIN
                     ALTER TABLE [dbo].[pal_sugerencias_transferencia] ADD [cantidad_pre_ajuste] DECIMAL(10,2) NULL;
                 END
+                IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[pal_sugerencias_transferencia]') AND name = 'maestro_id')
+                BEGIN
+                    ALTER TABLE [dbo].[pal_sugerencias_transferencia] ADD [maestro_id] INT NULL;
+                END
             END
+
+            -- Maestro de Transferencias (Agrupación por Órden)
+            IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'pal_transferencias_maestro' AND type = 'U')
+            BEGIN
+                CREATE TABLE pal_transferencias_maestro (
+                    id INT IDENTITY(1,1) PRIMARY KEY,
+                    numero_transf NVARCHAR(20) UNIQUE NOT NULL,
+                    sucursal_destino NVARCHAR(50) NOT NULL,
+                    fecha_creacion DATETIME DEFAULT GETDATE(),
+                    usuario_crea INT,
+                    estado NVARCHAR(20) DEFAULT 'en_transito' -- en_transito, recibida, anulada
+                );
+            END;
 
             -- Productos no trasladables (Lista ROJA) - Por sede destino
             IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'pal_productos_no_trasladables' AND type = 'U')

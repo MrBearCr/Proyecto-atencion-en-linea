@@ -51,6 +51,17 @@ class AbastecimientoTab(ttk.Frame):
         self.search_var.trace_add("write", lambda *args: self._aplicar_filtro_local())
         self.ocultar_sin_cdt_var = tk.BooleanVar(value=False)
         
+        # Animación para estado "En Tránsito" (Derecha a Izquierda)
+        self.anim_frame = 0
+        self.anim_sequence = [
+            ". . . . 🚚",
+            ". . . 🚚 .",
+            ". . 🚚 . .",
+            ". 🚚 . . .",
+            "🚚 . . . ."
+        ]
+        self.anim_running = False
+        
         self._setup_ui()
         
     def _setup_ui(self):
@@ -530,7 +541,8 @@ class AbastecimientoTab(ttk.Frame):
             logger.error(f"Error en hilo de abastecimiento: {e}")
             import traceback
             traceback.print_exc()
-            self.after(0, lambda: self._finalizar_calculo([], sede, error=str(e)))
+            error_msg = str(e)
+            self.after(0, lambda msg=error_msg: self._finalizar_calculo([], sede, error=msg))
 
     def _finalizar_calculo(self, sugerencias, sede, error=None):
         """Actualiza la UI con los resultados del hilo secundario."""
@@ -853,37 +865,35 @@ class AbastecimientoTab(ttk.Frame):
         ttk.Button(footer, text="❌ Rechazar", command=self.on_rechazar).pack(side="right", padx=5)
 
     def _setup_tab_pendientes(self, parent_frame):
-        """Configura la UI para la pestaña de sugerencias pendientes de procesar."""
+        """Configura la UI para la pestaña de seguimiento de órdenes de transferencia."""
         header = ttk.Frame(parent_frame)
         header.pack(fill="x", padx=10, pady=5)
         
-        ttk.Label(header, text="⏳ Transferencias Pendientes de Procesar", font=("Helvetica", 12, "bold")).pack(side="left")
+        ttk.Label(header, text="🚚 Seguimiento de Órdenes de Transferencia (En Tránsito)", font=("Helvetica", 12, "bold")).pack(side="left")
         ttk.Button(header, text="🔄 Refrescar", command=self.refresh_pendientes).pack(side="right")
         
-        # Treeview para pendientes
+        # Treeview para órdenes (maestros)
         tree_frame = ttk.Frame(parent_frame)
         tree_frame.pack(fill="both", expand=True, padx=10, pady=5)
         
-        columns = ("id", "producto", "descripcion", "destino", "origen", "cantidad", "stock_dest", "fecha")
-        self.tree_pend = ttk.Treeview(tree_frame, columns=columns, show="headings", displaycolumns=("producto", "descripcion", "destino", "origen", "cantidad", "stock_dest", "fecha"))
+        columns = ("id", "numero", "destino", "fecha", "items", "usuario", "estado")
+        self.tree_pend = ttk.Treeview(tree_frame, columns=columns, show="headings")
         
         self.tree_pend.heading("id", text="ID")
-        self.tree_pend.heading("producto", text="Código")
-        self.tree_pend.heading("descripcion", text="Descripción")
-        self.tree_pend.heading("destino", text="Destino")
-        self.tree_pend.heading("origen", text="Origen Sug.")
-        self.tree_pend.heading("cantidad", text="Cant.")
-        self.tree_pend.heading("stock_dest", text="Stock Dest.")
-        self.tree_pend.heading("fecha", text="Fecha Aprobación")
+        self.tree_pend.heading("numero", text="N° Orden")
+        self.tree_pend.heading("destino", text="Sede Destino")
+        self.tree_pend.heading("fecha", text="Fecha Despacho")
+        self.tree_pend.heading("items", text="Cant. Productos")
+        self.tree_pend.heading("usuario", text="Usuario Despacha")
+        self.tree_pend.heading("estado", text="Estado")
         
-        self.tree_pend.column("id", width=0, stretch=False)
-        self.tree_pend.column("producto", width=90)
-        self.tree_pend.column("descripcion", width=250)
-        self.tree_pend.column("destino", width=100)
-        self.tree_pend.column("origen", width=100)
-        self.tree_pend.column("cantidad", width=60)
-        self.tree_pend.column("stock_dest", width=60)
-        self.tree_pend.column("fecha", width=120)
+        self.tree_pend.column("id", width=50, anchor="center")
+        self.tree_pend.column("numero", width=120, anchor="center")
+        self.tree_pend.column("destino", width=150)
+        self.tree_pend.column("fecha", width=150, anchor="center")
+        self.tree_pend.column("items", width=100, anchor="center")
+        self.tree_pend.column("usuario", width=150)
+        self.tree_pend.column("estado", width=100, anchor="center")
         
         self.tree_pend.pack(side="left", fill="both", expand=True)
         
@@ -894,9 +904,12 @@ class AbastecimientoTab(ttk.Frame):
         # Tags de color para pendientes
         self.tree_pend.tag_configure('rojo', background='#ffcccc')
         
+        # Actions
         footer = ttk.Frame(parent_frame)
         footer.pack(fill="x", padx=10, pady=10)
         
+        ttk.Button(footer, text="📋 Ver Detalle de Orden", command=self.on_ver_detalle_orden).pack(side="left", padx=5)
+        ttk.Button(footer, text="📦 Confirmar Recepción ✅", command=self.on_cerrar_orden).pack(side="right", padx=5)
         ttk.Button(footer, text="📊 Exportar a Excel", command=self.exportar_pendientes).pack(side="right", padx=5)
 
     def refresh_autorizaciones(self):
@@ -935,39 +948,153 @@ class AbastecimientoTab(ttk.Frame):
             logger.error(f"Error refrescando autorizaciones: {e}")
 
     def refresh_pendientes(self):
-        """Carga las sugerencias que ya fueron aprobadas pero no procesadas."""
+        """Carga las órdenes de transferencia que están en tránsito."""
         for i in self.tree_pend.get_children():
             self.tree_pend.delete(i)
             
         try:
-            query = """
-                SELECT t.id, t.producto_codigo, COALESCE(p.cu_descripcion_corta, p.C_DESCRI, 'SIN DESCRIPCIÓN') as descripcion,
-                       t.sucursal_destino, t.sucursal_origen_sugerida, 
-                       t.cantidad_sugerida, t.stock_actual, t.fecha_autorizacion, t.cantidad_pre_ajuste, t.es_producto_rojo
-                FROM pal_sugerencias_transferencia t
-                LEFT JOIN MA_PRODUCTOS p ON t.producto_codigo = p.C_CODIGO COLLATE DATABASE_DEFAULT
-                WHERE t.estado = 'aprobada'
-                ORDER BY t.fecha_autorizacion DESC
-            """
-            rows = self.app.db_manager.fetch_data(query)
-            for r in rows:
-                # Formatear datos para la UI
-                r_list = list(r)[:8] # Solo tomamos hasta fecha_autorizacion para la vista
-                tags = []
-                if r[9]: # es_producto_rojo
-                    tags.append('rojo')
+            from pal.services.abastecimiento import AbastecimientoService
+            service = AbastecimientoService(self.app.db_manager)
+            ordenes = service.get_ordenes_activas()
+            
+            for r in ordenes:
+                # r: id, numero, destino, fecha, estado, total_items, usuario_nombre
+                m_id, num, dest, fecha, estado, items, usuario = r
                 
-                try:
-                    cant_sug = float(r_list[5]) if r_list[5] is not None else 0.0
-                    r_list[5] = f"{cant_sug:.2f}"
-                    r_list[6] = f"{float(r_list[6]):.2f}" if r_list[6] is not None else "0.00"
-                    if r_list[7] and hasattr(r_list[7], 'strftime'):
-                        r_list[7] = r_list[7].strftime("%Y-%m-%d %H:%M")
-                except:
-                    pass
-                self.tree_pend.insert("", "end", values=r_list, tags=tags)
+                fecha_str = fecha.strftime("%Y-%m-%d %H:%M") if fecha else ""
+                
+                tags = []
+                estado_display = estado
+                if estado == 'en_transito':
+                    estado_display = self.anim_sequence[self.anim_frame]
+                    tags.append("anim_transito")
+                
+                self.tree_pend.insert("", "end", values=(
+                    m_id, num, dest, fecha_str, items, usuario or "N/A", estado_display
+                ), tags=tags)
+            
+            # Iniciar animación si no está corriendo y hay algo que animar
+            if not self.anim_running and self.tree_pend.tag_has("anim_transito"):
+                self.anim_running = True
+                self._update_status_animation()
+                
         except Exception as e:
-            logger.error(f"Error refrescando pendientes: {e}")
+            logger.error(f"Error refrescando órdenes: {e}")
+
+    def _update_status_animation(self):
+        """Ciclo de animación para las filas en tránsito."""
+        if not self.anim_running:
+            return
+            
+        # Verificar si todavía hay filas con el tag
+        animated_items = self.tree_pend.tag_has("anim_transito")
+        if not animated_items:
+            self.anim_running = False
+            return
+            
+        # Siguiente frame
+        self.anim_frame = (self.anim_frame + 1) % len(self.anim_sequence)
+        current_text = self.anim_sequence[self.anim_frame]
+        
+        # Actualizar cada ítem animado (columna Estado es el índice 6)
+        for item_id in animated_items:
+            try:
+                vals = list(self.tree_pend.item(item_id, "values"))
+                vals[6] = current_text
+                self.tree_pend.item(item_id, values=vals)
+            except:
+                pass # Item podría haber sido borrado
+                
+        # Programar siguiente frame (800ms para que sea fluido pero no distraiga demasiado)
+        self.after(800, self._update_status_animation)
+
+    def on_ver_detalle_orden(self):
+        """Muestra los productos incluidos en la orden seleccionada."""
+        selected = self.tree_pend.selection()
+        if not selected:
+            messagebox.showwarning("Atención", "Seleccione una orden para ver el detalle.")
+            return
+            
+        item = self.tree_pend.item(selected[0])
+        m_id = item['values'][0]
+        num_orden = item['values'][1]
+        
+        # Modal de detalle
+        modal = tk.Toplevel(self)
+        modal.title(f"Detalle de Orden: {num_orden}")
+        modal.geometry("700x450")
+        modal.transient(self)
+        modal.grab_set()
+        
+        ttk.Label(modal, text=f"Productos en Orden {num_orden}", font=("Helvetica", 12, "bold")).pack(pady=10)
+        
+        frame = ttk.Frame(modal)
+        frame.pack(fill="both", expand=True, padx=10, pady=5)
+        
+        cols = ("producto", "descripcion", "cantidad", "origen")
+        tree_det = ttk.Treeview(frame, columns=cols, show="headings")
+        tree_det.heading("producto", text="Código")
+        tree_det.heading("descripcion", text="Descripción")
+        tree_det.heading("cantidad", text="Cant.")
+        tree_det.heading("origen", text="Origen")
+        
+        tree_det.column("producto", width=100)
+        tree_det.column("descripcion", width=300)
+        tree_det.column("cantidad", width=80, anchor="center")
+        tree_det.column("origen", width=100)
+        
+        tree_det.pack(side="left", fill="both", expand=True)
+        
+        # Scrollbar
+        scrolly = ttk.Scrollbar(frame, orient="vertical", command=tree_det.yview)
+        tree_det.configure(yscrollcommand=scrolly.set)
+        scrolly.pack(side="right", fill="y")
+        
+        # Cargar datos
+        try:
+            from pal.services.abastecimiento import AbastecimientoService
+            service = AbastecimientoService(self.app.db_manager)
+            detalles = service.get_detalle_orden(m_id)
+            
+            for d in detalles:
+                # d: id, codigo, descripcion, cantidad, origen, es_rojo
+                tags = ('rojo',) if d[5] else ()
+                tree_det.insert("", "end", values=(d[1], d[2], d[3], d[4]), tags=tags)
+                
+            tree_det.tag_configure('rojo', background='#ffcccc')
+        except Exception as e:
+            logger.error(f"Error cargando detalle: {e}")
+            
+        ttk.Button(modal, text="Cerrar", command=modal.destroy).pack(pady=10)
+
+    def on_cerrar_orden(self):
+        """Confirma la recepción de la orden y la cierra."""
+        selected = self.tree_pend.selection()
+        if not selected:
+            messagebox.showwarning("Atención", "Seleccione una orden para confirmar recepción.")
+            return
+            
+        item = self.tree_pend.item(selected[0])
+        m_id = item['values'][0]
+        num_orden = item['values'][1]
+        
+        if not messagebox.askyesno("Confirmar Recepción", f"¿Está seguro de marcar la orden {num_orden} como RECIBIDA?\n\nEsto cerrará la transferencia definitivamente."):
+            return
+            
+        try:
+            from pal.services.abastecimiento import AbastecimientoService
+            service = AbastecimientoService(self.app.db_manager)
+            
+            user_id = self.app.current_user['id'] if self.app.current_user else None
+            
+            if service.cerrar_transferencia(m_id, user_id):
+                messagebox.showinfo("Éxito", f"Orden {num_orden} cerrada correctamente.")
+                self.refresh_pendientes()
+            else:
+                messagebox.showerror("Error", "No se pudo cerrar la orden.")
+        except Exception as e:
+            logger.error(f"Error en on_cerrar_orden: {e}")
+            messagebox.showerror("Error", f"Error inesperado: {e}")
 
     def exportar_pendientes(self):
         """Exporta las transferencias pendientes a Excel."""

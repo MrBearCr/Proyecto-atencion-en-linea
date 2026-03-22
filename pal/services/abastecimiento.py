@@ -249,13 +249,15 @@ class AbastecimientoService:
                         promedio_diario = units_en_periodo / per
                         periodo_usado = per
                         break
+                
+                logger.debug(f"[{codigo}] Análisis Cascada: Usando {periodo_usado or 'N/A'}d -> Promedio: {promedio_diario:.2f}/día")
 
                 # Si no encontró ventas en ningún período → stock muerto
                 if promedio_diario <= 0:
                     # Excepción: si tiene stock 0 y vendió algo recientemente, sugerimos mínimo
                     if stock_actual <= 0 and dias_desde_ultima_venta <= int(dias_obj):
                         promedio_diario = 1 / int(dias_obj)  # mínimo representativo
-                        periodo_usado = int(dias_obj)
+                        logger.debug(f"[{codigo}] Resurrección (Venta Reciente): Promedio Fijo {promedio_diario:.2f}")
                     elif stock_actual > 0:
                         continue  # Stock positivo sin demanda → no sugerir
                     else:
@@ -338,7 +340,7 @@ class AbastecimientoService:
         try:
             logger.info("Iniciando cálculo de abastecimiento GLOBAL")
             
-            # 1. Obtener configuración
+            # 1. Obtener configuración de sedes
             from pal.core.config_manager import ConfigManager
             config_mgr = ConfigManager(self.db_manager)
             sedes_config = config_mgr.get_sedes_config()
@@ -364,13 +366,18 @@ class AbastecimientoService:
                 logger.error("No hay CDTs configurados para el cálculo global.")
                 return []
 
-            # 2. Parámetros (Default 25 días si es 0, umbral 0 = desactivado)
+            # 2. Parámetros Globales (el cálculo global no soporta params por categoría)
             params_db = self.obtener_parametros()
             config_params = {p[0]: (p[1], p[2], p[3], p[4]) for p in params_db}
-            default_dias, _, default_umbral, _ = config_params.get(None, (25, 50, 0, 365))
+            
+            default_dias, default_quiebre, default_umbral, default_analisis = config_params.get(None, (25, 15, 0, 90))
             
             dias_obj = float(default_dias if default_dias else 25)
+            umb_quiebre = float(default_quiebre if default_quiebre is not None else 15)
             umbral_auto = float(default_umbral if default_umbral is not None else 0)
+            dias_analisis_base = int(default_analisis if default_analisis else 90)
+            
+            logger.info(f"Parámetros GLOBAL (Meta: {dias_obj}d, Gatillo: <{umb_quiebre}d, Análisis: Cascada hasta {dias_analisis_base}d)")
             
             # 2a. Cargar Lista Roja para validación global
             sql_rojos = "SELECT producto_codigo, sede_destino FROM pal_productos_no_trasladables WHERE activo = 1"

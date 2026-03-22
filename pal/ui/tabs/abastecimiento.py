@@ -54,14 +54,21 @@ class AbastecimientoTab(ttk.Frame):
         # Animación para estado "En Tránsito" (Derecha a Izquierda)
         self.anim_frame = 0
         self.anim_sequence = [
-            "En Transito🚚",
-            "En Transi🚚",
-            "En Tran🚚",
-            "En Tra🚚",
-            "En Tr🚚",
-            "En 🚚",
-            "En🚚",
-            "🚚"
+            "En Tránsito 🚚    ",
+            "n Tránsito 🚚     ",
+            " Tránsito 🚚      ",
+            "Tránsito 🚚       ",
+            "ránsito 🚚        ",
+            "ánsito 🚚         ",
+            "nsito 🚚          ",
+            "sito 🚚           ",
+            "ito 🚚            ",
+            "to 🚚             ",
+            "o 🚚              ",
+            " 🚚               ",
+            "🚚                ",
+            "🚚 ",
+            "🚚   "
         ]
         self.anim_running = False
         
@@ -72,7 +79,7 @@ class AbastecimientoTab(ttk.Frame):
         header = ttk.Frame(self)
         header.pack(fill="x", padx=10, pady=10)
         
-        ttk.Label(header, text="📦 Planeación de Abastecimiento", font=("Helvetica", 16, "bold")).pack(side="left")
+        ttk.Label(header, text="Planeación de Abastecimiento", font=("Helvetica", 16, "bold")).pack(side="left")
         
         # Configuration Button
         self.btn_config = ttk.Button(header, text="⚙️ Configurar Parámetros", command=self.on_configurar)
@@ -751,77 +758,177 @@ class AbastecimientoTab(ttk.Frame):
             messagebox.showerror("Error", f"Error inesperado procesando sugerencias: {e}")
 
     def on_configurar(self):
-        """Abre ventana para configurar días de stock y umbral de autorización."""
-        sub = tk.Toplevel(self.app.root)
-        sub.title("Configuración de Abastecimiento")
-        sub.geometry("400x300")
-        sub.transient(self.app.root)
-        sub.grab_set()
+        """Abre una ventana avanzada para configurar parámetros de abastecimiento por categoría."""
+        config_modal = tk.Toplevel(self)
+        config_modal.title("Configuración Avanzada de Abastecimiento")
+        config_modal.geometry("800x500")
+        config_modal.transient(self)
+        config_modal.grab_set()
 
+        ttk.Label(config_modal, text="Parámetros de Abastecimiento", font=("Helvetica", 14, "bold")).pack(pady=10)
+        ttk.Label(config_modal, text="Configure los parámetros para el cálculo de sugerencias. Puede definir valores por categoría o usar el Global.", wraplength=750).pack(pady=5)
+        
+        # --- Treeview para mostrar parámetros ---
+        tree_frame = ttk.Frame(config_modal, padding=10)
+        tree_frame.pack(fill="both", expand=True)
+
+        cols = ("categoria", "dias_stock", "umbral_quiebre", "dias_analisis", "umbral_auto")
+        tree_params = ttk.Treeview(tree_frame, columns=cols, show="headings")
+        tree_params.heading("categoria", text="Categoría / Departamento")
+        tree_params.heading("dias_stock", text="Días Stock (Meta)")
+        tree_params.heading("umbral_quiebre", text="Gatillo (Días)")
+        tree_params.heading("dias_analisis", text="Análisis (Días)")
+        tree_params.heading("umbral_auto", text="Umbral Autorización (Qty)")
+
+        for col in cols:
+            tree_params.column(col, anchor="center", width=120)
+        tree_params.column("categoria", anchor="w", width=200)
+        
+        tree_params.pack(side="left", fill="both", expand=True)
+        
+        scrolly = ttk.Scrollbar(tree_frame, orient="vertical", command=tree_params.yview)
+        tree_params.configure(yscrollcommand=scrolly.set)
+        scrolly.pack(side="right", fill="y")
+        
+        tree_params.tag_configure('global', font=("Helvetica", 10, "bold"))
+
+        # --- Service and Data Loading ---
         from pal.services.abastecimiento import AbastecimientoService
         service = AbastecimientoService(self.app.db_manager)
         
-        # Cargar parámetros actuales (Global)
-        params = service.obtener_parametros()
-        # Buscar el registro global (categoria_id is None)
-        global_params = next((p for p in params if p[0] is None), (None, 7, 50, 10, 365))
+        # Cargar jerarquía de departamentos si no está disponible
+        if not hasattr(self.app, 'tra_dept_dict') or not self.app.tra_dept_dict:
+            if hasattr(self.app, 'cargar_jerarquia_unificada'):
+                self.app.cargar_jerarquia_unificada()
         
-        tk.Label(sub, text="Configuración Global", font=("Segoe UI", 12, "bold")).pack(pady=10)
+        # Crear un mapa inverso de ID de departamento a nombre para mostrarlo
+        dept_id_map = {v: k for k, v in self.app.tra_dept_dict.items()} if hasattr(self.app, 'tra_dept_dict') else {}
 
-        frame = tk.Frame(sub, padx=20, pady=10)
-        frame.pack(fill=tk.BOTH, expand=True)
-
-        tk.Label(frame, text="Días de Stock Objetivo (Inventario):").grid(row=0, column=0, sticky=tk.W, pady=5)
-        var_dias = tk.StringVar(value=str(global_params[1]))
-        ent_dias = tk.Entry(frame, textvariable=var_dias, width=10)
-        ent_dias.grid(row=0, column=1, pady=5)
-
-        lbl_status_tag = tk.Label(frame, text="", font=("Segoe UI", 9, "bold"))
-        lbl_status_tag.grid(row=0, column=2, padx=10, sticky="w")
-
-        def update_status_tag(*args):
-            try:
-                val = int(var_dias.get())
-                if val < 25:
-                    txt, col = "Posible quiebre", "#d32f2f"
-                elif 25 <= val <= 59:
-                    txt, col = "Alerta Compra", "#ff9800"
-                elif 60 <= val <= 90:
-                    txt, col = "Optimo", "#4caf50"
-                elif 91 <= val <= 119:
-                    txt, col = "Critico", "#e53935"
+        def refresh_params_tree():
+            """Limpia y recarga la tabla de parámetros."""
+            for i in tree_params.get_children():
+                tree_params.delete(i)
+            
+            params = service.obtener_parametros()
+            for p in sorted(params, key=lambda x: (x[0] is not None, x[0])): # Global primero
+                # p: (categoria_id, dias_stock, umbral_quiebre, umbral_auto, dias_analisis)
+                cat_id, dias, quiebre, auto, analisis = p
+                
+                if cat_id is None:
+                    cat_nombre = "Global (Default)"
+                    tags = ('global',)
                 else:
-                    txt, col = "Sobre Stock", "#9c27b0"
-                lbl_status_tag.config(text=f"({txt})", fg=col)
-            except:
-                lbl_status_tag.config(text="")
+                    cat_nombre = dept_id_map.get(cat_id, f"ID: {cat_id}")
+                    tags = ()
+                
+                tree_params.insert("", "end", iid=cat_id if cat_id is not None else "global", values=(
+                    cat_nombre,
+                    int(dias) if dias else 0,
+                    int(quiebre) if quiebre else 0,
+                    int(analisis) if analisis else 0,
+                    int(auto) if auto else 0
+                ), tags=tags)
 
-        var_dias.trace_add("write", update_status_tag)
-        update_status_tag()
+        # --- Editor Sub-Modal ---
+        def open_editor(is_edit=False):
+            selected_item = tree_params.selection()
+            if is_edit and not selected_item:
+                messagebox.showwarning("Atención", "Seleccione un parámetro de la lista para editar.", parent=config_modal)
+                return
+            
+            editor_modal = tk.Toplevel(config_modal)
+            editor_modal.title("Editar Parámetro")
+            editor_modal.geometry("400x350")
+            editor_modal.transient(config_modal)
+            editor_modal.grab_set()
 
-        tk.Label(frame, text="Umbral Autorización (Cantidad Máx):").grid(row=1, column=0, sticky=tk.W, pady=5)
-        var_auto = tk.StringVar(value=str(global_params[3]))
-        tk.Entry(frame, textvariable=var_auto, width=10).grid(row=1, column=1, pady=5)
+            # --- Formulario ---
+            form = ttk.Frame(editor_modal, padding=15)
+            form.pack(fill="both", expand=True)
 
-        tk.Label(frame, text="Umbral de Quiebre (Gatillo Días):").grid(row=2, column=0, sticky=tk.W, pady=5)
-        var_quiebre = tk.StringVar(value=str(global_params[2] if global_params[2] is not None else 50))
-        tk.Entry(frame, textvariable=var_quiebre, width=10).grid(row=2, column=1, pady=5)
+            ttk.Label(form, text="Categoría:").grid(row=0, column=0, sticky="w", pady=5)
+            
+            # Cargar valores iniciales
+            initial_data = {}
+            if is_edit:
+                item_id = selected_item[0]
+                values = tree_params.item(item_id, "values")
+                cat_name = values[0]
+                
+                initial_data = {
+                    'cat_id': item_id if item_id != "global" else None,
+                    'cat_name': cat_name,
+                    'dias': values[1], 'quiebre': values[2], 'analisis': values[3], 'auto': values[4]
+                }
+            
+            # Combobox de Categorías
+            if is_edit and initial_data.get('cat_id') is None: # Si es Global
+                cat_var = tk.StringVar(value="Global (Default)")
+                ttk.Label(form, text="Global (Default)", font=("Helvetica", 10, "bold")).grid(row=0, column=1)
+            else:
+                cat_var = tk.StringVar(value=initial_data.get('cat_name', ''))
+                cat_combo = ttk.Combobox(form, textvariable=cat_var, values=list(dept_id_map.values()), state="readonly")
+                cat_combo.grid(row=0, column=1, sticky="w")
+            
+            # Campos de texto
+            fields = {
+                "Días Stock (Meta):": tk.StringVar(value=initial_data.get('dias', 30)),
+                "Gatillo (Días):": tk.StringVar(value=initial_data.get('quiebre', 15)),
+                "Análisis (Días):": tk.StringVar(value=initial_data.get('analisis', 90)),
+                "Umbral Autorización:": tk.StringVar(value=initial_data.get('auto', 0))
+            }
+            
+            row = 1
+            for label, var in fields.items():
+                ttk.Label(form, text=label).grid(row=row, column=0, sticky="w", pady=5)
+                ttk.Entry(form, textvariable=var, width=10).grid(row=row, column=1, sticky="w", pady=5)
+                row += 1
+            
+            def save():
+                try:
+                    # Obtener ID de categoría
+                    cat_id = None
+                    if cat_var.get() != "Global (Default)":
+                        cat_name = cat_var.get()
+                        if not cat_name: raise ValueError("Debe seleccionar una categoría.")
+                        # Invertir el mapa para encontrar el ID
+                        rev_map = {v: k for k, v in dept_id_map.items()}
+                        cat_id = rev_map.get(cat_name)
+                    
+                    # Obtener valores numéricos
+                    d = int(fields["Días Stock (Meta):"].get())
+                    q = int(fields["Gatillo (Días):"].get())
+                    an = int(fields["Análisis (Días):"].get())
+                    au = int(fields["Umbral Autorización:"].get())
+                    
+                    if service.save_parametro(cat_id, d, q, au, an):
+                        messagebox.showinfo("Éxito", "Parámetro guardado.", parent=editor_modal)
+                        editor_modal.destroy()
+                        refresh_params_tree()
+                    else:
+                        messagebox.showerror("Error", "No se pudo guardar el parámetro.", parent=editor_modal)
 
-        def save():
-            try:
-                d = int(var_dias.get())
-                a = float(var_auto.get())
-                q = float(var_quiebre.get())
-                # Guardar en la base de datos
-                if service.save_parametro(None, d, q, a, 365):
-                    self.app.log("Configuración guardada exitosamente.", "SUCCESS")
-                    sub.destroy()
-                else:
-                    self.app.log("Error al guardar la configuración.", "ERROR")
-            except ValueError:
-                self.app.log("Por favor ingrese valores numéricos válidos.", "WARNING")
+                except ValueError as e:
+                    messagebox.showerror("Error de Validación", f"Valor inválido: {e}", parent=editor_modal)
+                except Exception as e:
+                    messagebox.showerror("Error", str(e), parent=editor_modal)
 
-        tk.Button(sub, text="Guardar Configuración", command=save, bg="#4CAF50", fg="white", pady=5).pack(pady=20)
+            # Botones del editor
+            btn_frm_edit = ttk.Frame(editor_modal, padding=10)
+            btn_frm_edit.pack(side="bottom", fill="x")
+            ttk.Button(btn_frm_edit, text="Cancelar", command=editor_modal.destroy).pack(side="right", padx=5)
+            ttk.Button(btn_frm_edit, text="Guardar", command=save).pack(side="right", padx=5)
+
+        # --- Botones de Acción Principales ---
+        btn_frame = ttk.Frame(config_modal, padding=10)
+        btn_frame.pack(side="bottom", fill="x")
+
+        ttk.Button(btn_frame, text="Cerrar", command=config_modal.destroy).pack(side="right", padx=5)
+        ttk.Button(btn_frame, text="📝 Editar Seleccionado", command=lambda: open_editor(is_edit=True)).pack(side="left", padx=5)
+        ttk.Button(btn_frame, text="➕ Agregar por Categoría", command=lambda: open_editor(is_edit=False)).pack(side="left", padx=5)
+        
+        # Carga inicial
+        refresh_params_tree()
 
     def _setup_tab_autorizaciones(self, parent_frame):
         """Configura la UI para la pestaña de autorizaciones."""
@@ -978,7 +1085,7 @@ class AbastecimientoTab(ttk.Frame):
                 tags = []
                 estado_display = estado
                 if estado == 'en_transito':
-                    estado_display = "En Tránsito 🚚" # Se animará luego si aplica
+                    estado_display = "En Tránsito 🚚" # Se animará luego 
                     tags.append("anim_transito")
                 elif estado == 'recibida_parcial':
                     estado_display = f"Parcial ({items_completados}/{items})"
@@ -1108,7 +1215,7 @@ class AbastecimientoTab(ttk.Frame):
         # Instrucciones
         info_frame = ttk.Frame(modal)
         info_frame.pack(fill="x", padx=10)
-        ttk.Label(info_frame, text="Haga DOBLE CLIC en 'A Recibir' para cantidad simple o en 'Lotes 📝' para detalle.", foreground="blue").pack(pady=2)
+        ttk.Label(info_frame, text="Haga DOBLE CLIC en 'A Recibir' para cantidad simple o en 'Lotes' para detalle.", foreground="blue").pack(pady=2)
         
         # Treeview editable
         frame = ttk.Frame(modal)

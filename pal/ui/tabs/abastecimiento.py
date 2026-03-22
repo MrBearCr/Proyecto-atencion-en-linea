@@ -54,11 +54,14 @@ class AbastecimientoTab(ttk.Frame):
         # Animación para estado "En Tránsito" (Derecha a Izquierda)
         self.anim_frame = 0
         self.anim_sequence = [
-            ". . . . 🚚",
-            ". . . 🚚 .",
-            ". . 🚚 . .",
-            ". 🚚 . . .",
-            "🚚 . . . ."
+            "En Transito🚚",
+            "En Transi🚚",
+            "En Tran🚚",
+            "En Tra🚚",
+            "En Tr🚚",
+            "En 🚚",
+            "En🚚",
+            "🚚"
         ]
         self.anim_running = False
         
@@ -800,12 +803,17 @@ class AbastecimientoTab(ttk.Frame):
         var_auto = tk.StringVar(value=str(global_params[3]))
         tk.Entry(frame, textvariable=var_auto, width=10).grid(row=1, column=1, pady=5)
 
+        tk.Label(frame, text="Umbral de Quiebre (Gatillo Días):").grid(row=2, column=0, sticky=tk.W, pady=5)
+        var_quiebre = tk.StringVar(value=str(global_params[2] if global_params[2] is not None else 50))
+        tk.Entry(frame, textvariable=var_quiebre, width=10).grid(row=2, column=1, pady=5)
+
         def save():
             try:
                 d = int(var_dias.get())
                 a = float(var_auto.get())
-                # Mantener los otros valores por defecto al guardar el global
-                if service.save_parametro(None, d, 50, a, 365):
+                q = float(var_quiebre.get())
+                # Guardar en la base de datos
+                if service.save_parametro(None, d, q, a, 365):
                     self.app.log("Configuración guardada exitosamente.", "SUCCESS")
                     sub.destroy()
                 else:
@@ -958,16 +966,23 @@ class AbastecimientoTab(ttk.Frame):
             ordenes = service.get_ordenes_activas()
             
             for r in ordenes:
-                # r: id, numero, destino, fecha, estado, total_items, usuario_nombre
-                m_id, num, dest, fecha, estado, items, usuario = r
+                # r: id, numero, destino, fecha, estado, total_items, usuario_nombre, items_completados
+                if len(r) >= 8:
+                    m_id, num, dest, fecha, estado, items, usuario, items_completados = r[:8]
+                else:
+                    m_id, num, dest, fecha, estado, items, usuario = r[:7]
+                    items_completados = 0
                 
                 fecha_str = fecha.strftime("%Y-%m-%d %H:%M") if fecha else ""
                 
                 tags = []
                 estado_display = estado
                 if estado == 'en_transito':
-                    estado_display = self.anim_sequence[self.anim_frame]
+                    estado_display = "En Tránsito 🚚" # Se animará luego si aplica
                     tags.append("anim_transito")
+                elif estado == 'recibida_parcial':
+                    estado_display = f"Parcial ({items_completados}/{items})"
+                    tags.append("parcial")
                 
                 self.tree_pend.insert("", "end", values=(
                     m_id, num, dest, fecha_str, items, usuario or "N/A", estado_display
@@ -1068,33 +1083,349 @@ class AbastecimientoTab(ttk.Frame):
         ttk.Button(modal, text="Cerrar", command=modal.destroy).pack(pady=10)
 
     def on_cerrar_orden(self):
-        """Confirma la recepción de la orden y la cierra."""
+        """Abre el diálogo para registrar la recepción de mercancía (parcial o total) con soporte de LOTES."""
         selected = self.tree_pend.selection()
         if not selected:
-            messagebox.showwarning("Atención", "Seleccione una orden para confirmar recepción.")
+            messagebox.showwarning("Atención", "Seleccione una orden para registrar recepción.")
             return
             
         item = self.tree_pend.item(selected[0])
         m_id = item['values'][0]
         num_orden = item['values'][1]
         
-        if not messagebox.askyesno("Confirmar Recepción", f"¿Está seguro de marcar la orden {num_orden} como RECIBIDA?\n\nEsto cerrará la transferencia definitivamente."):
-            return
-            
+        # Almacenamiento temporal de lotes: {sugerencia_id: [{lote_fabrica, vencimiento, cantidad, lote_interno}, ...]}
+        lotes_temp = {}
+
+        # Modal de recepción
+        modal = tk.Toplevel(self)
+        modal.title(f"Recepción de Mercancía: {num_orden}")
+        modal.geometry("1100x700") # Más ancho para columna lotes
+        modal.transient(self)
+        modal.grab_set()
+        
+        ttk.Label(modal, text=f"Registrar Recepción para Orden {num_orden}", font=("Helvetica", 14, "bold")).pack(pady=10)
+        
+        # Instrucciones
+        info_frame = ttk.Frame(modal)
+        info_frame.pack(fill="x", padx=10)
+        ttk.Label(info_frame, text="Haga DOBLE CLIC en 'A Recibir' para cantidad simple o en 'Lotes 📝' para detalle.", foreground="blue").pack(pady=2)
+        
+        # Treeview editable
+        frame = ttk.Frame(modal)
+        frame.pack(fill="both", expand=True, padx=10, pady=5)
+        
+        cols = ("id", "producto", "descripcion", "solicitado", "recibido_prev", "pendiente", "a_recibir", "lotes")
+        tree_rec = ttk.Treeview(frame, columns=cols, show="headings")
+        
+        tree_rec.heading("id", text="ID")
+        tree_rec.heading("producto", text="Código")
+        tree_rec.heading("descripcion", text="Descripción")
+        tree_rec.heading("solicitado", text="Solicitado")
+        tree_rec.heading("recibido_prev", text="Recibido Prev.")
+        tree_rec.heading("pendiente", text="Pendiente")
+        tree_rec.heading("a_recibir", text="A Recibir (Editar)")
+        tree_rec.heading("lotes", text="Lotes(Gestión)")
+        
+        tree_rec.column("id", width=0, stretch=False)
+        tree_rec.column("producto", width=100)
+        tree_rec.column("descripcion", width=300)
+        tree_rec.column("solicitado", width=80, anchor="center")
+        tree_rec.column("recibido_prev", width=100, anchor="center")
+        tree_rec.column("pendiente", width=80, anchor="center")
+        tree_rec.column("a_recibir", width=120, anchor="center")
+        tree_rec.column("lotes", width=100, anchor="center")
+        
+        tree_rec.pack(side="left", fill="both", expand=True)
+        
+        scrolly = ttk.Scrollbar(frame, orient="vertical", command=tree_rec.yview)
+        tree_rec.configure(yscrollcommand=scrolly.set)
+        scrolly.pack(side="right", fill="y")
+        
+        # Service instance
+        from pal.services.abastecimiento import AbastecimientoService
+        service = AbastecimientoService(self.app.db_manager)
+
+        # Cargar datos
         try:
-            from pal.services.abastecimiento import AbastecimientoService
-            service = AbastecimientoService(self.app.db_manager)
+            detalles = service.get_detalle_orden(m_id)
             
-            user_id = self.app.current_user['id'] if self.app.current_user else None
+            count_pendientes = 0
+            for d in detalles:
+                # d: id, codigo, descripcion, cantidad_sug, origen, es_rojo, cant_recibida_total, estado_recepcion
+                cant_sug = float(d[3])
+                cant_rec = float(d[6]) if len(d) > 6 else 0.0
+                pendiente = max(0, cant_sug - cant_rec)
+                a_recibir = pendiente
+                
+                if pendiente > 0:
+                    tree_rec.insert("", "end", values=(d[0], d[1], d[2], cant_sug, cant_rec, pendiente, a_recibir, "⚠️ Sin Lotes"))
+                    count_pendientes += 1
             
-            if service.cerrar_transferencia(m_id, user_id):
-                messagebox.showinfo("Éxito", f"Orden {num_orden} cerrada correctamente.")
-                self.refresh_pendientes()
-            else:
-                messagebox.showerror("Error", "No se pudo cerrar la orden.")
+            if count_pendientes == 0:
+                messagebox.showinfo("Información", "Esta orden ya ha sido recibida completamente.", parent=modal)
+                modal.destroy()
+                return
+                
         except Exception as e:
-            logger.error(f"Error en on_cerrar_orden: {e}")
-            messagebox.showerror("Error", f"Error inesperado: {e}")
+            logger.error(f"Error cargando detalle para recepción: {e}")
+            messagebox.showerror("Error", "No se pudieron cargar los detalles de la orden.")
+            modal.destroy()
+            return
+
+        # --- SUB-MODAL GESTIÓN LOTES ---
+        from datetime import datetime
+        def abrir_gestion_lotes(item_id, sug_id, prod_cod, prod_desc, pendiente):
+            sub = tk.Toplevel(modal)
+            sub.title(f"Gestión de Lotes: {prod_cod}")
+            sub.geometry("600x400")
+            sub.transient(modal)
+            sub.grab_set()
+            
+            ttk.Label(sub, text=f"Lotes para {prod_desc}", font=("Arial", 11, "bold")).pack(pady=10)
+            ttk.Label(sub, text=f"Pendiente Total: {pendiente}", foreground="red").pack()
+            
+            # Lista de lotes agregados
+            l_frame = ttk.Frame(sub)
+            l_frame.pack(fill="both", expand=True, padx=10, pady=5)
+            
+            cols_l = ("lote", "venc", "cant")
+            tree_lotes = ttk.Treeview(l_frame, columns=cols_l, show="headings", height=8)
+            tree_lotes.heading("lote", text="Lote Fábrica")
+            tree_lotes.heading("venc", text="Vencimiento")
+            tree_lotes.heading("cant", text="Cantidad")
+            tree_lotes.column("lote", width=150)
+            tree_lotes.column("venc", width=100)
+            tree_lotes.column("cant", width=80)
+            tree_lotes.pack(side="left", fill="both", expand=True)
+            
+            # Cargar existentes si hay
+            current_lotes = lotes_temp.get(sug_id, [])
+            for l in current_lotes:
+                tree_lotes.insert("", "end", values=(l.get('lote_fabrica', '-'), l.get('fecha_vencimiento', '-'), l.get('cantidad', 0)))
+
+            # Formulario agregar
+            f_add = ttk.LabelFrame(sub, text="Agregar Lote")
+            f_add.pack(fill="x", padx=10, pady=5)
+            
+            ttk.Label(f_add, text="Lote Fábrica:").grid(row=0, column=0, padx=5)
+            e_lote = ttk.Entry(f_add, width=15)
+            e_lote.grid(row=0, column=1, padx=5)
+            
+            ttk.Label(f_add, text="Vence (YYYY-MM-DD):").grid(row=0, column=2, padx=5)
+            e_venc = ttk.Entry(f_add, width=12)
+            e_venc.grid(row=0, column=3, padx=5)
+            
+            ttk.Label(f_add, text="Cantidad:").grid(row=0, column=4, padx=5)
+            e_cant = ttk.Entry(f_add, width=8)
+            e_cant.grid(row=0, column=5, padx=5)
+            
+            def add_lote(silent=False):
+                """Agrega el lote del formulario al treeview. Retorna True si agregó, False si error o vacío."""
+                try:
+                    cant_str = e_cant.get().strip()
+                    if not cant_str: 
+                        if not silent: messagebox.showwarning("Atención", "Ingrese una cantidad.", parent=sub)
+                        return False
+                        
+                    c = float(cant_str)
+                    if c <= 0: raise ValueError
+                    
+                    l_fab = e_lote.get().strip() or "S/L"
+                    venc = e_venc.get().strip()
+                    # Validar fecha simple
+                    if venc:
+                        try:
+                            datetime.strptime(venc, "%Y-%m-%d")
+                        except:
+                            if not silent: messagebox.showerror("Error", "Formato de fecha inválido. Use YYYY-MM-DD", parent=sub)
+                            return False
+                    else:
+                        venc = None
+                        
+                    # Agregar a treeview
+                    tree_lotes.insert("", "end", values=(l_fab, venc or "N/A", c))
+                    
+                    # Limpiar
+                    e_cant.delete(0, 'end')
+                    e_lote.delete(0, 'end')
+                    # No limpiamos fecha por comodidad al meter varios lotes misma fecha
+                    e_lote.focus()
+                    return True
+                except ValueError:
+                    if not silent: messagebox.showerror("Error", "Cantidad inválida", parent=sub)
+                    return False
+
+            ttk.Button(f_add, text="➕", command=lambda: add_lote(), width=4).grid(row=0, column=6, padx=5)
+
+            def guardar_lotes():
+                # Validar si hay datos pendientes en los campos
+                if e_cant.get().strip():
+                    if messagebox.askyesno("Datos pendientes", "Hay datos en el formulario sin agregar. ¿Desea agregarlos antes de guardar?", parent=sub):
+                        if not add_lote():
+                            return # Si falla agregar, no guardar aún
+
+                # Recopilar del treeview
+                nuevos_lotes = []
+                total_lotes = 0.0
+                for item in tree_lotes.get_children():
+                    v = tree_lotes.item(item)['values']
+                    cant = float(v[2])
+                    l_obj = {
+                        'lote_fabrica': str(v[0]) if v[0] != '-' else None,
+                        'fecha_vencimiento': str(v[1]) if v[1] != 'N/A' else None,
+                        'cantidad': cant
+                    }
+                    nuevos_lotes.append(l_obj)
+                    total_lotes += cant
+                
+                # Actualizar memoria temporal
+                lotes_temp[sug_id] = nuevos_lotes
+                
+                # Actualizar UI Principal
+                vals = list(tree_rec.item(item_id, "values"))
+                vals[6] = total_lotes # Actualizar 'A Recibir' con la suma de lotes
+                vals[7] = f"✅ {len(nuevos_lotes)} Lotes"
+                tree_rec.item(item_id, values=vals)
+                
+                sub.destroy()
+
+            ttk.Button(sub, text="Guardar Lotes", command=guardar_lotes).pack(pady=10)
+
+        # Función para editar cantidad o lotes
+        def on_double_click(event):
+            item_id = tree_rec.identify_row(event.y)
+            column = tree_rec.identify_column(event.x)
+            
+            if not item_id: return
+            
+            vals = tree_rec.item(item_id, "values")
+            sug_id = int(vals[0])
+            prod_cod = vals[1]
+            prod_desc = vals[2]
+            pendiente = float(vals[5])
+
+            if column == "#8": # Columna Lotes
+                abrir_gestion_lotes(item_id, sug_id, prod_cod, prod_desc, pendiente)
+                return
+            
+            if column == "#7": # Columna A Recibir (Edición simple)
+                # Crear entry widget sobre la celda
+                x, y, width, height = tree_rec.bbox(item_id, column)
+                current_val = vals[6]
+                
+                entry = ttk.Entry(tree_rec, width=10)
+                entry.place(x=x, y=y, width=width, height=height)
+                entry.insert(0, current_val)
+                entry.select_range(0, 'end')
+                entry.focus()
+                
+                def save_edit(event=None):
+                    try:
+                        val_str = entry.get()
+                        if not val_str: val_str = "0"
+                        new_val = float(val_str)
+                        if new_val < 0: raise ValueError
+                        
+                        # Validar contra pendiente
+                        if new_val > pendiente:
+                            messagebox.showwarning("Cuidado", f"Está recibiendo más ({new_val}) de lo pendiente ({pendiente}).", parent=modal)
+                        
+                        # Advertencia si hay lotes definidos y no coinciden
+                        if sug_id in lotes_temp:
+                             sum_lotes = sum(l['cantidad'] for l in lotes_temp[sug_id])
+                             if sum_lotes != new_val:
+                                 if messagebox.askyesno("Conflicto Lotes", f"La cantidad ({new_val}) no coincide con la suma de lotes definidos ({sum_lotes}).\n¿Desea borrar los lotes definidos?", parent=modal):
+                                     del lotes_temp[sug_id]
+                                     vals_u = list(tree_rec.item(item_id, "values"))
+                                     vals_u[7] = "⚠️ Sin Lotes" # Reset lotes visual
+                                     tree_rec.item(item_id, values=vals_u)
+                                 else:
+                                     entry.destroy(); return
+
+                        # Actualizar treeview
+                        vals = list(tree_rec.item(item_id, "values"))
+                        vals[6] = new_val
+                        tree_rec.item(item_id, values=vals)
+                        entry.destroy()
+                    except ValueError:
+                        messagebox.showerror("Error", "Ingrese un número válido.", parent=modal)
+                        entry.focus()
+                
+                entry.bind("<Return>", save_edit)
+                entry.bind("<FocusOut>", lambda e: entry.destroy())
+
+        tree_rec.bind("<Double-1>", on_double_click)
+
+        # Botones de acción
+        btn_frame = ttk.Frame(modal, padding=10)
+        btn_frame.pack(side="bottom", fill="x")
+        
+        def recibir_todo():
+            """Pone todas las cantidades a recibir igual al pendiente."""
+            for item in tree_rec.get_children():
+                vals = list(tree_rec.item(item, "values"))
+                vals[6] = vals[5] # A recibir = Pendiente
+                tree_rec.item(item, values=vals)
+        
+        def procesar_recepcion():
+            """Recoge los datos y llama al servicio."""
+            items_a_procesar = []
+            
+            for item in tree_rec.get_children():
+                vals = tree_rec.item(item, "values")
+                sug_id = int(vals[0])
+                a_recibir = float(vals[6])
+                
+                if a_recibir > 0:
+                    item_data = {
+                        'sugerencia_id': sug_id,
+                        'cantidad': a_recibir
+                    }
+                    # Adjuntar lotes si existen
+                    if sug_id in lotes_temp:
+                        lotes = lotes_temp[sug_id]
+                        # Validar suma
+                        sum_l = sum(l['cantidad'] for l in lotes)
+                        if abs(sum_l - a_recibir) > 0.01:
+                            messagebox.showerror("Error de Validación", f"Para el producto ID {sug_id}, la suma de lotes ({sum_l}) no coincide con la cantidad a recibir ({a_recibir}). Ajuste los lotes o la cantidad.", parent=modal)
+                            return
+                        item_data['lotes'] = lotes
+                    
+                    items_a_procesar.append(item_data)
+            
+            if not items_a_procesar:
+                messagebox.showwarning("Atención", "No hay cantidades a recibir ingresadas (mayores a 0).", parent=modal)
+                return
+
+            if not messagebox.askyesno("Confirmar", f"¿Desea registrar la recepción de {len(items_a_procesar)} productos?", parent=modal):
+                return
+                
+            try:
+                user_id = self.app.current_user['id'] if self.app.current_user else None
+                result = service.registrar_recepcion(m_id, items_a_procesar, user_id)
+                
+                if result['success']:
+                    rec_num = result['numero_recepcion']
+                    estado_trs = result['estado_transferencia']
+                    
+                    msg = f"Recepción {rec_num} registrada correctamente."
+                    if estado_trs == 'recibida_total':
+                        msg += "\n\nLa orden se ha completado en su totalidad. 🎉"
+                    else:
+                        msg += "\n\nLa orden queda PARCIALMENTE recibida."
+                        
+                    messagebox.showinfo("Éxito", msg, parent=modal)
+                    modal.destroy()
+                    self.refresh_pendientes()
+                else:
+                    messagebox.showerror("Error", f"Error registrando recepción: {result.get('error', 'Desconocido')}", parent=modal)
+            except Exception as e:
+                logger.error(f"Error procesando recepción: {e}")
+                messagebox.showerror("Error", f"Error inesperado: {e}", parent=modal)
+
+        ttk.Button(btn_frame, text="Cancelar", command=modal.destroy).pack(side="right", padx=5)
+        ttk.Button(btn_frame, text="✅ Registrar Recepción", command=procesar_recepcion).pack(side="right", padx=5)
+        ttk.Button(btn_frame, text="Recibir Todo (Pendiente)", command=recibir_todo).pack(side="left", padx=5)
 
     def exportar_pendientes(self):
         """Exporta las transferencias pendientes a Excel."""

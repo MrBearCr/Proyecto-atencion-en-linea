@@ -296,7 +296,8 @@ class ClientesReportesTab(ttk.Frame):
             self.after(0, lambda: self._on_report_loaded(invoices_list))
             
         except Exception as e:
-            self.after(0, lambda: self._on_report_error(str(e)))
+            error_msg = str(e)
+            self.after(0, lambda: self._on_report_error(error_msg))
 
     def _on_report_loaded(self, invoices_list):
         """Muestra los resultados en el Treeview"""

@@ -821,15 +821,16 @@ class AbastecimientoService:
             return f"TRS-{datetime.now().strftime('%H%M%S')}"
 
     def get_ordenes_activas(self):
-        """Obtiene las órdenes de transferencia que están en tránsito."""
+        """Obtiene las órdenes de transferencia que están en tránsito o recibidas parcialmente."""
         try:
             sql = """
                 SELECT m.id, m.numero_transf, m.sucursal_destino, m.fecha_creacion, m.estado,
                        (SELECT COUNT(*) FROM pal_sugerencias_transferencia WHERE maestro_id = m.id) as total_items,
-                       u.nombre_completo as usuario_nombre
+                       u.nombre_completo as usuario_nombre,
+                       (SELECT COUNT(*) FROM pal_sugerencias_transferencia WHERE maestro_id = m.id AND estado_recepcion = 'completada') as items_completados
                 FROM pal_transferencias_maestro m
                 LEFT JOIN pal_usuarios u ON m.usuario_crea = u.id
-                WHERE m.estado = 'en_transito'
+                WHERE m.estado IN ('en_transito', 'recibida_parcial')
                 ORDER BY m.fecha_creacion DESC
             """
             return self.db_manager.fetch_data(sql) or []
@@ -842,7 +843,9 @@ class AbastecimientoService:
         try:
             sql = """
                 SELECT t.id, t.producto_codigo, COALESCE(p.cu_descripcion_corta, p.C_DESCRI, 'SIN DESCRIPCIÓN') as descripcion,
-                       t.cantidad_sugerida, t.sucursal_origen_sugerida, t.es_producto_rojo
+                       t.cantidad_sugerida, t.sucursal_origen_sugerida, t.es_producto_rojo,
+                       ISNULL(t.cantidad_recibida_total, 0) as cantidad_recibida,
+                       ISNULL(t.estado_recepcion, 'pendiente') as estado_recepcion
                 FROM pal_sugerencias_transferencia t
                 LEFT JOIN MA_PRODUCTOS p ON t.producto_codigo = p.C_CODIGO COLLATE DATABASE_DEFAULT
                 WHERE t.maestro_id = ?
@@ -868,3 +871,128 @@ class AbastecimientoService:
         except Exception as e:
             logger.error(f"Error cerrando transferencia {maestro_id}: {e}")
             return False
+
+    def generar_numero_recepcion(self):
+        """Genera el siguiente número correlativo de recepción (REC-000001)."""
+        try:
+            sql = "SELECT MAX(id) FROM pal_recepciones_maestro"
+            res = self.db_manager.fetch_data(sql)
+            next_id = 1
+            if res and res[0][0]:
+                next_id = int(res[0][0]) + 1
+            return f"REC-{str(next_id).zfill(6)}"
+        except Exception as e:
+            logger.error(f"Error generando número de recepción: {e}")
+            return f"REC-{datetime.now().strftime('%H%M%S')}"
+
+    def generar_lote_interno(self, semilla):
+        """
+        Genera un código de lote interno único.
+        Formato: L-{YYMMDD}-{HHMM}-{HASH_CORTO}
+        """
+        import hashlib
+        now = datetime.now()
+        base = f"{semilla}{now.timestamp()}"
+        hash_corto = hashlib.md5(base.encode()).hexdigest()[:4].upper()
+        return f"L-{now.strftime('%y%m%d')}-{now.strftime('%H%M')}-{hash_corto}"
+
+    def registrar_recepcion(self, transferencia_id, items_recibidos, usuario_id, observaciones=None):
+        """
+        Registra una recepción (parcial o total) para una orden de transferencia.
+        items_recibidos: lista de dicts [{'sugerencia_id': int, 'cantidad': float, 'lotes': [...]}]
+        """
+        try:
+            # 1. Generar correlativo REC
+            numero_recepcion = self.generar_numero_recepcion()
+            
+            # 2. Crear maestro de recepción
+            sql_rec = """
+                INSERT INTO pal_recepciones_maestro 
+                (numero_recepcion, transferencia_id, usuario_recibe, observaciones, fecha_recepcion)
+                VALUES (?, ?, ?, ?, GETDATE())
+            """
+            self.db_manager.execute_query(sql_rec, (numero_recepcion, transferencia_id, usuario_id, observaciones))
+            
+            # Obtener ID de recepción
+            res_id = self.db_manager.fetch_data("SELECT IDENT_CURRENT('pal_recepciones_maestro')")
+            recepcion_id = int(res_id[0][0]) if res_id else None
+            
+            if not recepcion_id:
+                raise Exception("No se pudo obtener el ID de la recepción creada")
+
+            # 3. Procesar ítems
+            for item in items_recibidos:
+                sug_id = item['sugerencia_id']
+                cant_rec = float(item['cantidad'])
+                lotes = item.get('lotes', [])
+                
+                # Insertar detalle recepción
+                sql_det = """
+                    INSERT INTO pal_recepciones_detalle (recepcion_id, sugerencia_id, cantidad_recibida)
+                    VALUES (?, ?, ?)
+                """
+                self.db_manager.execute_query(sql_det, (recepcion_id, sug_id, cant_rec))
+                
+                # Obtener ID del detalle para vincular lotes
+                res_det = self.db_manager.fetch_data("SELECT IDENT_CURRENT('pal_recepciones_detalle')")
+                detalle_id = int(res_det[0][0]) if res_det else None
+                
+                # Insertar lotes si existen
+                if detalle_id and lotes:
+                    for lote in lotes:
+                        lote_interno = lote.get('lote_interno')
+                        if not lote_interno:
+                            lote_interno = self.generar_lote_interno(str(sug_id))
+                            
+                        lote_fabrica = lote.get('lote_fabrica')
+                        vencimiento = lote.get('fecha_vencimiento') # YYYY-MM-DD o None
+                        cant_lote = float(lote.get('cantidad', 0))
+                        
+                        if cant_lote > 0:
+                            sql_lote = """
+                                INSERT INTO pal_recepciones_lotes 
+                                (recepcion_detalle_id, lote_interno, lote_fabrica, fecha_vencimiento, cantidad)
+                                VALUES (?, ?, ?, ?, ?)
+                            """
+                            self.db_manager.execute_query(sql_lote, (detalle_id, lote_interno, lote_fabrica, vencimiento, cant_lote))
+                
+                # Actualizar acumulados en sugerencia
+                # Calcular nuevo total y estado
+                sql_upd = """
+                    UPDATE pal_sugerencias_transferencia
+                    SET cantidad_recibida_total = ISNULL(cantidad_recibida_total, 0) + ?,
+                        estado_recepcion = CASE 
+                            WHEN (ISNULL(cantidad_recibida_total, 0) + ?) >= cantidad_sugerida THEN 'completada'
+                            ELSE 'parcial'
+                        END,
+                        estado = CASE 
+                            WHEN (ISNULL(cantidad_recibida_total, 0) + ?) >= cantidad_sugerida THEN 'completada'
+                            ELSE estado
+                        END
+                    WHERE id = ?
+                """
+                self.db_manager.execute_query(sql_upd, (cant_rec, cant_rec, cant_rec, sug_id))
+
+            # 4. Actualizar estado global de la transferencia
+            # Verificar si quedan items pendientes
+            sql_check = """
+                SELECT COUNT(*) 
+                FROM pal_sugerencias_transferencia 
+                WHERE maestro_id = ? AND estado_recepcion != 'completada'
+            """
+            pendientes = self.db_manager.fetch_data(sql_check, (transferencia_id,))
+            count_pendientes = pendientes[0][0] if pendientes else 0
+            
+            nuevo_estado_trs = 'recibida_total' if count_pendientes == 0 else 'recibida_parcial'
+            
+            sql_trs = "UPDATE pal_transferencias_maestro SET estado = ? WHERE id = ?"
+            self.db_manager.execute_query(sql_trs, (nuevo_estado_trs, transferencia_id))
+            
+            logger.info(f"Recepción {numero_recepcion} registrada para TRS ID {transferencia_id}. Estado: {nuevo_estado_trs}")
+            return {"success": True, "numero_recepcion": numero_recepcion, "estado_transferencia": nuevo_estado_trs}
+            
+        except Exception as e:
+            logger.error(f"Error registrando recepción para TRS {transferencia_id}: {e}")
+            import traceback
+            traceback.print_exc()
+            return {"success": False, "error": str(e)}

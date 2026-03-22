@@ -781,6 +781,56 @@ class DatabaseManager:
                 INSERT INTO pal_roles (nombre, descripcion) VALUES ('Gerente Logistica', 'Gestión completa de abastecimiento y transferencias');
             IF NOT EXISTS (SELECT * FROM pal_roles WHERE nombre = 'Subgerente Logistica')
                 INSERT INTO pal_roles (nombre, descripcion) VALUES ('Subgerente Logistica', 'Generación de sugerencias y visualización');
+
+            -- Recepciones Parciales
+            IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'pal_recepciones_maestro' AND type = 'U')
+            BEGIN
+                CREATE TABLE pal_recepciones_maestro (
+                    id INT IDENTITY(1,1) PRIMARY KEY,
+                    numero_recepcion NVARCHAR(20) UNIQUE NOT NULL,
+                    transferencia_id INT NOT NULL,
+                    fecha_recepcion DATETIME DEFAULT GETDATE(),
+                    usuario_recibe INT,
+                    observaciones TEXT NULL,
+                    estado NVARCHAR(20) DEFAULT 'completada'
+                );
+            END;
+
+            IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'pal_recepciones_detalle' AND type = 'U')
+            BEGIN
+                CREATE TABLE pal_recepciones_detalle (
+                    id INT IDENTITY(1,1) PRIMARY KEY,
+                    recepcion_id INT NOT NULL,
+                    sugerencia_id INT NOT NULL,
+                    cantidad_recibida DECIMAL(18,2) NOT NULL
+                );
+            END;
+
+            IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'pal_recepciones_lotes' AND type = 'U')
+            BEGIN
+                CREATE TABLE pal_recepciones_lotes (
+                    id INT IDENTITY(1,1) PRIMARY KEY,
+                    recepcion_detalle_id INT NOT NULL,
+                    lote_interno NVARCHAR(50) NOT NULL,
+                    lote_fabrica NVARCHAR(50) NULL,
+                    fecha_vencimiento DATE NULL,
+                    cantidad DECIMAL(18,2) NOT NULL,
+                    fecha_registro DATETIME DEFAULT GETDATE()
+                );
+            END;
+
+            -- Agregar columnas a pal_sugerencias_transferencia si no existen
+            IF EXISTS (SELECT * FROM sys.tables WHERE name = 'pal_sugerencias_transferencia' AND type = 'U')
+            BEGIN
+                IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[pal_sugerencias_transferencia]') AND name = 'cantidad_recibida_total')
+                BEGIN
+                    ALTER TABLE [dbo].[pal_sugerencias_transferencia] ADD [cantidad_recibida_total] DECIMAL(18,2) DEFAULT 0;
+                END
+                IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[pal_sugerencias_transferencia]') AND name = 'estado_recepcion')
+                BEGIN
+                    ALTER TABLE [dbo].[pal_sugerencias_transferencia] ADD [estado_recepcion] NVARCHAR(20) DEFAULT 'pendiente';
+                END
+            END
             """
             if not self.conn:
                 return
@@ -2222,8 +2272,12 @@ class DatabaseManager:
                     total_usd = total_bs / factor if factor else 0.0
                     
                     # Estructura de retorno compatible con UI:
-                    # (rif, name, num, date, item_cod, total_bs, desc, dept, grupo, sub, marca, qty, total_usd)
-                    all_rows.append(row_with_names + (total_usd,))
+                    # (rif, name, num, date, prod_code, total_bs, desc_corta, dept, grupo, sub, marca, qty, total_usd, desc_larga)
+                    row_final = (
+                        r[0], r[1], r[2], r[3], r[4], r[5], r[6],
+                        dept_name, group_name, sub_name, r[10], r[11], total_usd, r[12]
+                    )
+                    all_rows.append(row_final)
                     
             except Exception as e:
                 self._log(f"Error procesando chunk: {e}", "ERROR")

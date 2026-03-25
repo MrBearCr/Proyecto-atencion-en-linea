@@ -44,6 +44,43 @@ class DatabaseManager:
             except Exception:
                 pass
 
+    def _get_best_odbc_driver(self) -> str:
+        """
+        Detecta el mejor driver ODBC de SQL Server disponible en esta máquina.
+        Prioriza las versiones más recientes para mayor compatibilidad.
+        Retorna el nombre del driver listo para incluir en la cadena de conexión.
+        """
+        try:
+            drivers = pyodbc.drivers()
+        except Exception:
+            drivers = []
+
+        # Orden de preferencia: más nuevo primero
+        preferred = [
+            "ODBC Driver 18 for SQL Server",
+            "ODBC Driver 17 for SQL Server",
+            "ODBC Driver 13 for SQL Server",
+            "ODBC Driver 11 for SQL Server",
+            "SQL Server Native Client 11.0",
+            "SQL Server Native Client 10.0",
+            "SQL Server",   # driver legacy, incluido en Windows
+        ]
+
+        for drv in preferred:
+            if drv in drivers:
+                self._log(f"Driver ODBC seleccionado: {drv}", "INFO")
+                return drv
+
+        # Si no encontramos ninguno de la lista, usar el primero SQL-relacionado disponible
+        sql_drivers = [d for d in drivers if 'SQL' in d.upper()]
+        if sql_drivers:
+            self._log(f"Driver ODBC de fallback: {sql_drivers[0]}", "WARNING")
+            return sql_drivers[0]
+
+        # Último recurso: el legacy que siempre ha estado en Windows
+        self._log("No se encontró driver ODBC de SQL Server, usando legacy 'SQL Server'", "ERROR")
+        return "SQL Server"
+
     def table_exists(self, table_name: str) -> bool:
         """Verifica si una tabla existe en la base de datos con manejo de errores mejorado"""
         try:
@@ -77,11 +114,25 @@ class DatabaseManager:
         """
         # Log connection attempt with sanitized info
         self._log(f"Attempting to connect to server: {server}, database: {database}, user: {user if user else 'Windows Auth'}", "INFO")
-        
-        # Cadena inicial sin database para crear la BD si no existe
+
+        # Detectar el mejor driver disponible en esta máquina
+        odbc_driver = self._get_best_odbc_driver()
+
+        # Cadena inicial sin database para crear la BD si no existe.
+        # El driver legacy "SQL Server" (DBNETLIB) no soporta TLS moderno y lanza
+        # el error 08001 (SSL handshake) si se activa Encrypt=yes, por lo que se
+        # fuerza Encrypt=no para ese driver. Los drivers ODBC 17/18 usan cifrado
+        # con certificado auto-firmado aceptado (TrustServerCertificate=yes).
+        _legacy_driver = odbc_driver == "SQL Server"
+        if _legacy_driver:
+            _encrypt_opts = "Encrypt=no;"
+        else:
+            _encrypt_opts = "Encrypt=yes;TrustServerCertificate=yes;"
+
         initial_conn_str = (
-            f"DRIVER={{SQL Server}};"
+            f"DRIVER={{{odbc_driver}}};"
             f"SERVER={server};"
+            f"{_encrypt_opts}"
             "Connection Timeout=30;"
         )
     

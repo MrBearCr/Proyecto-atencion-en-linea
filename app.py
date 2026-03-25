@@ -8153,12 +8153,21 @@ class DatabaseApp:
         except Exception as e:
             self.log(f"Error de conexión: {str(e)}", "ERROR")
             error_msg = str(e)
+            # Construir detalle técnico con contexto de la conexión fallida
+            _srv  = self.server_entry.get().strip() if hasattr(self, 'server_entry') else '?'
+            _db   = self.db_entry.get().strip()     if hasattr(self, 'db_entry')     else '?'
+            _usr  = self.user_entry.get().strip()   if hasattr(self, 'user_entry')   else '?'
+            _detail = (
+                f"Server={_srv} | DB={_db} | User={_usr or 'Windows Auth'} | "
+                f"Exception={type(e).__name__} | Msg={error_msg}"
+            )
             self.audit_log.log_event(
-            "DB_CONNECTION_ERROR",
-            os.getlogin(),
-            "FAILED",
-            ErrorCode.DB_CONNECTION_FAILED
-        )
+                "DB_CONNECTION_ERROR",
+                os.getlogin(),
+                "FAILED",
+                ErrorCode.DB_CONNECTION_FAILED,
+                extra_detail=_detail,
+            )
             self.update_status('error', message=error_msg)
             try:
                 if hasattr(self, 'audit_db'):

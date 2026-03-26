@@ -27,11 +27,11 @@ class DatabaseManager:
         self._pool_lock = threading.Lock()
         # Lock para conectar/reconectar de forma serializada
         self._connect_lock = threading.Lock()
-        # Evitar correr migraciones/DDL en cada reconexión
-        self.current_odbc_driver = None
-        self.current_encrypt_opts = ""
+        
+        # Estado de inicialización del esquema (evita loops o re-ejecuciones innecesarias)
+        self._schema_initialized = False
 
-        # Flag de depuración para controlar prints [DB DEBUG]
+        # Driver y opciones determinados en el primer connect()
         self.current_odbc_driver = None
         self.current_encrypt_opts = ""
 
@@ -118,8 +118,15 @@ class DatabaseManager:
         # Log connection attempt with sanitized info
         self._log(f"Attempting to connect to server: {server}, database: {database}, user: {user if user else 'Windows Auth'}", "INFO")
 
+        # Guardar parámetros base para reconexiones y hilos secundarios
+        self.server = server
+        self.database = database
+        self.user = user
+        self.password = password
+
         # Detectar el mejor driver disponible en esta máquina
         odbc_driver = self._get_best_odbc_driver()
+        self.current_odbc_driver = odbc_driver
 
         # Cadena inicial sin database para crear la BD si no existe.
         # El driver legacy "SQL Server" (DBNETLIB) no soporta TLS moderno y lanza
@@ -131,6 +138,8 @@ class DatabaseManager:
             _encrypt_opts = "Encrypt=no;"
         else:
             _encrypt_opts = "Encrypt=yes;TrustServerCertificate=yes;"
+        
+        self.current_encrypt_opts = _encrypt_opts
 
         initial_conn_str = (
             f"DRIVER={{{odbc_driver}}};"
@@ -193,11 +202,6 @@ class DatabaseManager:
                 self.conn = pyodbc.connect(final_conn_str)
                 self.cursor = self.conn.cursor()
                 self.connected_server = server
-                # Store connection parameters for potential reconnection
-                self.server = server
-                self.database = database
-                self.user = user
-                self.password = password
                 # Ejecutar DDL solo una vez por proceso (evita conflictos en reconexiones/hilos)
                 if not self._schema_initialized:
                     try:
@@ -218,11 +222,9 @@ class DatabaseManager:
                 except Exception as se:
                     self._log(f"Schema check failed: {se}", "ERROR")
                 return True
-        self.current_odbc_driver = odbc_driver
-        self.current_encrypt_opts = _encrypt_opts
         except pyodbc.Error as e:
-        error_msg = f"{ErrorCode.DB_CONNECTION_FAILED}: {str(e)}"
-        raise Exception(error_msg) from e
+            error_msg = f"{ErrorCode.DB_CONNECTION_FAILED}: {str(e)}"
+            raise Exception(error_msg) from e
 
     def create_table(self):
         try:
@@ -700,20 +702,6 @@ class DatabaseManager:
                 END
             END
 
-            -- Compromisos de stock (ya comprometido para transferencia)
-            IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'pal_compromisos_stock' AND type = 'U')
-            BEGIN
-                CREATE TABLE pal_compromisos_stock (
-                    id INT IDENTITY(1,1) PRIMARY KEY,
-                    producto_id NVARCHAR(15), -- Código de producto
-                    sucursal_origen NVARCHAR(50),
-                    sucursal_destino NVARCHAR(50),
-                    cantidad DECIMAL(10,2),
-                    fecha_compromiso DATETIME DEFAULT GETDATE(),
-                    estado NVARCHAR(20) DEFAULT 'pendiente' -- pendiente, confirmado, cancelado
-                );
-            END;
-
             -- Auditoría de autorizaciones
             IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'pal_auditoria_autorizaciones' AND type = 'U')
             BEGIN
@@ -1015,12 +1003,12 @@ class DatabaseManager:
                 import pyodbc
                 
                 conn_str = (
-                    f"DRIVER={{{self.current_odbc_driver}}};" # Use dynamically determined driver
+                    f"DRIVER={{{self.current_odbc_driver}}};" 
                     f"SERVER={self.server};"
                     f"DATABASE={self.database};"
-                    f"{self.current_encrypt_opts};" # Use dynamically determined encryption options
+                    f"{self.current_encrypt_opts}" # current_encrypt_opts already includes trailing semicolon
                     "Connection Timeout=30;"
-                    "MARS_Connection=yes;"  # Enable Multiple Active Result Sets
+                    "MARS_Connection=yes;"
                 )
                 
                 if self.user:

@@ -83,7 +83,7 @@ class AbastecimientoService:
 
     def _cargar_compromisos(self, sede_destino):
         """Carga las cantidades ya comprometidas en transferencias pendientes/aprobadas."""
-        sql_comp = "SELECT producto_codigo, cantidad_sugerida FROM pal_sugerencias_transferencia WHERE sucursal_destino = ? AND estado IN ('pendiente', 'aprobada')"
+        sql_comp = "SELECT producto_codigo, cantidad_sugerida FROM pal_sugerencias_transferencia WHERE sucursal_destino = ? AND estado IN ('pendiente', 'aprobada', 'en_transito')"
         res_comp = self.db_manager.fetch_data(sql_comp, (sede_destino,))
         compromisos = {}
         for cod, qty in res_comp:
@@ -312,7 +312,7 @@ class AbastecimientoService:
                 dict_rojos[cod_norm].add(sd_dest)
                 
             # 2b. Cargar compromisos actuales (Sugerencias Pendientes o Aprobadas)
-            sql_comp = "SELECT producto_codigo, sucursal_destino, cantidad_sugerida FROM pal_sugerencias_transferencia WHERE estado IN ('pendiente', 'aprobada')"
+            sql_comp = "SELECT producto_codigo, sucursal_destino, cantidad_sugerida FROM pal_sugerencias_transferencia WHERE estado IN ('pendiente', 'aprobada', 'en_transito')"
             res_comp = self.db_manager.fetch_data(sql_comp)
             dict_compromisos = {} # {codigo: {sede: cantidad}}
             for c_cod, c_sede, c_qty in res_comp:

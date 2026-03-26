@@ -28,9 +28,12 @@ class DatabaseManager:
         # Lock para conectar/reconectar de forma serializada
         self._connect_lock = threading.Lock()
         # Evitar correr migraciones/DDL en cada reconexión
-        self._schema_initialized = False
+        self.current_odbc_driver = None
+        self.current_encrypt_opts = ""
+
         # Flag de depuración para controlar prints [DB DEBUG]
-        self.debug_enabled = False
+        self.current_odbc_driver = None
+        self.current_encrypt_opts = ""
 
     def _log(self, message: str, level: str = 'INFO'):
         """Logger interno con prefijo para identificar origen en consola"""
@@ -215,10 +218,11 @@ class DatabaseManager:
                 except Exception as se:
                     self._log(f"Schema check failed: {se}", "ERROR")
                 return True
+        self.current_odbc_driver = odbc_driver
+        self.current_encrypt_opts = _encrypt_opts
         except pyodbc.Error as e:
-            error_msg = f"{ErrorCode.DB_CONNECTION_FAILED}: {str(e)}"
-            raise Exception(error_msg) from e
-
+        error_msg = f"{ErrorCode.DB_CONNECTION_FAILED}: {str(e)}"
+        raise Exception(error_msg) from e
 
     def create_table(self):
         try:
@@ -1011,11 +1015,10 @@ class DatabaseManager:
                 import pyodbc
                 
                 conn_str = (
-                    f"DRIVER={{SQL Server}};"
+                    f"DRIVER={{{self.current_odbc_driver}}};" # Use dynamically determined driver
                     f"SERVER={self.server};"
                     f"DATABASE={self.database};"
-                    "Encrypt=no;"
-                    "TrustServerCertificate=yes;"
+                    f"{self.current_encrypt_opts};" # Use dynamically determined encryption options
                     "Connection Timeout=30;"
                     "MARS_Connection=yes;"  # Enable Multiple Active Result Sets
                 )

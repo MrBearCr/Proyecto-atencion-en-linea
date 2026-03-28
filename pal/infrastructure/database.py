@@ -804,10 +804,29 @@ class DatabaseManager:
                 END
             END
 
+            -- Compromisos Centralizados de Inventario
+            IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'pal_compromisos_inventario' AND type = 'U')
+            BEGIN
+                CREATE TABLE pal_compromisos_inventario (
+                    id INT IDENTITY(1,1) PRIMARY KEY,
+                    producto_codigo NVARCHAR(15) NOT NULL,
+                    sucursal_origen NVARCHAR(50) NOT NULL,
+                    sucursal_destino NVARCHAR(50) NOT NULL,
+                    cantidad DECIMAL(10,2) NOT NULL,
+                    estado NVARCHAR(20) DEFAULT 'activo', -- activo, completado, anulado
+                    referencia_maestro INT NULL,
+                    usuario_id INT NULL,
+                    fecha_creacion DATETIME DEFAULT GETDATE(),
+                    fecha_actualizacion DATETIME DEFAULT GETDATE()
+                );
+            END;
+            ELSE
+            BEGIN
+                IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'idx_pal_compromisos_producto')
+                    CREATE INDEX idx_pal_compromisos_producto ON pal_compromisos_inventario(producto_codigo, estado);
+            END
+
             -- Índices
-            IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'idx_pal_compromisos_producto_sede')
-                CREATE INDEX idx_pal_compromisos_producto_sede ON pal_compromisos_stock(producto_id, sucursal_destino);
-            
             IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'idx_pal_sugerencias_estado')
                 CREATE INDEX idx_pal_sugerencias_estado ON pal_sugerencias_transferencia(estado, fecha_generacion);
 

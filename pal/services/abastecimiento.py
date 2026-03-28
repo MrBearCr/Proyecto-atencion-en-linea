@@ -81,14 +81,30 @@ class AbastecimientoService:
         res_rojos = self.db_manager.fetch_data(sql_rojos, (sede_destino,))
         return {str(r[0]).strip().lstrip('0') or "0" for r in res_rojos}
 
-    def _cargar_compromisos(self, sede_destino):
-        """Carga las cantidades ya comprometidas en transferencias pendientes/aprobadas."""
-        sql_comp = "SELECT producto_codigo, cantidad_sugerida FROM pal_sugerencias_transferencia WHERE sucursal_destino = ? AND estado IN ('pendiente', 'aprobada', 'en_transito')"
-        res_comp = self.db_manager.fetch_data(sql_comp, (sede_destino,))
-        compromisos = {}
-        for cod, qty in res_comp:
-            compromisos[cod] = compromisos.get(cod, 0) + float(qty)
-        return compromisos
+    def get_compromisos_activos(self, sede_destino=None):
+        """
+        Obtiene los compromisos de inventario activos deducibles de futuras sugerencias.
+        Retorna un dict con estructura {codigo_producto: {sede_destino: cantidad_comprometida}}
+        """
+        try:
+            query = "SELECT producto_codigo, sucursal_destino, sum(cantidad) as total_comprometido FROM pal_compromisos_inventario WHERE estado = 'activo'"
+            params = []
+            if sede_destino:
+                query += " AND sucursal_destino = ?"
+                params.append(sede_destino)
+            query += " GROUP BY producto_codigo, sucursal_destino"
+            
+            res_comp = self.db_manager.fetch_data(query, tuple(params))
+            compromisos = {}
+            for c_cod, c_sede, c_qty in (res_comp or []):
+                c_cod_norm = str(c_cod).strip().lstrip('0') or "0"
+                c_sede_norm = str(c_sede).strip().upper()
+                if c_cod_norm not in compromisos: compromisos[c_cod_norm] = {}
+                compromisos[c_cod_norm][c_sede_norm] = float(c_qty)
+            return compromisos
+        except Exception as e:
+            logger.error(f"Error obteniendo compromisos de inventario: {e}")
+            return {}
 
     def _cargar_stock_cdt(self, codigos, sedes_cdt):
         """Carga el stock disponible en los CDTs para los códigos dados."""
@@ -114,40 +130,50 @@ class AbastecimientoService:
                 stock_cdt[r_cod].append((r_dep, float(r_qty)))
         return stock_cdt
 
-    def _calcular_promedio_diario_cascada(self, codigo, almacenes, dias_analisis_base, es_rojo, stock_actual):
+    def _cargar_ventas_bulk(self, codigos, almacenes, dias_base):
         """
-        Calcula el promedio diario buscando ventas en ventanas de tiempo crecientes (Cascada).
-        Ventanas: [base/3, base/2, base] (ej: 30, 60, 90 días).
+        Carga ventas en bloques (chunks) para múltiples códigos y almacenes en 3 ventanas de tiempo.
+        Ventanas: [base, base*2, base*3]
+        Retorna: {codigo: {promedio: X, total: Y}}
         """
-        # Calcular periodos de cascada dinámicos
-        p1 = int(dias_analisis_base / 3)
-        p2 = int(dias_analisis_base / 2)
-        p3 = int(dias_analisis_base)
-        periodos = sorted(list(set([p for p in [p1, p2, p3] if p > 0]))) # Eliminar duplicados y ceros
+        if not codigos or not almacenes: return {}
         
-        # 1. Búsqueda en Cascada
-        for per in periodos:
-            ventas = self.obtener_ventas_periodo(codigo, per, almacenes)
-            if ventas > 0:
-                promedio = ventas / per
-                logger.debug(f"[{codigo}] Análisis Cascada: Usando {per}d -> Ventas: {ventas} -> Promedio: {promedio:.2f}/día")
-                return promedio
-            else:
-                logger.debug(f"[{codigo}] Análisis Cascada: Ventas en {per}d: 0. Buscando en periodo mayor...")
+        p1, p2, p3 = int(dias_base), int(dias_base * 2), int(dias_base * 3)
+        res_final = {}
+        
+        chunk_size = 500
+        for i in range(0, len(codigos), chunk_size):
+            chunk = codigos[i:i+chunk_size]
+            placeholders_cods = ",".join(["?"] * len(chunk))
+            placeholders_deps = ",".join(["?"] * len(almacenes))
+            
+            sql = f"""
+                SELECT c_Codarticulo,
+                       SUM(CASE WHEN f_fecha >= DATEADD(day, -{p1}, GETDATE()) AND c_Concepto = 'VEN' THEN n_cantidad ELSE 0 END) - 
+                       SUM(CASE WHEN f_fecha >= DATEADD(day, -{p1}, GETDATE()) AND c_Concepto = 'DEV' THEN n_cantidad ELSE 0 END) as neto_p1,
+                       SUM(CASE WHEN f_fecha >= DATEADD(day, -{p2}, GETDATE()) AND c_Concepto = 'VEN' THEN n_cantidad ELSE 0 END) - 
+                       SUM(CASE WHEN f_fecha >= DATEADD(day, -{p2}, GETDATE()) AND c_Concepto = 'DEV' THEN n_cantidad ELSE 0 END) as neto_p2,
+                       SUM(CASE WHEN f_fecha >= DATEADD(day, -{p3}, GETDATE()) AND c_Concepto = 'VEN' THEN n_cantidad ELSE 0 END) - 
+                       SUM(CASE WHEN f_fecha >= DATEADD(day, -{p3}, GETDATE()) AND c_Concepto = 'DEV' THEN n_cantidad ELSE 0 END) as neto_p3
+                FROM TR_INVENTARIO WITH (NOLOCK)
+                WHERE f_fecha >= DATEADD(day, -{p3}, GETDATE())
+                AND c_Codarticulo IN ({placeholders_cods})
+                AND c_Deposito IN ({placeholders_deps})
+                AND c_Concepto IN ('VEN', 'DEV')
+                GROUP BY c_Codarticulo
+            """
+            rows = self.db_manager.fetch_data(sql, tuple(chunk) + tuple(almacenes))
+            
+            for r_cod, n1, n2, n3 in rows:
+                promedio = 0
+                if n1 and n1 > 0: promedio = float(n1) / p1
+                elif n2 and n2 > 0: promedio = float(n2) / p2
+                elif n3 and n3 > 0: promedio = float(n3) / p3
+                
+                res_final[r_cod] = {"promedio": promedio, "total": float(n1 or 0)}
 
-        # 2. Resurrección (Si no hay ventas en cascada)
-        ventas_anuales = self.obtener_ventas_periodo(codigo, 365, almacenes)
-        if ventas_anuales > 0:
-            promedio = ventas_anuales / 365
-            logger.debug(f"[{codigo}] Resurrección (Anual): Ventas {ventas_anuales} en 365d -> {promedio:.2f}/día")
-            return promedio
-        elif es_rojo and stock_actual <= 0:
-            # Caso especial: Producto Rojo sin stock y sin ventas -> Asignar mínimo para resurtir
-            logger.debug(f"[{codigo}] Resurrección (Rojo en 0): Promedio Fijo 0.05")
-            return 0.05
-        
-        return None # Producto muerto o sin actividad relevante
-        
+        return res_final
+
     def calcular_sugerencias(self, sede_destino, dept_cod=None, group_cod=None, sub_cod=None):
         """
         Calcula sugerencias de transferencia para una sede destino, usando la lógica unificada.
@@ -171,11 +197,8 @@ class AbastecimientoService:
             config_params = {p[0]: p[1:] for p in params_db}
             
             # 1. Cargar stock y categorías de la sede
-            # Identificar CDTs globales para excluirlos del stock de tienda
             all_cdts = [almacen for cfg in sedes_config.values() for almacen in cfg.get("almacenes_cdt", [])]
-            # Almacenes de la sede que NO son CDTs (para ver stock de piso)
             almacenes_stock_sede = [a for a in almacenes_destino if a not in all_cdts]
-            # Si la sede es puramente un CDT (raro pero posible), usamos sus almacenes
             if not almacenes_stock_sede: almacenes_stock_sede = almacenes_destino
             
             sql_stock, stock_params = self._build_stock_query(almacenes_stock_sede, dept_cod, group_cod, sub_cod)
@@ -183,38 +206,50 @@ class AbastecimientoService:
             stock_sede = self.db_manager.fetch_data(sql_stock, stock_params)
             logger.info(f"Se analizarán {len(stock_sede)} productos con presencia en la sede.")
 
-            # 2. Cargar datos auxiliares
+            if not stock_sede: return []
+
+            # 2. Cargar datos auxiliares (Bulk)
+            codigos_analizar = [item[0] for item in stock_sede]
             productos_rojos = self._cargar_lista_roja(sede_destino)
-            dict_compromisos = self._cargar_compromisos(sede_destino)
-            dict_stock_cdt = self._cargar_stock_cdt([item[0] for item in stock_sede], all_cdts)
+            dict_compromisos_full = self.get_compromisos_activos(sede_destino)
+            # Adaptamos al formato esperado por el resto de la función (plano por código)
+            dict_compromisos = {k: v.get(sede_destino.strip().upper(), 0) for k, v in dict_compromisos_full.items()}
+            dict_stock_cdt = self._cargar_stock_cdt(codigos_analizar, all_cdts)
+            
+            # Cargar ventas en bulk usando el análisis por defecto o el global
+            default_analisis = config_params.get(None, (25, 15, 0, 90))[3]
+            dict_ventas = self._cargar_ventas_bulk(codigos_analizar, almacenes_destino, default_analisis)
             
             # 3. Bucle de cálculo
             sugerencias = []
             for codigo, stock_actual, cat_id, desc_corta, desc_larga in stock_sede:
-                # Normalizar código para búsqueda en rojos
                 cod_norm = str(codigo).strip().lstrip('0') or "0"
                 es_rojo = cod_norm in productos_rojos
-                qty_compromiso = dict_compromisos.get(codigo, 0)
+                qty_compromiso = dict_compromisos.get(cod_norm, 0)
+                
+                if cod_norm in dict_compromisos:
+                    logger.info(f"[DEBUG INDIVIDUAL] Evaluación Prod: {cod_norm}, qty_compromiso recuperado: {qty_compromiso}")
+
                 
                 # Obtener parámetros: (dias_stock, umbral_quiebre, umbral_auto, dias_analisis)
-                # Prioridad: Categoría -> Global -> Default
                 p_dias, p_quiebre, p_auto, p_analisis = config_params.get(cat_id, config_params.get(None, (25, 15, 0, 90)))
 
-                # Lógica unificada de cálculo (Cascada)
-                promedio_diario = self._calcular_promedio_diario_cascada(codigo, almacenes_destino, p_analisis, es_rojo, stock_actual)
-                if promedio_diario is None: continue
-
-                # A. GATILLO (Trigger): ¿Debo pedir?
-                # Cobertura en días = Stock Actual / Promedio Diario
-                cobertura_actual = stock_actual / promedio_diario if promedio_diario > 0 else 999
+                # Obtener promedio pre-calculado
+                v_data = dict_ventas.get(codigo, {"promedio": 0, "total": 0})
+                promedio_diario = v_data["promedio"]
                 
-                # Si tengo cobertura para más días que el umbral de quiebre, NO pido.
-                # Excepción: Productos Rojos en 0 se piden siempre si entran por resurrección
+                if promedio_diario <= 0:
+                    if es_rojo and stock_actual <= 0:
+                        promedio_diario = 0.05 # Resurrección mínima para rojos
+                    else:
+                        continue
+
+                # A. GATILLO (Trigger)
+                cobertura_actual = stock_actual / promedio_diario if promedio_diario > 0 else 999
                 if cobertura_actual >= p_quiebre and not (es_rojo and stock_actual <= 0):
                     continue
                     
-                # B. META (Target): ¿Cuánto pido?
-                # Stock Ideal = Promedio * Días Meta * Seguridad * Logística
+                # B. META (Target)
                 stock_ideal = (promedio_diario * p_dias * 1.25 * 1.15)
                 necesidad = stock_ideal - (stock_actual + qty_compromiso)
 
@@ -226,7 +261,6 @@ class AbastecimientoService:
                     origen, cant_origen, cant_mover = ("SIN STOCK CDT", 0, necesidad_final)
                     
                     if disponibles:
-                        # Tomar del primer CDT con stock (podría mejorarse para buscar el más cercano)
                         origen, cant_origen = disponibles[0]
                         cant_mover = min(necesidad_final, int(cant_origen))
 
@@ -244,7 +278,6 @@ class AbastecimientoService:
                             "dias_stock_objetivo": p_dias,
                             "promedio_diario": round(promedio_diario, 4)
                         })
-
             return sugerencias
         except Exception as e:
             logger.error(f"Error en `calcular_sugerencias`: {e}") # exc_info=True eliminado
@@ -297,7 +330,7 @@ class AbastecimientoService:
             umbral_auto = float(default_umbral if default_umbral is not None else 0)
             dias_analisis_base = int(default_analisis if default_analisis else 90)
             
-            logger.info(f"Parámetros GLOBAL (Meta: {dias_obj}d, Gatillo: <{umb_quiebre}d, Análisis: Cascada hasta {dias_analisis_base}d)")
+            logger.info(f"Parámetros GLOBAL (Meta: {dias_obj}d, Gatillo: <{umb_quiebre}d, Análisis: Cascada {dias_analisis_base}d, {dias_analisis_base*2}d, {dias_analisis_base*3}d)")
             
             # 2a. Cargar Lista Roja para validación global
             sql_rojos = "SELECT producto_codigo, sede_destino FROM pal_productos_no_trasladables WHERE activo = 1"
@@ -311,15 +344,10 @@ class AbastecimientoService:
                 if cod_norm not in dict_rojos: dict_rojos[cod_norm] = set()
                 dict_rojos[cod_norm].add(sd_dest)
                 
-            # 2b. Cargar compromisos actuales (Sugerencias Pendientes o Aprobadas)
-            sql_comp = "SELECT producto_codigo, sucursal_destino, cantidad_sugerida FROM pal_sugerencias_transferencia WHERE estado IN ('pendiente', 'aprobada', 'en_transito')"
-            res_comp = self.db_manager.fetch_data(sql_comp)
-            dict_compromisos = {} # {codigo: {sede: cantidad}}
-            for c_cod, c_sede, c_qty in res_comp:
-                if c_cod not in dict_compromisos: dict_compromisos[c_cod] = {}
-                dict_compromisos[c_cod][c_sede] = dict_compromisos[c_cod].get(c_sede, 0) + float(c_qty)
+            # 2b. Cargar compromisos actuales desde la nueva tabla centralizada
+            dict_compromisos = self.get_compromisos_activos()
                 
-            periodos_cascada = [int(dias_obj), int(dias_obj * 2), int(dias_obj * 3)]
+            periodos_cascada = [int(dias_analisis_base), int(dias_analisis_base * 2), int(dias_analisis_base * 3)]
 
             # 3. Obtener Stock en CDTs (de todos los productos que podrían necesitarse)
             # Para optimizar, primero buscamos qué productos tienen stock en CDT
@@ -332,7 +360,14 @@ class AbastecimientoService:
                 HAVING SUM(n_cantidad) > 0
             """
             res_cdt = self.db_manager.fetch_data(sql_stock_cdt, tuple(cdts_almacenes))
-            stock_cdt_global = {r[0]: {"total": float(r[1]), "deposito": r[2]} for r in res_cdt}
+            
+            stock_cdt_global = {}
+            for r in res_cdt:
+                c_norm = str(r[0]).strip().lstrip('0') or "0"
+                if c_norm not in stock_cdt_global:
+                    stock_cdt_global[c_norm] = {"total": 0.0, "deposito": r[2]}
+                stock_cdt_global[c_norm]["total"] += float(r[1])
+                
             codigos_con_stock_cdt = list(stock_cdt_global.keys())
 
             if not codigos_con_stock_cdt:
@@ -399,10 +434,13 @@ class AbastecimientoService:
             sugerencias_finales = []
             
             for codigo in codigos_a_analizar:
-                if codigo not in stock_cdt_global: continue
+                # Normalización de código para búsqueda en diccionarios
+                cod_norm = str(codigo).strip().lstrip('0') or "0"
                 
-                stock_cdt_disp = stock_cdt_global[codigo]["total"]
-                depo_cdt = stock_cdt_global[codigo]["deposito"]
+                if cod_norm not in stock_cdt_global: continue
+                
+                stock_cdt_disp = stock_cdt_global[cod_norm]["total"]
+                depo_cdt = stock_cdt_global[cod_norm]["deposito"]
                 
                 demandas = [] # [(sede, deficit, promedio_diario)]
                 total_deficit = 0
@@ -413,11 +451,13 @@ class AbastecimientoService:
                     
                     promedio = v_data['promedio']
                     stock_actual = stock_por_sede.get(codigo, {}).get(s_name, 0)
-                    qty_compromiso = dict_compromisos.get(codigo, {}).get(s_name, 0)
+                    qty_compromiso = dict_compromisos.get(cod_norm, {}).get(s_name.strip().upper(), 0)
                     
-                    # Validar si es ROJO para esta sede (con normalización)
-                    cod_norm = str(codigo).strip().lstrip('0')
-                    if not cod_norm: cod_norm = "0"
+                    if cod_norm in dict_compromisos:
+                        logger.info(f"[DEBUG COMPROMISOS] Producto {cod_norm}: Sede iterada='{s_name}', Sede upper='{s_name.strip().upper()}'. Contenido dicc={dict_compromisos.get(cod_norm)}")
+                        
+                    if qty_compromiso > 0:
+                        logger.debug(f"[{cod_norm}] Global: Compromiso detectado ({s_name}): {qty_compromiso} | Ideal: {int(round(promedio * dias_obj * 1.25 * 1.15))} | Actual: {stock_actual}")
                     
                     rojos_prod = dict_rojos.get(cod_norm, set())
                     es_rojo = (s_name in rojos_prod) or (None in rojos_prod)
@@ -467,7 +507,8 @@ class AbastecimientoService:
                     if cantidad_sugerida <= 0: continue
                     
                     # Validar si es ROJO para esta sede
-                    rojos_prod = dict_rojos.get(codigo, set())
+                    cod_norm = str(codigo).strip().lstrip('0') or "0"
+                    rojos_prod = dict_rojos.get(cod_norm, set())
                     es_rojo = (dem["sede"] in rojos_prod) or (None in rojos_prod)
                     
                     sugerencias_finales.append({
@@ -559,16 +600,20 @@ class AbastecimientoService:
                 if r_cod not in res_final: res_final[r_cod] = {}
                 for s_name, data in sedes_data.items():
                     promedio = 0
+                    total_usado = 0
                     debug_msg = None
                     
                     if data['p1'] > 0:
                         promedio = data['p1'] / p1
+                        total_usado = data['p1']
                         if log_count < 5: debug_msg = f"[{r_cod}] Global Cascada ({s_name}): Usando {p1}d -> Promedio: {promedio:.2f}/día"
                     elif data['p2'] > 0:
                         promedio = data['p2'] / p2
+                        total_usado = data['p2']
                         if log_count < 5: debug_msg = f"[{r_cod}] Global Cascada ({s_name}): Sin ventas en {p1}d. Usando {p2}d -> Promedio: {promedio:.2f}/día"
                     elif data['p3'] > 0:
                         promedio = data['p3'] / p3
+                        total_usado = data['p3']
                         if log_count < 5: debug_msg = f"[{r_cod}] Global Cascada ({s_name}): Sin ventas en {p2}d. Usando {p3}d -> Promedio: {promedio:.2f}/día"
                     
                     if debug_msg:
@@ -576,7 +621,7 @@ class AbastecimientoService:
                         log_count += 1
                     
                     res_final[r_cod][s_name] = {
-                        "total": data['p1'] if promedio > 0 else 0,
+                        "total": total_usado,
                         "promedio": promedio,
                         "ultima_venta": data['last_ven']
                     }
@@ -659,6 +704,14 @@ class AbastecimientoService:
             """
             self.db_manager.execute_query(sql_aud, (usuario_id, prod, orig_sede, dest_sede, cant_orig, cantidad_autorizada, motivo))
             
+            # 4. Registrar Compromiso en el Inventario Central
+            sql_comp = """
+                INSERT INTO pal_compromisos_inventario
+                (producto_codigo, sucursal_origen, sucursal_destino, cantidad, estado, usuario_id)
+                VALUES (?, ?, ?, ?, 'activo', ?)
+            """
+            self.db_manager.execute_query(sql_comp, (prod, orig_sede, dest_sede, cantidad_autorizada, usuario_id))
+            
             return True
         except Exception as e:
             logger.error(f"Error registrando autorización: {e}")
@@ -679,6 +732,11 @@ class AbastecimientoService:
                     agrupadas[destino] = []
                 agrupadas[destino].append(s)
             
+            # Verificar permisos para "auto-autorización"
+            from pal.core.permissions import PermissionsManager
+            perms_mgr = PermissionsManager(self.db_manager)
+            puede_autorizar = perms_mgr.tiene_permiso(usuario_id, "LOGISTICA", "autorizar") if usuario_id else False
+
             for sede, items in agrupadas.items():
                 # 2. Generar número de transferencia único para esta sede
                 numero_transf = self.generar_numero_transferencia()
@@ -706,7 +764,10 @@ class AbastecimientoService:
                 """
                 
                 for s in items:
-                    es_auto = (s.get("requiere_autorizacion", 1) == 0)
+                    requiere_aut = s.get("requiere_autorizacion", 1)
+                    # Si el usuario tiene permiso, se autoriza automáticamente
+                    es_auto = (requiere_aut == 0) or puede_autorizar
+                    
                     estado_final = 'en_transito' if es_auto else 'pendiente'
                     fue_aut = 1 if es_auto else 0
                     fecha_aut = datetime.now() if es_auto else None
@@ -724,7 +785,7 @@ class AbastecimientoService:
                         cant_sug,
                         s["stock_origen"],
                         s["stock_actual"],
-                        s["requiere_autorizacion"],
+                        requiere_aut,
                         estado_final,
                         fue_aut,
                         fecha_aut,
@@ -735,6 +796,31 @@ class AbastecimientoService:
                         maestro_id
                     )
                     self.db_manager.execute_query(sql_item, params)
+                    
+                    # SI fue auto-autorizada y requería permiso, registrar en auditoría
+                    if es_auto and requiere_aut == 1:
+                        sql_aud = """
+                            INSERT INTO pal_auditoria_autorizaciones 
+                            (usuario_id, producto_codigo, sucursal_origen, sucursal_destino, cantidad_original, cantidad_autorizada, motivo)
+                            VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """
+                        self.db_manager.execute_query(sql_aud, (
+                            usuario_id, s["producto_codigo"], s["sucursal_origen_sugerida"], 
+                            s["sucursal_destino"], cant_orig, cant_sug, 
+                            "Auto-autorización por permisos de usuario"
+                        ))
+                    
+                    # SI fue auto-autorizada (con o sin permiso explícito previo), generar compromiso en Inventario Central
+                    if es_auto:
+                        sql_comp = """
+                            INSERT INTO pal_compromisos_inventario
+                            (producto_codigo, sucursal_origen, sucursal_destino, cantidad, estado, referencia_maestro, usuario_id)
+                            VALUES (?, ?, ?, ?, 'activo', ?, ?)
+                        """
+                        self.db_manager.execute_query(sql_comp, (
+                            s["producto_codigo"], s["sucursal_origen_sugerida"], s["sucursal_destino"], 
+                            cant_sug, maestro_id, usuario_id
+                        ))
                     
             return True
         except Exception as e:

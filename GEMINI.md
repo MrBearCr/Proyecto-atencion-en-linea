@@ -8,7 +8,6 @@ Este proyecto es una aplicación de escritorio desarrollada en **Python** para l
 *   **Interfaz Gráfica (GUI):** Tkinter (con temas modernos y componentes personalizados)
 *   **Base de Datos:** SQL Server (mediante `pyodbc`)
 *   **Seguridad y Cifrado:** `cryptography` (Fernet), `keyring` (para almacenamiento seguro de claves en el sistema), `bcrypt` (para hashes de contraseñas).
-*   **Pruebas:** `pytest`, `pytest-cov`.
 *   **Otras:** `requests` (comunicación API), `matplotlib` (gráficos de estadísticas), `Pillow` (manejo de imágenes).
 
 ### Arquitectura del Sistema
@@ -58,9 +57,7 @@ python app.py
 *   Utiliza el sistema de códigos de error definido en `pal/core/errors.py` para proporcionar retroalimentación precisa al usuario y facilitar el soporte técnico.
 *   Toda acción crítica debe ser registrada a través del `AuditLogger` para mantener un historial de eventos.
 
-### Pruebas
-*   Ejecuta las pruebas unitarias utilizando `pytest`.
-*   Asegúrate de que las nuevas funcionalidades incluyan sus respectivos casos de prueba en el directorio `tests/`.
+
 
 ---
 

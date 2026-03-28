@@ -227,10 +227,6 @@ class AbastecimientoService:
                 es_rojo = cod_norm in productos_rojos
                 qty_compromiso = dict_compromisos.get(cod_norm, 0)
                 
-                if cod_norm in dict_compromisos:
-                    logger.info(f"[DEBUG INDIVIDUAL] Evaluación Prod: {cod_norm}, qty_compromiso recuperado: {qty_compromiso}")
-
-                
                 # Obtener parámetros: (dias_stock, umbral_quiebre, umbral_auto, dias_analisis)
                 p_dias, p_quiebre, p_auto, p_analisis = config_params.get(cat_id, config_params.get(None, (25, 15, 0, 90)))
 
@@ -243,6 +239,10 @@ class AbastecimientoService:
                         promedio_diario = 0.05 # Resurrección mínima para rojos
                     else:
                         continue
+
+                if qty_compromiso > 0:
+                    stock_ideal_dbg = (promedio_diario * p_dias * 1.25 * 1.15)
+                    logger.info(f"[COMPROMISO INDIVIDUAL] Prod {cod_norm} -> {sede_destino}: compromiso={qty_compromiso}, stock_actual={stock_actual}, ideal={int(stock_ideal_dbg)}, necesidad_resultante={max(0, stock_ideal_dbg - stock_actual - qty_compromiso)}")
 
                 # A. GATILLO (Trigger)
                 cobertura_actual = stock_actual / promedio_diario if promedio_diario > 0 else 999
@@ -346,7 +346,13 @@ class AbastecimientoService:
                 
             # 2b. Cargar compromisos actuales desde la nueva tabla centralizada
             dict_compromisos = self.get_compromisos_activos()
-                
+            
+            total_compromisos = sum(qty for sedes in dict_compromisos.values() for qty in sedes.values())
+            logger.info(f"Compromisos activos cargados: {len(dict_compromisos)} productos, {total_compromisos} unidades totales")
+            if dict_compromisos:
+                for cp, cs in list(dict_compromisos.items())[:5]:
+                    logger.info(f"  Compromiso: {cp} -> {cs}")
+            
             periodos_cascada = [int(dias_analisis_base), int(dias_analisis_base * 2), int(dias_analisis_base * 3)]
 
             # 3. Obtener Stock en CDTs (de todos los productos que podrían necesitarse)
@@ -453,11 +459,9 @@ class AbastecimientoService:
                     stock_actual = stock_por_sede.get(codigo, {}).get(s_name, 0)
                     qty_compromiso = dict_compromisos.get(cod_norm, {}).get(s_name.strip().upper(), 0)
                     
-                    if cod_norm in dict_compromisos:
-                        logger.info(f"[DEBUG COMPROMISOS] Producto {cod_norm}: Sede iterada='{s_name}', Sede upper='{s_name.strip().upper()}'. Contenido dicc={dict_compromisos.get(cod_norm)}")
-                        
                     if qty_compromiso > 0:
-                        logger.debug(f"[{cod_norm}] Global: Compromiso detectado ({s_name}): {qty_compromiso} | Ideal: {int(round(promedio * dias_obj * 1.25 * 1.15))} | Actual: {stock_actual}")
+                        stock_ideal_dbg = int(round(promedio * dias_obj * 1.25 * 1.15))
+                        logger.info(f"[COMPROMISO GLOBAL] Prod {cod_norm} -> {s_name}: compromiso={qty_compromiso}, stock_actual={stock_actual}, ideal={stock_ideal_dbg}, deficit_sin_compromiso={max(0, stock_ideal_dbg - stock_actual)}")
                     
                     rojos_prod = dict_rojos.get(cod_norm, set())
                     es_rojo = (s_name in rojos_prod) or (None in rojos_prod)
@@ -471,14 +475,16 @@ class AbastecimientoService:
                     
                     # Stock Ideal (misma lógica que individual)
                     stock_ideal = int(round(promedio * dias_obj * 1.25 * 1.15))
-                    deficit = max(0, int(stock_ideal - stock_actual - qty_compromiso))
+                    # NO restar compromiso aquí: se resta de la cantidad_sugerida FINAL después de distribución
+                    deficit = max(0, int(stock_ideal - stock_actual))
                     
                     if deficit > 0:
                         demandas.append({
                             "sede": s_name,
                             "deficit": deficit,
                             "promedio": promedio,
-                            "stock_actual": stock_actual
+                            "stock_actual": stock_actual,
+                            "qty_compromiso": qty_compromiso
                         })
                         total_deficit += deficit
                 
@@ -503,7 +509,10 @@ class AbastecimientoService:
                         dem['cantidad_sugerida'] = dem['deficit']
 
                 for dem in demandas:
-                    cantidad_sugerida = dem["cantidad_sugerida"]
+                    compromiso_dem = int(dem.get("qty_compromiso", 0))
+                    cantidad_sugerida = max(0, dem["cantidad_sugerida"] - compromiso_dem)
+                    if compromiso_dem > 0:
+                        logger.info(f"[COMPROMISO AJUSTE] Prod {cod_norm} -> {dem['sede']}: distribuido={dem['cantidad_sugerida']}, compromiso={compromiso_dem}, final={cantidad_sugerida}")
                     if cantidad_sugerida <= 0: continue
                     
                     # Validar si es ROJO para esta sede
@@ -676,13 +685,13 @@ class AbastecimientoService:
     def registrar_autorizacion(self, sugerencia_id, usuario_id, cantidad_autorizada, motivo):
         """Registra la autorización de una sugerencia en la tabla pal_sugerencias_transferencia."""
         try:
-            # 1. Obtener datos de la sugerencia original para auditoría
-            sql_orig = "SELECT producto_codigo, sucursal_origen_sugerida, sucursal_destino, cantidad_sugerida FROM pal_sugerencias_transferencia WHERE id = ?"
+            # 1. Obtener datos de la sugerencia original (incluyendo maestro_id)
+            sql_orig = "SELECT producto_codigo, sucursal_origen_sugerida, sucursal_destino, cantidad_sugerida, maestro_id FROM pal_sugerencias_transferencia WHERE id = ?"
             orig = self.db_manager.fetch_data(sql_orig, (sugerencia_id,))
             if not orig:
                 return False
             
-            prod, orig_sede, dest_sede, cant_orig = orig[0]
+            prod, orig_sede, dest_sede, cant_orig, maestro_id = orig[0]
 
             # 2. Actualizar sugerencia
             sql_update = """
@@ -704,13 +713,13 @@ class AbastecimientoService:
             """
             self.db_manager.execute_query(sql_aud, (usuario_id, prod, orig_sede, dest_sede, cant_orig, cantidad_autorizada, motivo))
             
-            # 4. Registrar Compromiso en el Inventario Central
+            # 4. Registrar Compromiso en el Inventario Central (con referencia_maestro)
             sql_comp = """
                 INSERT INTO pal_compromisos_inventario
-                (producto_codigo, sucursal_origen, sucursal_destino, cantidad, estado, usuario_id)
-                VALUES (?, ?, ?, ?, 'activo', ?)
+                (producto_codigo, sucursal_origen, sucursal_destino, cantidad, estado, referencia_maestro, usuario_id)
+                VALUES (?, ?, ?, ?, 'activo', ?, ?)
             """
-            self.db_manager.execute_query(sql_comp, (prod, orig_sede, dest_sede, cantidad_autorizada, usuario_id))
+            self.db_manager.execute_query(sql_comp, (prod, orig_sede, dest_sede, cantidad_autorizada, maestro_id, usuario_id))
             
             return True
         except Exception as e:
@@ -889,6 +898,21 @@ class AbastecimientoService:
             sql_i = "UPDATE pal_sugerencias_transferencia SET estado = 'completada' WHERE maestro_id = ?"
             self.db_manager.execute_query(sql_i, (maestro_id,))
             
+            # 3. Cerrar compromisos activos vinculados a este maestro (por referencia_maestro)
+            sql_comp_directo = "UPDATE pal_compromisos_inventario SET estado = 'completado', fecha_actualizacion = GETDATE() WHERE referencia_maestro = ? AND estado = 'activo'"
+            self.db_manager.execute_query(sql_comp_directo, (maestro_id,))
+            
+            # 3b. Cerrar compromisos sin referencia_maestro (creados por registrar_autorizacion)
+            #     Buscando por producto + sede de los ítems del maestro
+            sql_items = "SELECT producto_codigo, sucursal_destino, sucursal_origen_sugerida FROM pal_sugerencias_transferencia WHERE maestro_id = ?"
+            items = self.db_manager.fetch_data(sql_items, (maestro_id,))
+            if items:
+                for prod, dest_sede, orig_sede in items:
+                    sql_comp_ind = """UPDATE pal_compromisos_inventario SET estado = 'completado', fecha_actualizacion = GETDATE() 
+                        WHERE producto_codigo = ? AND sucursal_destino = ? AND sucursal_origen = ? 
+                        AND estado = 'activo' AND referencia_maestro IS NULL"""
+                    self.db_manager.execute_query(sql_comp_ind, (prod, dest_sede, orig_sede))
+            
             logger.info(f"Orden de transferencia {maestro_id} cerrada por usuario {usuario_id}")
             return True
         except Exception as e:
@@ -995,6 +1019,44 @@ class AbastecimientoService:
                     WHERE id = ?
                 """
                 self.db_manager.execute_query(sql_upd, (cant_rec, cant_rec, cant_rec, sug_id))
+                
+                # Actualizar compromiso según recepción parcial o total
+                # Buscar datos de la sugerencia para localizar el compromiso
+                sql_sug_info = "SELECT producto_codigo, sucursal_origen_sugerida, sucursal_destino, cantidad_sugerida, maestro_id FROM pal_sugerencias_transferencia WHERE id = ?"
+                sug_info = self.db_manager.fetch_data(sql_sug_info, (sug_id,))
+                if sug_info:
+                    s_prod, s_orig, s_dest, s_cant_sug, s_maestro = sug_info[0]
+                    cant_recibida_total_nueva = float(self.db_manager.fetch_data(
+                        "SELECT cantidad_recibida_total FROM pal_sugerencias_transferencia WHERE id = ?", (sug_id,)
+                    )[0][0] or 0)
+                    
+                    es_recepcion_total = cant_recibida_total_nueva >= float(s_cant_sug)
+                    
+                    if es_recepcion_total:
+                        # Recepción total: cerrar compromiso
+                        if s_maestro:
+                            sql_close = """UPDATE pal_compromisos_inventario SET estado = 'completado', fecha_actualizacion = GETDATE()
+                                WHERE referencia_maestro = ? AND producto_codigo = ? AND sucursal_destino = ? AND estado = 'activo'"""
+                            self.db_manager.execute_query(sql_close, (s_maestro, s_prod, s_dest))
+                        else:
+                            sql_close = """UPDATE pal_compromisos_inventario SET estado = 'completado', fecha_actualizacion = GETDATE()
+                                WHERE producto_codigo = ? AND sucursal_origen = ? AND sucursal_destino = ? AND estado = 'activo' AND referencia_maestro IS NULL"""
+                            self.db_manager.execute_query(sql_close, (s_prod, s_orig, s_dest))
+                    else:
+                        # Recepción parcial: restar cantidad recibida del compromiso
+                        if s_maestro:
+                            sql_reduce = """UPDATE pal_compromisos_inventario SET cantidad = cantidad - ?, fecha_actualizacion = GETDATE()
+                                WHERE referencia_maestro = ? AND producto_codigo = ? AND sucursal_destino = ? AND estado = 'activo'"""
+                            self.db_manager.execute_query(sql_reduce, (cant_rec, s_maestro, s_prod, s_dest))
+                        else:
+                            sql_reduce = """UPDATE pal_compromisos_inventario SET cantidad = cantidad - ?, fecha_actualizacion = GETDATE()
+                                WHERE producto_codigo = ? AND sucursal_origen = ? AND sucursal_destino = ? AND estado = 'activo' AND referencia_maestro IS NULL"""
+                            self.db_manager.execute_query(sql_reduce, (cant_rec, s_prod, s_orig, s_dest))
+                        
+                        # Si la cantidad llegó a 0 o menos, cerrar el compromiso
+                        sql_check_zero = """UPDATE pal_compromisos_inventario SET estado = 'completado', fecha_actualizacion = GETDATE()
+                            WHERE cantidad <= 0 AND estado = 'activo'"""
+                        self.db_manager.execute_query(sql_check_zero)
 
             # 4. Actualizar estado global de la transferencia
             # Verificar si quedan items pendientes
@@ -1010,6 +1072,13 @@ class AbastecimientoService:
             
             sql_trs = "UPDATE pal_transferencias_maestro SET estado = ? WHERE id = ?"
             self.db_manager.execute_query(sql_trs, (nuevo_estado_trs, transferencia_id))
+            
+            # 5. Si la transferencia está completamente recibida, cerrar TODOS los compromisos activos de esta TRS
+            if nuevo_estado_trs == 'recibida_total':
+                sql_close_all = """UPDATE pal_compromisos_inventario SET estado = 'completado', fecha_actualizacion = GETDATE()
+                    WHERE referencia_maestro = ? AND estado = 'activo'"""
+                self.db_manager.execute_query(sql_close_all, (transferencia_id,))
+                logger.info(f"Todos los compromisos de TRS {transferencia_id} cerrados (recepción total)")
             
             logger.info(f"Recepción {numero_recepcion} registrada para TRS ID {transferencia_id}. Estado: {nuevo_estado_trs}")
             return {"success": True, "numero_recepcion": numero_recepcion, "estado_transferencia": nuevo_estado_trs}

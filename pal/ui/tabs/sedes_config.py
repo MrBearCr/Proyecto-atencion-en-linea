@@ -54,12 +54,17 @@ class SedesAlmacenesTab(ttk.Frame):
         self.var_sede_desc = tk.StringVar()
         ttk.Entry(self.right_frame, textvariable=self.var_sede_desc).grid(row=2, column=1, sticky="ew", pady=2, padx=5)
 
+        ttk.Label(self.right_frame, text="Código Localidad ODC:").grid(row=3, column=0, sticky="w", pady=2)
+        self.var_sede_cod_localidad = tk.StringVar()
+        ttk.Entry(self.right_frame, textvariable=self.var_sede_cod_localidad).grid(row=3, column=1, sticky="ew", pady=2, padx=5)
+        ttk.Label(self.right_frame, text="(Código en MA_ODC.c_CODLOCALIDAD, ej: 01, 03, 04)", foreground="gray").grid(row=4, column=1, sticky="w", padx=5)
+
         # Separador
-        ttk.Separator(self.right_frame, orient=tk.HORIZONTAL).grid(row=3, column=0, columnspan=2, sticky="ew", pady=10)
+        ttk.Separator(self.right_frame, orient=tk.HORIZONTAL).grid(row=5, column=0, columnspan=2, sticky="ew", pady=10)
         
         self.deposits_frame = ttk.Frame(self.right_frame)
-        self.deposits_frame.grid(row=5, column=0, columnspan=2, sticky="nsew", pady=5)
-        self.right_frame.rowconfigure(5, weight=1)
+        self.deposits_frame.grid(row=6, column=0, columnspan=2, sticky="nsew", pady=5)
+        self.right_frame.rowconfigure(6, weight=1)
         
         # Encabezados Almacenes
         header_frame = ttk.Frame(self.deposits_frame)
@@ -86,7 +91,7 @@ class SedesAlmacenesTab(ttk.Frame):
         self.scrollbar.pack(side="right", fill="y")
         
         # Botón Guardar
-        ttk.Button(self.right_frame, text="💾 Guardar Cambios", command=self._save_changes).grid(row=6, column=0, columnspan=2, pady=10)
+        ttk.Button(self.right_frame, text="💾 Guardar Cambios", command=self._save_changes).grid(row=7, column=0, columnspan=2, pady=10)
 
         # Variables para checkboxes: { "cod_deposito": {"tratable": BooleanVar, "cdt": BooleanVar} }
         self.deposit_vars = {}
@@ -149,6 +154,7 @@ class SedesAlmacenesTab(ttk.Frame):
         self.var_sede_name.set(sede_name)
         self.var_sede_desc.set(data.get("descripcion", ""))
         self.var_sede_zona.set(data.get("zona", ""))
+        self.var_sede_cod_localidad.set(data.get("codigo_localidad", ""))
         
         # Marcar checkboxes
         active_deposits = set(data.get("almacenes_tratables", []))
@@ -211,6 +217,7 @@ class SedesAlmacenesTab(ttk.Frame):
         self.sedes_data[current_name] = {
             "descripcion": self.var_sede_desc.get(),
             "zona": self.var_sede_zona.get(),
+            "codigo_localidad": self.var_sede_cod_localidad.get().strip(),
             "almacenes_tratables": selected_tratables,
             "almacenes_cdt": selected_cdt,
             "almacenes_transito": selected_transito

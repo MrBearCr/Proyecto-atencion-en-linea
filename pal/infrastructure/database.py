@@ -2129,6 +2129,52 @@ class DatabaseManager:
             self._log(f"Fallo al conectar a VAD20 para sede {sede_config.get('nombre_sede')}: {e}", "ERROR")
             raise Exception(f"Fallo al conectar a VAD20 para {sede_config.get('nombre_sede')}. Verifique IP {server} y red.")
 
+    def connect_to_vad10_sede(self, sede_config):
+        """
+        Establece una conexión pyodbc temporal a la base de datos VAD10 de una sede específica.
+        Usa la misma IP y credenciales de la sede configurada, pero apunta a VAD10 en lugar de VAD20.
+        Útil para obtener datos de usuarios/cajeras que residen en VAD10 de cada sede.
+        """
+        if not sede_config:
+            raise Exception("Configuración de sede no proporcionada")
+
+        server = sede_config.get('ip_servidor')
+        user = sede_config.get('usuario_bd')
+        encrypted_password = sede_config.get('password_bd_enc')
+
+        if not server:
+            raise Exception(f"Configuración incompleta para sede {sede_config.get('nombre_sede', 'Unknown')}")
+
+        password = None
+        if encrypted_password and self.credentials_manager:
+            try:
+                password = self.credentials_manager.decrypt(encrypted_password)
+            except Exception as e:
+                self._log(f"Error desencriptando contraseña para VAD10 {sede_config.get('nombre_sede')}: {e}", "ERROR")
+                password = encrypted_password
+
+        conn_str = (
+            f"DRIVER={{SQL Server}};"
+            f"SERVER={server};"
+            f"DATABASE=VAD10;"
+        )
+
+        if user:
+            conn_str += f"UID={user};PWD={password or ''};"
+        else:
+            conn_str += "Trusted_Connection=yes;"
+
+        conn_str += "Connection Timeout=30;"
+
+        try:
+            self._log(f"Intentando conectar a VAD10 ({sede_config.get('nombre_sede')}) en {server}...", "INFO")
+            temp_conn = pyodbc.connect(conn_str)
+            self._log(f"Conectado exitosamente a VAD10 para sede: {sede_config.get('nombre_sede')}", "INFO")
+            return temp_conn
+        except Exception as e:
+            self._log(f"Fallo al conectar a VAD10 para sede {sede_config.get('nombre_sede')}: {e}", "ERROR")
+            raise Exception(f"Fallo al conectar a VAD10 para {sede_config.get('nombre_sede')}. Verifique IP {server} y red.")
+
     def add_sede(self, sede_data):
         """Agrega una nueva sede a la tabla pal_sedes_configuracion."""
         query = """
@@ -2490,6 +2536,184 @@ class DatabaseManager:
                 inv_summary = "\n".join(invoices)
                 
             result.append((rif, name, ym, total, inv_summary))
+            
+        result.sort(key=lambda x: (x[0], x[2]))
+        return result
+
+    def get_ma_usuarios_map(self, connection=None):
+        """
+        Obtiene un mapa de código de usuario -> descripción.
+        Si se proporciona connection, busca en esa base de datos (Sede).
+        Si no, busca en la base de datos principal (VAD10).
+        """
+        def normalize(v):
+            try:
+                s = str(v or "").strip().lstrip('0')
+                return s if s else "0"
+            except: return ""
+
+        posibles_columnas = ["codusuario", "c_codigo", "c_usuario", "cu_usuario", "c_codusu", "C_USUARIO"]
+        rows = None
+        
+        # Determinar origen para el log
+        if connection:
+            try:
+                # Intentar obtener info del servidor de la conexión
+                server_info = str(connection.getinfo(pyodbc.SQL_SERVER_NAME))
+                db_info = "Conexión Seleccionada"
+                self._log(f"Obteniendo mapa de usuarios desde SERVER: {server_info} ({db_info})", "INFO")
+            except:
+                self._log("Obteniendo mapa de usuarios desde conexión externa proporcionada", "INFO")
+        else:
+            self._log(f"Obteniendo mapa de usuarios desde CONEXIÓN PRINCIPAL ({self.server})", "WARNING")
+
+        for col in posibles_columnas:
+            try:
+                query = f"SELECT RTRIM(LTRIM({col})), descripcion FROM MA_USUARIOS WITH (NOLOCK)"
+                if connection:
+                    cursor = connection.cursor()
+                    cursor.execute(query)
+                    rows = cursor.fetchall()
+                    cursor.close()
+                else:
+                    rows = self.fetch_data(query)
+                
+                if rows:
+                    break
+            except Exception:
+                continue
+        
+        if not rows:
+            return {}
+            
+        return {normalize(r[0]): str(r[1]).strip() for r in rows if r and r[0]}
+
+    def get_client_cajera_history(self, connection, client_ids: list = None, fecha_inicio = None, fecha_fin = None, progress_callback=None, usuarios_map=None):
+        """
+        Obtiene el historial de atención por cajera. Granularidad Diaria.
+        
+        Args:
+            usuarios_map: Mapa de código -> nombre de usuarios. Si se proporciona, se usa directamente.
+                         Si es None, se obtiene automáticamente de VAD10 y la sede.
+        """
+        import datetime
+        from collections import defaultdict
+        
+        def normalize_user_id(v):
+            try:
+                s = str(v or "").strip().lstrip('0')
+                return s if s else "0"
+            except: return ""
+
+        # 1. Factores de conversión 
+        factors_dict = self._get_factors_dict_for_range(fecha_inicio.year, fecha_fin.year)
+        
+        # 2. Mapa de Usuarios (Estricto por sede)
+        if usuarios_map is None:
+            # Si no se pasó mapa, intentamos obtenerlo de la conexión actual de la sede (VAD20/VAD10)
+            # pero NO usamos el fallback local para evitar cruce de datos entre sucursales
+            try:
+                usuarios_map = self.get_ma_usuarios_map(connection)
+            except Exception:
+                usuarios_map = {}
+                self._log("No se pudo obtener mapa de usuarios de la sede. Se usarán códigos genéricos.", "WARNING")
+        
+        # 3. Chunking por fechas para progreso
+        delta = fecha_fin - fecha_inicio
+        total_days = delta.days + 1
+        chunk_size = 10 
+        
+        # Agregador local: {(user_code, user_name, yyyy-mm-dd): {'total': 0.0, 'count': 0, 'invoices': []}}
+        aggregated = defaultdict(lambda: {'total': 0.0, 'count': 0, 'invoices': []})
+        
+        cursor = connection.cursor()
+        current_date = fecha_inicio
+        days_processed = 0
+        
+        while current_date <= fecha_fin:
+            chunk_end = min(current_date + datetime.timedelta(days=chunk_size - 1), fecha_fin)
+            
+            # Filtro dinámico de RIFs
+            where_rif = ""
+            params_rif = []
+            if client_ids:
+                placeholders = ','.join(['?' for _ in client_ids])
+                where_rif = f"AND p.C_RIF IN ({placeholders})"
+                params_rif = client_ids
+            
+            query = f"""
+                SELECT 
+                    p.C_USUARIO,
+                    p.F_Fecha,
+                    p.N_Total,
+                    p.C_NUMERO,
+                    p.C_DESC_CLIENTE
+                FROM MA_PAGOS p WITH (NOLOCK)
+                WHERE p.F_Fecha BETWEEN CONVERT(DATETIME, ?, 120) AND CONVERT(DATETIME, ?, 120)
+                {where_rif}
+            """
+            
+            f_start = current_date.strftime('%Y-%m-%d 00:00:00')
+            f_end = chunk_end.strftime('%Y-%m-%d 23:59:59')
+            params = [f_start, f_end] + params_rif
+            
+            try:
+                cursor.execute(query, params)
+                rows = cursor.fetchall()
+                
+                for r in rows:
+                    user_code_raw, fecha, total_bs, invoice_num, client_name = r
+                    user_code_norm = normalize_user_id(user_code_raw)
+                    user_name = usuarios_map.get(user_code_norm, f"Usuario ({user_code_raw})")
+                    
+                    total_bs = float(total_bs) if total_bs else 0.0
+                    
+                    # Factor de cambio
+                    key = (fecha.year, fecha.month, fecha.day)
+                    factor = factors_dict.get(key)
+                    if factor is None:
+                        for d in range(15):
+                             prev = fecha - datetime.timedelta(days=d)
+                             k = (prev.year, prev.month, prev.day)
+                             if k in factors_dict:
+                                 factor = factors_dict[k]
+                                 break
+                        if not factor: factor = 1.0
+                    
+                    total_usd = total_bs / factor
+                    ymd = fecha.strftime('%Y-%m-%d')
+                    
+                    agg_key = (user_code_norm, user_name, ymd)
+                    aggregated[agg_key]['total'] += total_usd
+                    aggregated[agg_key]['count'] += 1
+                    aggregated[agg_key]['invoices'].append(f"{invoice_num}: {client_name} (${total_usd:,.2f})")
+                    
+            except Exception:
+                pass
+
+            days_in_chunk = (chunk_end - current_date).days + 1
+            days_processed += days_in_chunk
+            if progress_callback:
+                progress_callback(days_processed, total_days)
+                
+            current_date = chunk_end + datetime.timedelta(days=1)
+            
+        cursor.close()
+        
+        # Formatear salida: [(user_code, user_name, year_month_day, total_usd, invoices_summary), ...]
+        result = []
+        for (u_code, u_name, ymd), data in aggregated.items():
+            total = data['total']
+            count = data['count']
+            invoices = data['invoices']
+            
+            if len(invoices) > 5:
+                inv_summary = f"Total facturado: ${total:,.2f} en {count} tickets.\n" + \
+                             "\n".join(invoices[:5]) + f"\n... y {len(invoices)-5} facturas más"
+            else:
+                inv_summary = f"Total facturado: ${total:,.2f} en {count} tickets.\n" + "\n".join(invoices)
+                
+            result.append((u_code, u_name, ymd, total, inv_summary))
             
         result.sort(key=lambda x: (x[0], x[2]))
         return result

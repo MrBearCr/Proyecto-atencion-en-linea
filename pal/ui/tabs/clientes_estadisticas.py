@@ -7,10 +7,11 @@ from tkinter import ttk, messagebox
 from datetime import datetime, timedelta
 from tkcalendar import DateEntry
 import matplotlib.pyplot as plt
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
 import matplotlib.dates as mdates
 from collections import defaultdict
+import threading
 
 class ClientesEstadisticasTab(ttk.Frame):
     def __init__(self, parent, controller):
@@ -110,9 +111,43 @@ class ClientesEstadisticasTab(ttk.Frame):
         self.status_label = tk.Label(self.progress_frame, text="", font=("Segoe UI", 9), fg="#6B7280", bg="#FFFFFF")
         self.status_label.pack(side=tk.LEFT, padx=5)
 
+        # Selector de Tipo de Estadística
+        type_frame = ttk.Frame(controls_frame)
+        type_frame.pack(side=tk.LEFT, padx=(0, 20))
+        ttk.Label(type_frame, text="Ver:", font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT, padx=(0, 5))
+        self.tipo_stats_combo = ttk.Combobox(type_frame, state='readonly', width=20, font=("Segoe UI", 10))
+        self.tipo_stats_combo['values'] = ("Compras (USD)", "Atención por Cajera")
+        self.tipo_stats_combo.current(0)
+        self.tipo_stats_combo.pack(side=tk.LEFT)
+
+        # Botón Agrandar
+        self.btn_agrandar = tk.Button(
+            controls_frame, text="🗗 AGRANDAR", command=self.abrir_ventana_agrandada,
+            bg="#F3F4F6", fg="#4B5563", font=("Segoe UI", 9, "bold"), relief="flat", padx=15, pady=8, cursor="hand2"
+        )
+        self.btn_agrandar.pack(side=tk.RIGHT, padx=5, pady=(10, 0))
+        self.btn_agrandar.bind("<Enter>", lambda e: self.btn_agrandar.config(bg="#E5E7EB"))
+        self.btn_agrandar.bind("<Leave>", lambda e: self.btn_agrandar.config(bg="#F3F4F6"))
+
+        # Fila 2 de controles: Métrica y Estilo
+        row_ext = ttk.Frame(controls_frame)
+        row_ext.pack(fill=tk.X, pady=(10, 0))
+
+        ttk.Label(row_ext, text="Métrica:", font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT, padx=(0, 5))
+        self.metrica_combo = ttk.Combobox(row_ext, state='readonly', width=18, font=("Segoe UI", 10))
+        self.metrica_combo['values'] = ("Monto (USD)", "Conteo (Facturas)")
+        self.metrica_combo.current(0)
+        self.metrica_combo.pack(side=tk.LEFT, padx=(0, 20))
+
+        ttk.Label(row_ext, text="Estilo:", font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT, padx=(0, 5))
+        self.estilo_combo = ttk.Combobox(row_ext, state='readonly', width=15, font=("Segoe UI", 10))
+        self.estilo_combo['values'] = ("Líneas", "Barras", "Pastel")
+        self.estilo_combo.current(0)
+        self.estilo_combo.pack(side=tk.LEFT)
+
         # Botón generar moderno
         self.btn_generar = tk.Button(
-            controls_frame, text="📈 GENERAR GRÁFICO EN USD", command=self.generar_grafico,
+            controls_frame, text="GENERAR GRÁFICO", command=self.generar_grafico,
             bg="#004C97", fg="white", font=("Segoe UI", 9, "bold"), relief="flat", padx=25, pady=8, cursor="hand2"
         )
         self.btn_generar.pack(side=tk.RIGHT, pady=(10, 0))
@@ -150,13 +185,25 @@ class ClientesEstadisticasTab(ttk.Frame):
     def generar_grafico(self):
         """Inicia el proceso de generación del gráfico en segundo plano"""
         ids_raw = self.ids_entry.get().strip()
-        if not ids_raw:
+        tipo_stats = self.tipo_stats_combo.get()
+        
+        # El RIF solo es obligatorio para estadísticas de clientes
+        if not ids_raw and tipo_stats != "Atención por Cajera":
             messagebox.showwarning("Faltan Datos", "Debe ingresar al menos un RIF de cliente.")
             return
 
         client_ids = [rif.strip() for rif in ids_raw.split(',') if rif.strip()]
         fecha_inicio = self.fecha_inicio_entry.get_date()
         fecha_fin = self.fecha_fin_entry.get_date()
+        
+        metrica = self.metrica_combo.get()
+        estilo = self.estilo_combo.get()
+        
+        # Limpiar gráfico anterior y datos previos
+        for widget in self.chart_frame.winfo_children():
+            widget.destroy()
+        if hasattr(self, 'last_chart_data'):
+            del self.last_chart_data
         
         # Deshabilitar interfaz
         self.btn_generar.config(state=tk.DISABLED)
@@ -165,15 +212,14 @@ class ClientesEstadisticasTab(ttk.Frame):
         self.progress_bar.start()
         
         # Ejecutar en hilo
-        import threading
         thread = threading.Thread(
             target=self._background_generar_grafico,
-            args=(client_ids, fecha_inicio, fecha_fin),
+            args=(client_ids, fecha_inicio, fecha_fin, tipo_stats, metrica, estilo),
             daemon=True
         )
         thread.start()
 
-    def _background_generar_grafico(self, client_ids, fecha_inicio, fecha_fin):
+    def _background_generar_grafico(self, client_ids, fecha_inicio, fecha_fin, tipo_stats="Compras (USD)", metrica="Monto (USD)", estilo="Líneas"):
         """Procesamiento en segundo plano"""
         try:
             # Seleccionar sede y obtener conexión
@@ -194,19 +240,48 @@ class ClientesEstadisticasTab(ttk.Frame):
                     self.after(0, lambda: self.progress_bar.config(value=percent))
                     self.after(0, lambda: self.status_label.config(text=f"Procesando: {int(percent)}%"))
 
-            # Obtener datos
-            data = self.controller.db_manager.get_client_purchase_history(
-                conn_sede, client_ids, fecha_inicio, fecha_fin, progress_callback=update_progress
-            )
+            # Obtener datos según el tipo
+            if tipo_stats == "Atención por Cajera":
+                # Conectar a VAD10 de la misma sede para obtener usuarios/cajeras (Estricto)
+                conn_vad10 = None
+                usuarios_map = {} # Iniciar vacío para evitar fallbacks globales
+                
+                try:
+                    conn_vad10 = self.controller.db_manager.connect_to_vad10_sede(sede_info)
+                    usuarios_map = self.controller.db_manager.get_ma_usuarios_map(conn_vad10)
+                    self.controller.log(f"Mapa de usuarios obtenido exitosamente de VAD10 de {selected_sede}", "SUCCESS")
+                except Exception as e:
+                    self.controller.log(f"No se pudo conectar a VAD10 de la sede ({selected_sede}). Buscando en VAD20...", "WARNING")
+                    # Fallback a la misma conexión VAD20 de la sede (por si acaso)
+                    try:
+                        usuarios_map = self.controller.db_manager.get_ma_usuarios_map(conn_sede)
+                    except:
+                        self.controller.log(f"Tampoco se pudo obtener usuarios de VAD20 de {selected_sede}.", "ERROR")
+                finally:
+                    if conn_vad10:
+                        try:
+                            conn_vad10.close()
+                        except Exception:
+                            pass
+                
+                data = self.controller.db_manager.get_client_cajera_history(
+                    conn_sede, client_ids, fecha_inicio, fecha_fin, progress_callback=update_progress,
+                    usuarios_map=usuarios_map
+                )
+            else:
+                data = self.controller.db_manager.get_client_purchase_history(
+                    conn_sede, client_ids, fecha_inicio, fecha_fin, progress_callback=update_progress
+                )
+            
             conn_sede.close()
             
             # Actualizar UI con el resultado
-            self.after(0, lambda: self._on_data_loaded(data))
+            self.after(0, lambda: self._on_data_loaded(data, tipo_stats, metrica, estilo))
             
         except Exception as e:
             self.after(0, lambda: self._on_load_error(str(e)))
 
-    def _on_data_loaded(self, rows):
+    def _on_data_loaded(self, rows, tipo_stats, metrica, estilo):
         """Maneja la carga exitosa de datos"""
         self.btn_generar.config(state=tk.NORMAL)
         self.progress_bar.stop()
@@ -214,10 +289,11 @@ class ClientesEstadisticasTab(ttk.Frame):
         self.status_label.config(text="✓ Completado", fg="#10B981")
         
         if not rows:
-            messagebox.showinfo("Sin Datos", "No se encontraron compras en el período seleccionado.")
+            messagebox.showinfo("Sin Datos", "No se encontraron datos en el período seleccionado.")
             return
             
-        self._mostrar_grafico(rows)
+        self.last_chart_data = (rows, tipo_stats, metrica, estilo)
+        self._mostrar_grafico(rows, tipo_stats, metrica, estilo)
 
     def _on_load_error(self, message):
         """Maneja errores durante la carga"""
@@ -227,113 +303,195 @@ class ClientesEstadisticasTab(ttk.Frame):
         self.status_label.config(text="⚠ Error", fg="#EF4444")
         messagebox.showerror("Error", f"Fallo al cargar estadísticas: {message}")
 
-    def _mostrar_grafico(self, rows):
-        """Muestra el gráfico de líneas con los datos de compras"""
-        # Limpiar frame anterior
-        for widget in self.chart_frame.winfo_children():
-            widget.destroy()
+    def _mostrar_grafico(self, rows, tipo_stats, metrica="Monto (USD)", estilo="Líneas", target_frame=None):
+        """Muestra el gráfico configurado con los datos cargados"""
+        display_frame = target_frame if target_frame else self.chart_frame
         
-        # Organizar datos por cliente
-        clients_data = defaultdict(lambda: {'name': '', 'months': [], 'totals': [], 'invoices': []})
+        for widget in display_frame.winfo_children():
+            widget.destroy()
+            
+        # Crear contenedor dividido (Gráfico Izq, Resumen Der)
+        main_container = tk.PanedWindow(display_frame, orient=tk.HORIZONTAL, bg="white", sashwidth=4)
+        main_container.pack(fill=tk.BOTH, expand=True)
+        
+        left_panel = tk.Frame(main_container, bg="white")
+        main_container.add(left_panel, stretch="always")
+        
+        right_panel = tk.Frame(main_container, bg="#F9FAFB", width=280, highlightthickness=1, highlightbackground="#E5E7EB")
+        main_container.add(right_panel, stretch="never")
+        
+        use_count = (metrica == "Conteo (Facturas)")
+        
+        # Organizar datos por entidad
+        entities_data = defaultdict(lambda: {'name': '', 'dates': [], 'values': [], 'invoices': []})
+        totals_metadata = defaultdict(float) 
+        
         for row in rows:
-            # row: (client_id, client_name, year_month, total_usd, invoices_summary)
-            client_id, client_name, year_month, total_usd, invoices_summary = row
-            clients_data[client_id]['name'] = client_name
-            clients_data[client_id]['months'].append(year_month)
-            clients_data[client_id]['totals'].append(float(total_usd) if total_usd else 0.0)
-            clients_data[client_id]['invoices'].append(invoices_summary)
+            # row: (id, name, date_str, value, summary)
+            entity_id, entity_name, date_str, val_raw, invoices_summary = row
+            
+            val = float(val_raw)
+            if use_count:
+                try:
+                    import re
+                    match = re.search(r'en (\d+) tickets', invoices_summary)
+                    val = float(match.group(1)) if match else 1.0
+                except: val = 1.0
+            
+            entities_data[entity_id]['name'] = entity_name
+            entities_data[entity_id]['dates'].append(datetime.strptime(date_str, '%Y-%m-%d'))
+            entities_data[entity_id]['values'].append(val)
+            entities_data[entity_id]['invoices'].append(invoices_summary)
+            totals_metadata[entity_id] += val
+
+        # --- Lógica de Top 10 + Otros ---
+        sorted_ids = sorted(totals_metadata.keys(), key=lambda k: totals_metadata[k], reverse=True)
+        top_ids = sorted_ids[:10]
+        others_ids = sorted_ids[10:]
+        
+        final_entities = {}
+        others_breakdown = []
+        
+        for eid in top_ids:
+            final_entities[eid] = entities_data[eid]
+            
+        if others_ids:
+            others_dates_map = defaultdict(float)
+            for eid in others_ids:
+                data = entities_data[eid]
+                others_breakdown.append((data['name'], totals_metadata[eid]))
+                for d, v in zip(data['dates'], data['values']):
+                    others_dates_map[d] += v
+            
+            sorted_others_dates = sorted(others_dates_map.keys())
+            final_entities['OTROS_ID'] = {
+                'name': 'Otros (Click para detalle)',
+                'dates': sorted_others_dates,
+                'values': [others_dates_map[d] for d in sorted_others_dates],
+                'invoices': [f"Agrupación de {len(others_ids)} elementos."] * len(sorted_others_dates)
+            }
 
         # Crear figura
-        fig = Figure(figsize=(10, 6), dpi=100)
+        fig = Figure(figsize=(8, 6), dpi=100)
         ax = fig.add_subplot(111)
+        colors = ['#004C97', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899', '#06B6D4', '#F97316', 
+                  '#6366F1', '#14B8A6', '#FACC15']
         
-        # Plotear cada cliente
-        colors = ['#004C97', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899']
-        lines = []
-        for idx, (client_id, data) in enumerate(clients_data.items()):
-            # Convertir year-month a fechas
-            dates = []
-            for ym in data['months']:
-                try:
-                    dates.append(datetime.strptime(ym + '-01', '%Y-%m-%d'))
-                except:
-                    continue
+        if estilo == "Pastel":
+            labels = [final_entities[eid]['name'] for eid in final_entities]
+            values = [sum(final_entities[eid]['values']) for eid in final_entities]
+            ax.pie(values, labels=labels, autopct='%1.1f%%', startangle=140, colors=colors[:len(labels)], picker=True)
+            ax.axis('equal')
             
-            totals = data['totals']
-            if not dates: continue
+        elif estilo == "Barras":
+            all_dates = sorted(list(set(d for eid in final_entities for d in final_entities[eid]['dates'])))
+            x = range(len(all_dates))
+            width = 0.8 / max(1, len(final_entities))
             
-            color = colors[idx % len(colors)]
-            label = f"{data['name']} ({client_id})"
-            line, = ax.plot(dates, totals, marker='o', linestyle='-', linewidth=2.5, 
-                   markersize=8, label=label, color=color, picker=True, pickradius=5)
-            lines.append((line, data))
-        
-        # --- Lógica de Interactividad (Tooltip) ---
-        annot = ax.annotate("", xy=(0,0), xytext=(20,20), textcoords="offset points",
-                            bbox=dict(boxstyle="round", fc="white", ec="#D1D5DB", alpha=0.9),
-                            arrowprops=dict(arrowstyle="->", connectionstyle="angle,angleA=0,angleB=90,rad=10"))
-        annot.set_visible(False)
+            for idx, (eid, data) in enumerate(final_entities.items()):
+                color = colors[idx % len(colors)]
+                m_vals = [0.0] * len(all_dates)
+                for d, v in zip(data['dates'], data['values']):
+                    if d in all_dates: m_vals[all_dates.index(d)] = v
+                
+                offset = (idx - (len(final_entities)-1)/2) * width
+                ax.bar([p + offset for p in x], m_vals, width, label=data['name'], color=color, picker=True)
+            
+            ax.set_xticks(x)
+            ax.set_xticklabels([d.strftime('%d/%m') for d in all_dates], rotation=45, fontsize=8)
+            
+            annot = ax.annotate("", xy=(0,0), xytext=(10,10), textcoords="offset points", bbox=dict(boxstyle="round", fc="white", ec="#D1D5DB", alpha=0.9), arrowprops=dict(arrowstyle="->"))
+            annot.set_visible(False)
+            def hover_bar(event):
+                if event.inaxes == ax:
+                    for patch in ax.patches:
+                        cont, ind = patch.contains(event)
+                        if cont:
+                            annot.xy = (patch.get_x() + patch.get_width()/2, patch.get_height())
+                            annot.set_text(f"{patch.get_label()}\nValor: {patch.get_height():,.2f}")
+                            annot.set_visible(True)
+                            fig.canvas.draw_idle()
+                            return
+                    if annot.get_visible():
+                        annot.set_visible(False); fig.canvas.draw_idle()
+            fig.canvas.mpl_connect("motion_notify_event", hover_bar)
+            
+        else: # Líneas
+            lines = []
+            for idx, (eid, data) in enumerate(final_entities.items()):
+                color = colors[idx % len(colors)]
+                line, = ax.plot(data['dates'], data['values'], marker='o', linestyle='-', linewidth=2.0, markersize=6, label=data['name'], color=color, picker=True, pickradius=5)
+                lines.append((line, data))
 
-        def update_annot(line, ind, data):
-            # ind['ind'] es una lista de índices de los puntos cercanos
-            idx = ind["ind"][0]
-            x, y = line.get_data()
-            annot.xy = (x[idx], y[idx])
-            
-            # Obtener info del punto
-            month_str = x[idx].strftime('%B %Y')
-            total_val = y[idx]
-            invoices_txt = data['invoices'][idx]
-            client_name = data['name']
-            
-            text = f"Cliente: {client_name}\nMes: {month_str}\nTotal: ${total_val:,.2f}\n------------------\n{invoices_txt}"
-            annot.set_text(text)
-            annot.get_bbox_patch().set_alpha(0.9)
+            ax.xaxis.set_major_formatter(mdates.DateFormatter('%d/%m'))
+            ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+            fig.autofmt_xdate()
 
-        def hover(event):
-            vis = annot.get_visible()
-            if event.inaxes == ax:
-                found = False
-                for line, data in lines:
-                    cont, ind = line.contains(event)
-                    if cont:
-                        update_annot(line, ind, data)
-                        annot.set_visible(True)
-                        fig.canvas.draw_idle()
-                        found = True
-                        break
-                if not found and vis:
-                    annot.set_visible(False)
-                    fig.canvas.draw_idle()
+            annot = ax.annotate("", xy=(0,0), xytext=(20,20), textcoords="offset points", bbox=dict(boxstyle="round", fc="white", ec="#D1D5DB", alpha=0.9), arrowprops=dict(arrowstyle="->"))
+            annot.set_visible(False)
+            def update_annot_line(line, ind, data):
+                idx = ind["ind"][0]
+                x_val_line, y_val_line = line.get_data()
+                vx = x_val_line[idx]
+                dt = mdates.num2date(vx) if isinstance(vx, (int, float)) else vx
+                annot.xy = (vx, y_val_line[idx])
+                annot.set_text(f"{data['name']}\nFecha: {dt.strftime('%d/%m/%Y')}\nValor: {y_val_line[idx]:,.2f}")
 
-        fig.canvas.mpl_connect("motion_notify_event", hover)
+            def hover_line(event):
+                if event.inaxes == ax:
+                    found = False
+                    for line, data in lines:
+                        cont, ind = line.contains(event)
+                        if cont:
+                            update_annot_line(line, ind, data); annot.set_visible(True); fig.canvas.draw_idle(); found = True; break
+                    if not found and annot.get_visible(): annot.set_visible(False); fig.canvas.draw_idle()
+            fig.canvas.mpl_connect("motion_notify_event", hover_line)
+
+        def on_pick(event):
+            label = event.artist.get_label() if hasattr(event.artist, 'get_label') else ""
+            if not label and estilo == "Pastel":
+                try: label = [final_entities[eid]['name'] for eid in final_entities][event.ind[0]]
+                except: return
+            if "Otros" in label: self._mostrar_detalle_otros(others_breakdown, metrica)
+        fig.canvas.mpl_connect('pick_event', on_pick)
+
+        ax.set_title(f"{tipo_stats} - {metrica}", fontsize=12, fontweight='bold')
+        ax.grid(True, linestyle='--', alpha=0.6)
+        if len(final_entities) <= 15: ax.legend(loc='upper left', fontsize=8)
         
-        # Configurar ejes
-        ax.set_xlabel('Mes', fontsize=10, color='#6B7280', labelpad=10)
-        ax.set_ylabel('Total Compras (USD)', fontsize=10, color='#6B7280', labelpad=10)
-        ax.set_title('Tendencia de Compras Mensuales (USD)', fontsize=14, fontweight='bold', color='#111827', pad=20)
-        
-        # Rejilla sutil
-        ax.grid(True, linestyle='--', alpha=0.9, color='#F3F4F6')
-        ax.set_facecolor('#F9FAFB')
-        fig.patch.set_facecolor('#FFFFFF')
-        
-        # Leyenda moderna
-        if clients_data:
-            ax.legend(loc='upper left', frameon=True, facecolor='white', edgecolor='#E5E7EB', fontsize=9)
-        
-        # Formato de fechas en eje X
-        ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%y'))
-        ax.xaxis.set_major_locator(mdates.AutoDateLocator())
-        fig.autofmt_xdate()
-        
-        # Ajustar margen
         fig.tight_layout()
-        
-        # Integrar en tkinter
-        canvas = FigureCanvasTkAgg(fig, master=self.chart_frame)
+        canvas = FigureCanvasTkAgg(fig, master=left_panel)
         canvas.draw()
+        if target_frame: NavigationToolbar2Tk(canvas, left_panel).update()
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+        # Resumen Derecha
+        ttk.Label(right_panel, text="Resumen del Período", font=("Segoe UI", 10, "bold"), background="#F9FAFB").pack(pady=10)
+        summary_tree = ttk.Treeview(right_panel, columns=("Nombre", "Total"), show="headings", height=20)
+        summary_tree.heading("Nombre", text="Nombre"); summary_tree.heading("Total", text=metrica)
+        summary_tree.column("Nombre", width=150); summary_tree.column("Total", width=90, anchor=tk.E)
+        summary_tree.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        summ_data = sorted([(d['name'], sum(d['values'])) for d in entities_data.values()], key=lambda x: x[1], reverse=True)
+        for n, v in summ_data:
+            summary_tree.insert("", tk.END, values=(n, f"${v:,.2f}" if "Monto" in metrica else int(v)))
+
+    def abrir_ventana_agrandada(self):
+        if not hasattr(self, 'last_chart_data'): return
+        rows, tipo_stats, metrica, estilo = self.last_chart_data
+        top = tk.Toplevel(self); top.title("Gráfico Expandido"); top.state('zoomed')
+        container = tk.Frame(top, bg="white"); container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        self._mostrar_grafico(rows, tipo_stats, metrica, estilo, target_frame=container)
+
+    def _mostrar_detalle_otros(self, breakdown, metrica):
+        top = tk.Toplevel(self); top.title("Detalle de Otros"); top.geometry("400x500")
+        main = ttk.Frame(top, padding=20); main.pack(fill=tk.BOTH, expand=True)
+        tree = ttk.Treeview(main, columns=("nombre", "valor"), show="headings")
+        tree.heading("nombre", text="Nombre"); tree.heading("valor", text=metrica)
+        tree.pack(fill=tk.BOTH, expand=True)
+        for n, v in sorted(breakdown, key=lambda x: x[1], reverse=True):
+            tree.insert("", tk.END, values=(n, f"${v:,.2f}" if "Monto" in metrica else int(v)))
+        ttk.Button(main, text="Cerrar", command=top.destroy).pack(pady=10)
 
     def cargar_sedes(self):
         """Carga las sedes disponibles en el combobox"""

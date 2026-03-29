@@ -233,6 +233,7 @@ class AbastecimientoTab(ttk.Frame):
         self.tree.tag_configure('ajustado', background='#fff9c4')
         self.tree.tag_configure("aumentado", background="#ffcc80") # Naranja
         self.tree.tag_configure("disminuido", background="#81d4fa") # Azul
+        self.tree.tag_configure("odc", background="#c8e6c9") # Verde claro para ODC
         
         # Estilo corregido: Solo definimos el color de SELECCIÓN. 
         # Al NO definir '!selected', permitimos que los Tags pinten el fondo de la fila.
@@ -663,6 +664,7 @@ class AbastecimientoTab(ttk.Frame):
             if s.get("es_rojo"): tags.append("rojo")
             if s.get("sucursal_origen_sugerida") == "SIN STOCK CDT": tags.append("sin_stock")
             if s.get("ajustado"): tags.append("ajustado")
+            if s.get("tiene_odc_activa"): tags.append("odc")
             
             # Comparar con la cantidad original decidida por el sistema
             cant_sug = float(s.get("cantidad_sugerida", 0))
@@ -689,6 +691,14 @@ class AbastecimientoTab(ttk.Frame):
             else:
                 origen_display = origen_base
 
+            # Formatear columna autorización con advertencia ODC
+            if s.get("tiene_odc_activa"):
+                aut_display = "ODC Activa"
+            elif s["requiere_autorizacion"]:
+                aut_display = "Sí"
+            else:
+                aut_display = "No"
+
             self.tree.insert("", "end", values=(
                 sel_char,
                 cod_display,
@@ -697,7 +707,7 @@ class AbastecimientoTab(ttk.Frame):
                 origen_display,
                 s["cantidad_sugerida"],
                 s["stock_actual"],
-                "Sí" if s["requiere_autorizacion"] else "No"
+                aut_display
             ), tags=tags)
 
     def on_exportar(self):
@@ -1687,6 +1697,29 @@ class AbastecimientoTab(ttk.Frame):
             self.tree.selection_set(item_id)
             menu = tk.Menu(self, tearoff=0)
             menu.add_command(label="Cambiar monto a transferir", command=self._cambiar_monto_abastecimiento)
+            
+            # Verificar si el item seleccionado tiene ODC activa
+            values = list(self.tree.item(item_id, "values"))
+            aut_col = str(values[7]) if len(values) > 7 else ""
+            
+            if aut_col == "ODC Activa":
+                menu.add_separator()
+                # Verificar permisos del usuario actual
+                user_id = self.app.current_user['id'] if self.app.current_user else None
+                puede_autorizar = False
+                if user_id:
+                    try:
+                        from pal.core.permissions import PermissionsManager
+                        perms_mgr = PermissionsManager(self.app.db_manager)
+                        puede_autorizar = perms_mgr.tiene_permiso(user_id, "LOGISTICA", "autorizar")
+                    except:
+                        pass
+                
+                if puede_autorizar:
+                    menu.add_command(label=" Forzar Transferencia (ODC)", command=self.on_forzar_transferencia_odc)
+                else:
+                    menu.add_command(label=" Solicitar Autorización (ODC)", command=self.on_solicitar_autorizacion_odc)
+            
             menu.tk_popup(event.x_root, event.y_root)
 
     def _cambiar_monto_abastecimiento(self):
@@ -1740,4 +1773,145 @@ class AbastecimientoTab(ttk.Frame):
             self._aplicar_filtro_local()
         else:
             logger.info("Ajuste de monto cancelado por el usuario.")
+
+    def _get_selected_sugerencia_odc(self):
+        """Obtiene la sugerencia seleccionada del treeview que tiene ODC activa."""
+        selected = self.tree.selection()
+        if not selected:
+            messagebox.showwarning("Atención", "Seleccione un producto con ODC activa.")
+            return None
+
+        item_data = self.tree.item(selected[0])
+        values = item_data['values']
+        aut_col = str(values[7]) if len(values) > 7 else ""
+
+        if aut_col != "ODC Activa":
+            messagebox.showwarning("Atención", "El producto seleccionado no tiene ODC activa.")
+            return None
+
+        prod_codigo = str(values[1]).strip()
+        dest_sede = str(values[3]).strip()
+
+        # Buscar en last_sugerencias
+        p_norm = prod_codigo.lstrip('0') if prod_codigo.isdigit() else prod_codigo
+        if not p_norm:
+            p_norm = "0"
+
+        for s in self.last_sugerencias:
+            s_prod = str(s.get("producto_codigo", "")).strip()
+            s_dest = str(s.get("sucursal_destino", "")).strip()
+            s_prod_norm = s_prod.lstrip('0') if s_prod.isdigit() else s_prod
+            if not s_prod_norm:
+                s_prod_norm = "0"
+
+            if s_prod_norm == p_norm and s_dest.upper() == dest_sede.upper():
+                return s
+
+        return None
+
+    def on_solicitar_autorizacion_odc(self):
+        """Crea una solicitud de autorización para transferir producto con ODC activa."""
+        sugerencia = self._get_selected_sugerencia_odc()
+        if not sugerencia:
+            return
+
+        prod_codigo = sugerencia.get("producto_codigo", "")
+        dest_sede = sugerencia.get("sucursal_destino", "")
+        origen = sugerencia.get("sucursal_origen_sugerida", "")
+        cantidad = sugerencia.get("cantidad_sugerida", 0)
+        stock_actual = sugerencia.get("stock_actual", 0)
+
+        # Diálogo para ingresar motivo
+        modal = tk.Toplevel(self)
+        modal.title("Solicitar Autorización - ODC Activa")
+        modal.geometry("450x350")
+        modal.transient(self)
+        modal.grab_set()
+
+        ttk.Label(modal, text="Solicitar Autorización de Transferencia", font=("Helvetica", 12, "bold")).pack(pady=10)
+        ttk.Label(modal, text=f"Producto: {prod_codigo}", font=("Helvetica", 10)).pack(pady=2)
+        ttk.Label(modal, text=f"Destino: {dest_sede}", font=("Helvetica", 10)).pack(pady=2)
+        ttk.Label(modal, text=f"Cantidad: {cantidad}", font=("Helvetica", 10)).pack(pady=2)
+        ttk.Label(modal, text="\nYa existe una ODC activa para este producto.\nExplique por qué requiere la transferencia:",
+                  foreground="#e65100", wraplength=400).pack(pady=5)
+
+        ttk.Label(modal, text="Motivo:").pack(pady=(10, 2))
+        txt_motivo = tk.Text(modal, width=50, height=4)
+        txt_motivo.pack(padx=20, pady=5)
+
+        def confirmar():
+            motivo = txt_motivo.get("1.0", "end-1c").strip()
+            if not motivo:
+                messagebox.showwarning("Atención", "Debe ingresar un motivo.", parent=modal)
+                return
+
+            try:
+                from pal.services.abastecimiento import AbastecimientoService
+                service = AbastecimientoService(self.app.db_manager)
+                user_id = self.app.current_user['id'] if self.app.current_user else None
+
+                result = service.crear_solicitud_autorizacion_odc(
+                    prod_codigo, dest_sede, origen, cantidad, stock_actual, motivo, user_id
+                )
+
+                if result.get("success"):
+                    messagebox.showinfo("Éxito", "Solicitud de autorización creada correctamente.\nUn usuario autorizado debe aprobarla.", parent=modal)
+                    modal.destroy()
+                    # Remover de la lista actual
+                    self.last_sugerencias = [s for s in self.last_sugerencias if s is not sugerencia]
+                    self._aplicar_filtro_local()
+                else:
+                    messagebox.showerror("Error", result.get("error", "No se pudo crear la solicitud."), parent=modal)
+            except Exception as e:
+                logger.error(f"Error creando solicitud ODC: {e}")
+                messagebox.showerror("Error", f"Error inesperado: {e}", parent=modal)
+
+        btn_frame = ttk.Frame(modal, padding=10)
+        btn_frame.pack(side="bottom", fill="x")
+        ttk.Button(btn_frame, text="Cancelar", command=modal.destroy).pack(side="right", padx=5)
+        ttk.Button(btn_frame, text="Enviar Solicitud", command=confirmar).pack(side="right", padx=5)
+
+    def on_forzar_transferencia_odc(self):
+        """Permite forzar la transferencia cuando el usuario tiene permiso de autorización y hay ODC activa."""
+        sugerencia = self._get_selected_sugerencia_odc()
+        if not sugerencia:
+            return
+
+        prod_codigo = sugerencia.get("producto_codigo", "")
+        dest_sede = sugerencia.get("sucursal_destino", "")
+        cantidad = sugerencia.get("cantidad_sugerida", 0)
+
+        # Mostrar info de ODC
+        odc_info = sugerencia.get("odc_info", [])
+        odc_detalle = ""
+        if odc_info:
+            for o in odc_info[:3]:
+                odc_detalle += f"  - {o.get('documento', 'N/A')}: {o.get('cantidad', 0)} uds\n"
+
+        msg = (f"Producto: {prod_codigo}\n"
+               f"Destino: {dest_sede}\n"
+               f"Cantidad a transferir: {cantidad}\n\n"
+               f"ODC activas encontradas:\n{odc_detalle}\n"
+               f"¿Desea forzar la transferencia a pesar de la ODC?")
+
+        if not messagebox.askyesno("Forzar Transferencia - ODC Activa", msg):
+            return
+
+        try:
+            # Marcar la sugerencia como autorizada y cambiar tipo a 'odc_forzada'
+            sugerencia["tiene_odc_activa"] = True
+            sugerencia["requiere_autorizacion"] = 0
+            sugerencia["_odc_forzada"] = True
+
+            # Quitar el tag ODC visualmente (ya fue autorizada)
+            sugerencia["_seleccionado"] = True
+
+            self.app.log(f"Transferencia forzada para {prod_codigo} -> {dest_sede} (ODC activa)", "WARNING")
+            messagebox.showinfo("Transferencia Forzada",
+                              f"La transferencia de {prod_codigo} ha sido marcada como forzada.\n"
+                              f"Procese las sugerencias para completar la operación.")
+            self._aplicar_filtro_local()
+        except Exception as e:
+            logger.error(f"Error forzando transferencia ODC: {e}")
+            messagebox.showerror("Error", f"Error inesperado: {e}")
 

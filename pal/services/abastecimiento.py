@@ -81,6 +81,59 @@ class AbastecimientoService:
         res_rojos = self.db_manager.fetch_data(sql_rojos, (sede_destino,))
         return {str(r[0]).strip().lstrip('0') or "0" for r in res_rojos}
 
+    def _cargar_odc_activas(self):
+        """
+        Carga todas las ODC activas (status='DPE') desde MA_ODC/TR_ODC.
+        Retorna dict agrupado por (localidad_destino, codigo_producto_normalizado).
+        Formato: {(localidad, cod_producto): [{"documento": ..., "cantidad": ..., "fecha": ...}]}
+        """
+        try:
+            sql = """
+                SELECT m.c_DOCUMENTO, t.c_CODARTICULO, t.n_cantidad, m.d_fecha, m.c_CODLOCALIDAD
+                FROM MA_ODC m WITH (NOLOCK)
+                INNER JOIN TR_ODC t WITH (NOLOCK) ON m.c_DOCUMENTO = t.c_DOCUMENTO
+                WHERE m.c_status = 'DPE'
+                ORDER BY m.d_fecha DESC
+            """
+            rows = self.db_manager.fetch_data(sql)
+            if not rows:
+                logger.info("No se encontraron ODC activas.")
+                return {}
+
+            odc_dict = {}
+            for doc, cod_art, qty, fecha, localidad in rows:
+                cod_norm = str(cod_art).strip().lstrip('0') or "0"
+                loc_norm = str(localidad).strip().upper() if localidad else ""
+                key = (loc_norm, cod_norm)
+                if key not in odc_dict:
+                    odc_dict[key] = []
+                odc_dict[key].append({
+                    "documento": str(doc).strip(),
+                    "cantidad": float(qty or 0),
+                    "fecha": fecha
+                })
+
+            logger.info(f"ODC activas cargadas: {len(odc_dict)} combinaciones (localidad, producto)")
+            return odc_dict
+        except Exception as e:
+            logger.warning(f"Error cargando ODC activas (se continúa sin ODC): {e}")
+            return {}
+
+    def _verificar_odc_producto(self, odc_dict, codigo_producto, codigo_localidad):
+        """
+        Verifica si un producto tiene ODC activa para una localidad destino.
+        codigo_localidad: código de localidad (ej: '01', '03', '04') desde la config de sede.
+        Retorna (tiene_odc: bool, info_odc: list|None)
+        """
+        if not codigo_localidad:
+            return False, None
+        cod_norm = str(codigo_producto).strip().lstrip('0') or "0"
+        loc_norm = str(codigo_localidad).strip().upper()
+        info = odc_dict.get((loc_norm, cod_norm))
+        if info:
+            return True, info
+        return False, None
+
     def get_compromisos_activos(self, sede_destino=None):
         """
         Obtiene los compromisos de inventario activos deducibles de futuras sugerencias.
@@ -211,6 +264,10 @@ class AbastecimientoService:
             # 2. Cargar datos auxiliares (Bulk)
             codigos_analizar = [item[0] for item in stock_sede]
             productos_rojos = self._cargar_lista_roja(sede_destino)
+            odc_dict = self._cargar_odc_activas()
+            # Obtener código de localidad ODC para la sede destino
+            sede_cfg = sedes_config.get(sede_destino, {})
+            cod_localidad_destino = sede_cfg.get("codigo_localidad", "")
             dict_compromisos_full = self.get_compromisos_activos(sede_destino)
             # Adaptamos al formato esperado por el resto de la función (plano por código)
             dict_compromisos = {k: v.get(sede_destino.strip().upper(), 0) for k, v in dict_compromisos_full.items()}
@@ -265,6 +322,9 @@ class AbastecimientoService:
                         cant_mover = min(necesidad_final, int(cant_origen))
 
                     if cant_mover > 0:
+                        # Verificar si existe ODC activa para este producto en la localidad destino
+                        tiene_odc, info_odc = self._verificar_odc_producto(odc_dict, codigo, cod_localidad_destino)
+
                         sugerencias.append({
                             "producto_codigo": codigo, 
                             "producto_descripcion": desc_corta or desc_larga or "SIN DESCRIPCIÓN",
@@ -273,8 +333,10 @@ class AbastecimientoService:
                             "cantidad_sugerida": cant_mover, 
                             "stock_actual": stock_actual,
                             "stock_origen": cant_origen, 
-                            "requiere_autorizacion": 1 if es_rojo or (p_auto > 0 and cant_mover > p_auto) else 0,
+                            "requiere_autorizacion": 1 if es_rojo or tiene_odc or (p_auto > 0 and cant_mover > p_auto) else 0,
                             "es_rojo": es_rojo,
+                            "tiene_odc_activa": tiene_odc,
+                            "odc_info": info_odc,
                             "dias_stock_objetivo": p_dias,
                             "promedio_diario": round(promedio_diario, 4)
                         })
@@ -343,7 +405,10 @@ class AbastecimientoService:
                 
                 if cod_norm not in dict_rojos: dict_rojos[cod_norm] = set()
                 dict_rojos[cod_norm].add(sd_dest)
-                
+
+            # 2a2. Cargar ODC activas para validación global
+            odc_dict = self._cargar_odc_activas()
+
             # 2b. Cargar compromisos actuales desde la nueva tabla centralizada
             dict_compromisos = self.get_compromisos_activos()
             
@@ -519,7 +584,12 @@ class AbastecimientoService:
                     cod_norm = str(codigo).strip().lstrip('0') or "0"
                     rojos_prod = dict_rojos.get(cod_norm, set())
                     es_rojo = (dem["sede"] in rojos_prod) or (None in rojos_prod)
-                    
+
+                    # Verificar si existe ODC activa para este producto en la localidad destino
+                    sede_cfg = sedes_config.get(dem["sede"], {})
+                    cod_localidad = sede_cfg.get("codigo_localidad", "")
+                    tiene_odc, info_odc = self._verificar_odc_producto(odc_dict, codigo, cod_localidad)
+
                     sugerencias_finales.append({
                         "producto_codigo": codigo,
                         "producto_descripcion": descripciones.get(codigo, {}).get("corta", "SIN DESCRIPCIÓN"),
@@ -529,8 +599,10 @@ class AbastecimientoService:
                         "cantidad_sugerida": cantidad_sugerida,
                         "stock_actual": dem["stock_actual"],
                         "stock_origen": stock_cdt_disp,
-                        "requiere_autorizacion": 1 if es_rojo or (umbral_auto > 0 and cantidad_sugerida > umbral_auto) else 0,
+                        "requiere_autorizacion": 1 if es_rojo or tiene_odc or (umbral_auto > 0 and cantidad_sugerida > umbral_auto) else 0,
                         "es_rojo": es_rojo,
+                        "tiene_odc_activa": tiene_odc,
+                        "odc_info": info_odc,
                         "dias_stock_objetivo": dias_obj,
                         "promedio_diario": round(dem["promedio"], 4),
                         "ajustado": total_deficit > stock_cdt_disp
@@ -726,6 +798,53 @@ class AbastecimientoService:
             logger.error(f"Error registrando autorización: {e}")
             return False
 
+    def crear_solicitud_autorizacion_odc(self, producto_codigo, sucursal_destino, sucursal_origen,
+                                          cantidad_sugerida, stock_actual, motivo, usuario_id=None):
+        """
+        Crea una solicitud de autorización para transferir un producto que tiene ODC activa.
+        La solicitud queda en estado 'pendiente' esperando aprobación de un usuario con permiso.
+        """
+        try:
+            # Verificar si ya existe una solicitud pendiente para este producto/destino
+            sql_check = """
+                SELECT id FROM pal_sugerencias_transferencia
+                WHERE producto_codigo = ? AND sucursal_destino = ? 
+                AND tipo_solicitud = 'odc' AND estado = 'pendiente'
+            """
+            existe = self.db_manager.fetch_data(sql_check, (producto_codigo, sucursal_destino))
+            if existe:
+                logger.warning(f"Ya existe solicitud ODC pendiente para {producto_codigo} -> {sucursal_destino}")
+                return {"success": False, "error": "Ya existe una solicitud pendiente para este producto."}
+
+            sql_insert = """
+                INSERT INTO pal_sugerencias_transferencia
+                (producto_codigo, sucursal_destino, sucursal_origen_sugerida, cantidad_sugerida,
+                 cantidad_disponible, stock_actual, tiene_odc_activa, es_producto_rojo,
+                 tipo_solicitud, requiere_autorizacion, fue_autorizada, estado)
+                VALUES (?, ?, ?, ?, ?, ?, 1, 0, 'odc', 1, 0, 'pendiente')
+            """
+            self.db_manager.execute_query(sql_insert, (
+                producto_codigo, sucursal_destino, sucursal_origen,
+                cantidad_sugerida, cantidad_sugerida, stock_actual
+            ))
+
+            # Registrar en auditoría el motivo de la solicitud
+            sql_aud = """
+                INSERT INTO pal_auditoria_autorizaciones
+                (usuario_id, producto_codigo, sucursal_origen, sucursal_destino, cantidad_original, cantidad_autorizada, motivo)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """
+            self.db_manager.execute_query(sql_aud, (
+                usuario_id, producto_codigo, sucursal_origen, sucursal_destino,
+                cantidad_sugerida, cantidad_sugerida, f"SOLICITUD ODC: {motivo}"
+            ))
+
+            logger.info(f"Solicitud ODC creada: {producto_codigo} -> {sucursal_destino}, cant={cantidad_sugerida}")
+            return {"success": True}
+        except Exception as e:
+            logger.error(f"Error creando solicitud ODC: {e}")
+            return {"success": False, "error": str(e)}
+
     def save_sugerencias(self, sugerencias, usuario_id=None):
         """
         Guarda las sugerencias generadas agrupándolas en órdenes de transferencia (Maestros).
@@ -785,7 +904,13 @@ class AbastecimientoService:
                     cant_orig = s.get("_cantidad_original", cant_sug)
                     
                     es_rojo = 1 if s.get("es_rojo", False) else 0
-                    tipo_sol = 'producto_rojo' if es_rojo else 'normal'
+                    tiene_odc = 1 if s.get("tiene_odc_activa", False) else 0
+                    if es_rojo:
+                        tipo_sol = 'producto_rojo'
+                    elif tiene_odc:
+                        tipo_sol = 'odc'
+                    else:
+                        tipo_sol = 'normal'
                     
                     params = (
                         s["producto_codigo"],

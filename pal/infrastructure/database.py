@@ -673,6 +673,17 @@ class DatabaseManager:
         """Crea las tablas pal_ para el módulo de Logística / Abastecimiento si no existen."""
         try:
             sql = """
+            -- Settings globales (Sedes dinámicas, etc)
+            IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'pal_global_settings' AND type = 'U')
+            BEGIN
+                CREATE TABLE pal_global_settings (
+                    setting_key NVARCHAR(50) PRIMARY KEY,
+                    setting_value NVARCHAR(MAX),
+                    description NVARCHAR(255),
+                    last_modified DATETIME DEFAULT GETDATE()
+                );
+            END;
+
             -- Parámetros de abastecimiento (días de stock por categoría)
             IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'pal_parametros_abastecimiento' AND type = 'U')
             BEGIN

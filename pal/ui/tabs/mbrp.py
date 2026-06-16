@@ -46,7 +46,13 @@ def setup_mbrp_tab(app):
     ttk.Label(fecha_frame, text="Sede:").pack(side=tk.LEFT, padx=10)
     app.mbrp_sede_var = tk.StringVar()
     app.mbrp_sede_combo = ttk.Combobox(fecha_frame, textvariable=app.mbrp_sede_var, state='readonly', width=18)
-    app.mbrp_sede_combo['values'] = ["00 - ICH", "0301 - Cabudare", "0401 - Guanare", "0101 - Barinas"]
+    sedes_config = app.config_manager.get_sedes_config()
+    combo_values = ["00 - ICH"]
+    for sede_name, cfg in sedes_config.items():
+        tratables = cfg.get("almacenes_tratables", [])
+        cod = tratables[0] if tratables else cfg.get("codigo_localidad", "XX") + "01"
+        combo_values.append(f"{cod} - {sede_name}")
+    app.mbrp_sede_combo['values'] = combo_values
     app.mbrp_sede_combo.current(0)
     app.mbrp_sede_combo.pack(side=tk.LEFT)
 

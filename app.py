@@ -93,11 +93,7 @@ def save_last_update_check(dt: datetime):
 JERARQUIA_CACHE_FILE = "productos_jerarquia_cache.json"
 FAVORITOS_CACHE_FILE = 'favoritos_cache.json'
 JERARQUIA_CACHE_TTL = timedelta(hours=15)
-LOCATION_GROUPS = {
-    'BARINAS': ['0101', '0108'],
-    'GUANARE': ['0401', '0402'],
-    'CDT': ['0106'],
-}
+
 
 # Mapeo de módulos entre BD (mayúsculas) y flags de la app (minúsculas)
 DB_MODULE_TO_FLAG = {
@@ -1962,6 +1958,7 @@ class DatabaseApp:
                         sede_codigo=tra_sede_cod,
                         fecha_inicio=fecha_ini,
                         fecha_fin=fecha_fin,
+                        config_manager=self.config_manager,
                     )
                     
                     # Notificar éxito en el hilo principal
@@ -2152,6 +2149,7 @@ class DatabaseApp:
                         sede_codigo=self.mbrp_sede_codigo,
                         fecha_inicio=self.mbrp_fecha_inicio,
                         fecha_fin=self.mbrp_fecha_fin,
+                        config_manager=self.config_manager,
                     )
                     
                     # Notificar éxito en el hilo principal
@@ -3276,15 +3274,15 @@ class DatabaseApp:
                 cod = str(cod).strip()
                 desc = str(desc).strip()
                 
-                # Determinar localidad por prefijo
-                if cod.startswith('03'):
-                    localidad = 'Cabudare'
-                elif cod.startswith('01'):
-                    localidad = 'Barinas'
-                elif cod.startswith('04'):
-                    localidad = 'Guanare'
-                else:
-                    localidad = 'Otra'
+                # Determinar localidad por prefijo dinámicamente
+                localidad = 'Otra'
+                sedes_config = self.config_manager.get_sedes_config()
+                for sede_name, cfg in sedes_config.items():
+                    codigo_loc = cfg.get("codigo_localidad", "")
+                    tratables = cfg.get("almacenes_tratables", [])
+                    if (codigo_loc and cod.startswith(codigo_loc)) or cod in tratables:
+                        localidad = sede_name
+                        break
                 
                 if localidad not in localidades:
                     localidades[localidad] = []
@@ -3408,7 +3406,8 @@ class DatabaseApp:
             del_sede_var = tk.StringVar()
             def _custom_sedes_list():
                 sc = getattr(self, 'stock_localidades_custom', {}) or {}
-                return sorted([s for s in sc.keys() if s not in ['Cabudare','Barinas','Guanare','Otra']])
+                base_sedes = list(self.config_manager.get_sedes_config().keys()) + ['Otra']
+                return sorted([s for s in sc.keys() if s not in base_sedes])
             cb_del_sede = ttk.Combobox(row_del, textvariable=del_sede_var, width=22, values=_custom_sedes_list(), state='readonly')
             cb_del_sede.pack(side=tk.LEFT, padx=6)
             def eliminar_sede():
@@ -3455,7 +3454,8 @@ class DatabaseApp:
                         lst = [x for x in lst if x != dep]
                         self.stock_localidades_custom[s] = lst
                 # Si el destino es una sede personalizada, asignar ahí; si es base, no lo incluimos en custom (volverá a su sede por prefijo)
-                if sede_dest not in ['Cabudare','Barinas','Guanare','Otra']:
+                base_sedes = list(self.config_manager.get_sedes_config().keys()) + ['Otra']
+                if sede_dest not in base_sedes:
                     self.stock_localidades_custom.setdefault(sede_dest, [])
                     if dep not in self.stock_localidades_custom[sede_dest]:
                         self.stock_localidades_custom[sede_dest].append(dep)
@@ -10925,15 +10925,15 @@ class DatabaseApp:
             self.log(f"Error actualizando últimas ventas MBRP: {e}", "ERROR")
 
     def _map_deposito_to_sede(self, cod: str) -> str:
-        """Mapea un código de depósito a una sede legible (Cabudare, Barinas, Guanare, Otra)."""
+        """Mapea un código de depósito a una sede legible leyendo de la configuración."""
         try:
             c = (cod or "").strip()
-            if c.startswith('03'):
-                return 'Cabudare'
-            if c.startswith('01'):
-                return 'Barinas'
-            if c.startswith('04'):
-                return 'Guanare'
+            sedes_config = self.config_manager.get_sedes_config()
+            for sede_name, cfg in sedes_config.items():
+                codigo_loc = cfg.get("codigo_localidad", "")
+                tratables = cfg.get("almacenes_tratables", [])
+                if (codigo_loc and c.startswith(codigo_loc)) or c in tratables:
+                    return sede_name
             return 'Otra'
         except Exception:
             return 'Otra'

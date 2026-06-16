@@ -442,11 +442,21 @@ def export_stock_excel(filename: str, datos_exportar: List, seleccionadas: List[
         # Ahora procesar los datos usando el mapa precargado
         data_start_row = start_row + 1
 
+        # Precalcular depósitos seleccionados por sede (dinámico desde location_groups)
+        if isinstance(location_groups, dict) and location_groups:
+            selected_by_sede = {sede: [d for d in (location_groups.get(sede, []) or []) if d in seleccionadas] for sede in location_groups.keys()}
+        else:
+            selected_by_sede = {
+                'Cabudare': [d for d in seleccionadas if str(d).startswith('03')],
+                'Barinas':  [d for d in seleccionadas if str(d).startswith('01')],
+                'Guanare':  [d for d in seleccionadas if str(d).startswith('04')],
+            }
+
         # Reordenar datos por unidades perdidas (descendente)
         def _local_stock(codigo):
             dep_qty = existencias_map.get(codigo, {})
-            prefijo = '03' if current_localidad == 'Cabudare' else '01' if current_localidad == 'Barinas' else '04'
-            deps_local = [d for d in seleccionadas if str(d).startswith(prefijo)]
+            # Usar selected_by_sede para la localidad actual
+            deps_local = selected_by_sede.get(current_localidad, [])
             return sum(int(dep_qty.get(d, 0)) for d in deps_local)
 
         datos_exportar = sorted(
@@ -457,16 +467,6 @@ def export_stock_excel(filename: str, datos_exportar: List, seleccionadas: List[
             ),
             reverse=True
         )
-
-        # Precalcular depósitos seleccionados por sede (dinámico desde location_groups)
-        if isinstance(location_groups, dict) and location_groups:
-            selected_by_sede = {sede: [d for d in (location_groups.get(sede, []) or []) if d in seleccionadas] for sede in location_groups.keys()}
-        else:
-            selected_by_sede = {
-                'Cabudare': [d for d in seleccionadas if str(d).startswith('03')],
-                'Barinas':  [d for d in seleccionadas if str(d).startswith('01')],
-                'Guanare':  [d for d in seleccionadas if str(d).startswith('04')],
-            }
         
         for i, item in enumerate(datos_exportar):
             try:
@@ -577,6 +577,10 @@ def export_stock_excel(filename: str, datos_exportar: List, seleccionadas: List[
         tiempo_post_datos = time.time()
         logger.info(f"[EXPORT TIMER] Procesamiento de datos: {tiempo_post_datos - tiempo_pre_datos:.2f}s (1 consulta batch)")
         
+        t_loop_end = time.time()
+        logger.info(f"[EXPORT TIMER] Bucle de procesamiento de {total_registros} filas completado en {t_loop_end - t_loop_start:.2f}s")
+        t_last = t_loop_end
+
         # Crear tabla con filtros
         end_col_letter = get_column_letter(len(headers))
         table_range = f"A{start_row}:{end_col_letter}{data_start_row + total_registros - 1}"
@@ -627,7 +631,7 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
                      permissions_manager=None, current_user_id: int = None,
                      provider_label: Optional[str] = None,
                      sede_codigo: Optional[str] = None,
-                     fecha_inicio=None, fecha_fin=None) -> int:
+                     fecha_inicio=None, fecha_fin=None, config_manager=None) -> int:
     """Exporta datos de RI (Rotación de Inventario) a un archivo Excel con formato profesional y múltiples hojas de análisis.
     
     Args:
@@ -649,6 +653,9 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
         
     from datetime import datetime
     try:
+        import time
+        t_export_start = time.time()
+        t_last = t_export_start
         total_registros = len(datos_tra)
         logger.info(f"Iniciando exportación RI Excel de {total_registros} registros a {filename}")
 
@@ -668,6 +675,7 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
 
         # Determinar si el filtro de sede es global (modo ICH)
         ich_mode = sede_codigo in (None, '%', '00', 'ICH', 'ALL')
+        sedes_config_cache = config_manager.get_sedes_config() if config_manager else {}
         
         # Calcular total de ventas una sola vez usando helper robusto
         try:
@@ -717,6 +725,9 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
                 marca_map = {str(codigo).strip(): marca for codigo, marca in marcas if codigo}
                 
                 logger.info(f"Mapeos cargados - Departamentos: {len(dept_desc_map)}, Grupos: {len(group_desc_map)}, Subgrupos: {len(sub_desc_map)}, Marcas: {len(marca_map)}")
+                t_now = time.time()
+                logger.info(f"[EXPORT TIMER] Mapeos cargados en {t_now - t_last:.2f}s")
+                t_last = t_now
             except Exception as e:
                 logger.warning(f"No se pudieron cargar las descripciones de jerarquía/marcas: {e}")
             
@@ -768,6 +779,9 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
                                     continue
                     
                     logger.info(f"[EXPORT TRA] Datos económicos cargados - Impuestos: {len(impuestos_map)}, Precios/Costos: {len(precio_map_tra)}")
+                    t_now = time.time()
+                    logger.info(f"[EXPORT TIMER] Datos económicos consultados en {t_now - t_last:.2f}s")
+                    t_last = t_now
             except Exception as e:
                 logger.warning(f"No se pudieron cargar los datos económicos para TRA: {e}")
         
@@ -860,13 +874,24 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
                 # Guanare: 0401, 0402
                 # CDT: 0106
                 # Transito SEDES: 0104, 0110, 0112
-                GRUPOS_DEPOSITOS = {
-                    'Barinas':  ['0101', '0102', '0108'],
-                    'Cabudare': ['0301', '0302'],
-                    'Guanare':  ['0401', '0402'],
-                    'CDT':      ['0106'],
-                    'Transito': ['0104', '0110', '0112']
-                }
+                GRUPOS_DEPOSITOS = {}
+                if config_manager:
+                    for sede_name, cfg in sedes_config_cache.items():
+                        tratables = cfg.get("almacenes_tratables", [])
+                        if tratables:
+                            GRUPOS_DEPOSITOS[sede_name] = tratables
+                        else:
+                            loc = cfg.get("codigo_localidad", "")
+                            if loc:
+                                GRUPOS_DEPOSITOS[sede_name] = [loc + "01"]
+                else:
+                    GRUPOS_DEPOSITOS = {
+                        'Barinas':  ['0101', '0102', '0108'],
+                        'Cabudare': ['0301', '0302'],
+                        'Guanare':  ['0401', '0402'],
+                        'CDT':      ['0106'],
+                        'Transito': ['0104', '0110', '0112']
+                    }
 
                 # Crear un mapa inverso: deposito -> nombre_grupo
                 DEPOSITO_A_GRUPO = {}
@@ -947,6 +972,9 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
                 db_manager, codigos_unicos_tra, fecha_inicio, fecha_fin
             )
             logger.info(f"[EXPORT TRA] Ofertas consultadas para {len(ofertas_map_tra)} productos")
+            t_now = time.time()
+            logger.info(f"[EXPORT TIMER] Stocks, proveedores y ofertas procesados en {t_now - t_last:.2f}s")
+            t_last = t_now
         except Exception as e:
             logger.warning(f"[EXPORT TRA] Error cargando ofertas: {e}")
         
@@ -955,6 +983,11 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
         
         # Agregar columnas de stock según modo ICH
         if ich_mode:
+            if config_manager:
+                for sede in sedes_config_cache.keys():
+                    headers.append(f'Stock {sede}')
+                headers.append('Stock Total')
+            else:
                 headers.extend(['Stock Cabudare', 'Stock Barinas', 'Stock Guanare', 'CDT', 'Transito SEDES', 'Stock Total'])
         else:
             headers.append('Stock')
@@ -990,6 +1023,7 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
         # Datos de productos
         data_start_row = start_row + 1
         logger.info(f"[EXPORT DEBUG] Iniciando procesamiento de {len(datos_tra)} filas")
+        t_loop_start = time.time()
         
         for i, fila in enumerate(datos_tra):
             try:
@@ -1063,23 +1097,25 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
                 # Columnas de stock según modo ICH
                 if ich_mode:
                     dist = stock_por_sede_map_tra.get(codigo_str, {})
-                    stock_cabudare = dist.get('Cabudare', 0)
-                    stock_barinas = dist.get('Barinas', 0)
-                    stock_guanare = dist.get('Guanare', 0)
-                    stock_cdt = dist.get('CDT', 0)
-                    stock_transito = dist.get('Transito', 0)
                     stock_total = int(stock_map_tra.get(codigo_str, 0) or 0)
                     
-                    ws_main.cell(row=row, column=current_col, value=stock_cabudare)
-                    current_col += 1
-                    ws_main.cell(row=row, column=current_col, value=stock_barinas)
-                    current_col += 1
-                    ws_main.cell(row=row, column=current_col, value=stock_guanare)
-                    current_col += 1
-                    ws_main.cell(row=row, column=current_col, value=stock_cdt)
-                    current_col += 1
-                    ws_main.cell(row=row, column=current_col, value=stock_transito)
-                    current_col += 1
+                    if config_manager:
+                        for sede in sedes_config_cache.keys():
+                            stock_sede = dist.get(sede, 0)
+                            ws_main.cell(row=row, column=current_col, value=stock_sede)
+                            current_col += 1
+                    else:
+                        ws_main.cell(row=row, column=current_col, value=dist.get('Cabudare', 0))
+                        current_col += 1
+                        ws_main.cell(row=row, column=current_col, value=dist.get('Barinas', 0))
+                        current_col += 1
+                        ws_main.cell(row=row, column=current_col, value=dist.get('Guanare', 0))
+                        current_col += 1
+                        ws_main.cell(row=row, column=current_col, value=dist.get('CDT', 0))
+                        current_col += 1
+                        ws_main.cell(row=row, column=current_col, value=dist.get('Transito', 0))
+                        current_col += 1
+                        
                     ws_main.cell(row=row, column=current_col, value=stock_total)
                     current_col += 1
                     stock_para_calculo = stock_total
@@ -1175,6 +1211,10 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
                 logger.error(f"Error procesando fila TRA {i}: {fila} - {e}")
                 continue
         
+        t_loop_end = time.time()
+        logger.info(f"[EXPORT TIMER] Bucle de procesamiento de {total_registros} filas completado en {t_loop_end - t_loop_start:.2f}s")
+        t_last = t_loop_end
+
         # Crear tabla con filtros
         end_col_letter = get_column_letter(len(headers))
         table_range = f"A{start_row}:{end_col_letter}{data_start_row + total_registros - 1}"
@@ -1254,17 +1294,30 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
             logger.warning(f"Error ajustando anchos de columna dinámicos en RI: {e}")
 
         if ich_mode:
-            ws_main.column_dimensions['H'].width = 15  # Stock Cabudare
-            ws_main.column_dimensions['I'].width = 15  # Stock Barinas
-            ws_main.column_dimensions['J'].width = 15  # Stock Guanare
-            ws_main.column_dimensions['K'].width = 15  # Stock Total
-            ws_main.column_dimensions['L'].width = 12  # Rotación
-            ws_main.column_dimensions['M'].width = 15  # Representación %
+            col_idx = 8
+            if config_manager:
+                for _ in sedes_config_cache.keys():
+                    ws_main.column_dimensions[get_column_letter(col_idx)].width = 15
+                    col_idx += 1
+            else:
+                for _ in range(5):
+                    ws_main.column_dimensions[get_column_letter(col_idx)].width = 15
+                    col_idx += 1
+            
+            ws_main.column_dimensions[get_column_letter(col_idx)].width = 15 # Stock Total
+            col_idx += 1
+            
+            ws_main.column_dimensions[get_column_letter(col_idx)].width = 12 # Rotación
+            col_idx += 1
+            ws_main.column_dimensions[get_column_letter(col_idx)].width = 15 # Representación %
+            col_idx += 1
             
             if mostrar_costo_utilidad:
-                ws_main.column_dimensions['N'].width = 15  # Precio + IVA
-                ws_main.column_dimensions['O'].width = 15  # Costo
-                ws_main.column_dimensions['P'].width = 15  # Utilidad %
+                ws_main.column_dimensions[get_column_letter(col_idx)].width = 15
+                col_idx += 1
+                ws_main.column_dimensions[get_column_letter(col_idx)].width = 15
+                col_idx += 1
+                ws_main.column_dimensions[get_column_letter(col_idx)].width = 15
         else:
             ws_main.column_dimensions['H'].width = 15  # Stock
             ws_main.column_dimensions['I'].width = 12  # Rotación
@@ -1694,8 +1747,15 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
             import traceback
             traceback.print_exc()
         
+        t_now = time.time()
+        logger.info(f"[EXPORT TIMER] Generación de hojas secundarias y gráficos completada en {t_now - t_last:.2f}s")
+        t_last = t_now
+        
         # Guardar archivo
         wb.save(filename)
+        t_now = time.time()
+        logger.info(f"[EXPORT TIMER] Guardado del archivo Excel completado en {t_now - t_last:.2f}s")
+        logger.info(f"[EXPORT TIMER] TOTAL exportación TRA: {t_now - t_export_start:.2f}s")
         logger.info(f"Exportación RI Excel completada: {total_registros} registros en {filename}")
         return total_registros
         
@@ -1709,7 +1769,7 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
                       provider_label: Optional[str] = None,
                       sede_codigo: Optional[str] = None,
                       fecha_inicio=None,
-                      fecha_fin=None) -> int:
+                      fecha_fin=None, config_manager=None) -> int:
     """
     Exporta datos MBRP a un archivo Excel con formato profesional y análisis de rentabilidad.
     
@@ -1737,6 +1797,7 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
         
         # Determinar si el filtro de sede es global (modo ICH)
         ich_mode = sede_codigo in (None, '%', '00', 'ICH', 'ALL')
+        sedes_config_cache = config_manager.get_sedes_config() if config_manager else {}
 
         # Crear workbook
         wb = Workbook()
@@ -1778,7 +1839,11 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
         
         # Columnas de stock por sede (solo modo ICH)
         if ich_mode:
-            headers.extend(['Stock Cabudare', 'Stock Barinas', 'Stock Guanare'])
+            if config_manager:
+                for sede in sedes_config_cache.keys():
+                    headers.append(f'Stock {sede}')
+            else:
+                headers.extend(['Stock Cabudare', 'Stock Barinas', 'Stock Guanare'])
         
         # Columnas adicionales de análisis
         headers.extend(['Días de Stock', 'IM %', 'Última Venta (DIAS)'])
@@ -1894,6 +1959,13 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
             """Mapea un código de depósito a una sede legible."""
             try:
                 c = (dep or "").strip()
+                if config_manager:
+                    sedes_config = sedes_config_cache
+                    for sede_name, cfg in sedes_config.items():
+                        codigo_loc = cfg.get("codigo_localidad", "")
+                        tratables = cfg.get("almacenes_tratables", [])
+                        if (codigo_loc and c.startswith(codigo_loc)) or c in tratables:
+                            return sede_name
                 if c.startswith('03'):
                     return 'Cabudare'
                 if c.startswith('01'):
@@ -2326,17 +2398,25 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
                 # Columnas de stock por sede (solo modo ICH)
                 if ich_mode:
                     dist = fila_datos.get('dist', {})
-                    stock_cabudare = dist.get('Cabudare', 0)
-                    stock_barinas = dist.get('Barinas', 0)
-                    stock_guanare = dist.get('Guanare', 0)
-                    
-                    ws_main.cell(row=row, column=10, value=stock_cabudare)
-                    ws_main.cell(row=row, column=11, value=stock_barinas)
-                    ws_main.cell(row=row, column=12, value=stock_guanare)
-                    current_col = 12
+                    if config_manager:
+                        for sede in sedes_config_cache.keys():
+                            stock_sede = dist.get(sede, 0)
+                            ws_main.cell(row=row, column=current_col, value=stock_sede)
+                            current_col += 1
+                    else:
+                        stock_cabudare = dist.get('Cabudare', 0)
+                        stock_barinas = dist.get('Barinas', 0)
+                        stock_guanare = dist.get('Guanare', 0)
+                        
+                        ws_main.cell(row=row, column=current_col, value=stock_cabudare)
+                        current_col += 1
+                        ws_main.cell(row=row, column=current_col, value=stock_barinas)
+                        current_col += 1
+                        ws_main.cell(row=row, column=current_col, value=stock_guanare)
+                        current_col += 1
                 else:
                     # Si no es modo ICH, dejamos espacios para las columnas de sede
-                    current_col = 9
+                    pass
                 
                 # Columnas adicionales de análisis
                 current_col += 1
@@ -2471,32 +2551,44 @@ def export_mbrp_excel(filename: str, datos_mbrp: List, db_manager=None, progress
         
         if ich_mode:
             # Columnas de stock por sede
-            ws_main.column_dimensions['I'].width = 15  # Stock Cabudare
-            ws_main.column_dimensions['J'].width = 15  # Stock Barinas
-            ws_main.column_dimensions['K'].width = 15  # Stock Guanare
+            col_idx = 10 # I is 9, actually H is 8, I is 9
+            if config_manager:
+                for _ in sedes_config_cache.keys():
+                    ws_main.column_dimensions[get_column_letter(col_idx)].width = 15
+                    col_idx += 1
+            else:
+                for _ in range(3):
+                    ws_main.column_dimensions[get_column_letter(col_idx)].width = 15
+                    col_idx += 1
             # Columnas de análisis (después de stock por sede)
-            ws_main.column_dimensions['L'].width = 15  # Días de Stock
-            ws_main.column_dimensions['M'].width = 12  # IM %
-            ws_main.column_dimensions['N'].width = 18  # Última Venta (DIAS)
+            ws_main.column_dimensions[get_column_letter(col_idx)].width = 15  # Días de Stock
+            col_idx += 1
+            ws_main.column_dimensions[get_column_letter(col_idx)].width = 12  # IM %
+            col_idx += 1
+            ws_main.column_dimensions[get_column_letter(col_idx)].width = 18  # Última Venta (DIAS)
+            col_idx += 1
         else:
             # Sin ICH: columnas de análisis después de Stock Actual
-            ws_main.column_dimensions['I'].width = 15  # Días de Stock
-            ws_main.column_dimensions['J'].width = 12  # IM %
-            ws_main.column_dimensions['K'].width = 18  # Última Venta (DIAS)
+            ws_main.column_dimensions['J'].width = 15  # Días de Stock
+            ws_main.column_dimensions['K'].width = 12  # IM %
+            ws_main.column_dimensions['L'].width = 18  # Última Venta (DIAS)
         
         # Columnas de costo/utilidad (siempre al final)
         if mostrar_costo_utilidad:
             if ich_mode:
-                # Con ICH: O, P, Q
-                ws_main.column_dimensions['O'].width = 15  # Precio + IVA
-                ws_main.column_dimensions['P'].width = 15  # Costo
-                ws_main.column_dimensions['Q'].width = 15  # Utilidad %
+                # Con ICH
+                ws_main.column_dimensions[get_column_letter(col_idx)].width = 15  # Precio + IVA
+                col_idx += 1
+                ws_main.column_dimensions[get_column_letter(col_idx)].width = 15  # Costo
+                col_idx += 1
+                ws_main.column_dimensions[get_column_letter(col_idx)].width = 15  # Utilidad %
+                col_idx += 1
                 # Detalle ICH es la columna R si no hay oferta al final
             else:
                 # Sin ICH: L, M, N
-                ws_main.column_dimensions['L'].width = 15  # Precio + IVA
-                ws_main.column_dimensions['M'].width = 15  # Costo
-                ws_main.column_dimensions['N'].width = 15  # Utilidad %
+                ws_main.column_dimensions['M'].width = 15  # Precio + IVA
+                ws_main.column_dimensions['N'].width = 15  # Costo
+                ws_main.column_dimensions['O'].width = 15  # Utilidad %
 
         # Ajustar ancho de la columna de oferta (última columna)
         try:

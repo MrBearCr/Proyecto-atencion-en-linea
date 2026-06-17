@@ -1,7 +1,22 @@
 """
 Gestor seguro de credenciales para la aplicación PAL
 """
-import keyring
+import sys as _sys
+
+# --- Compatibilidad con ejecutables compilados (Nuitka / PyInstaller) ---
+# Cuando la app corre como binario compilado, el mecanismo de auto-detección
+# del backend de keyring falla. Se fuerza el backend de Windows explícitamente.
+_is_compiled = getattr(_sys, 'frozen', False) or '__compiled__' in dir()
+if _is_compiled:
+    try:
+        import keyring.backends.Windows
+        import keyring
+        keyring.set_keyring(keyring.backends.Windows.WinVaultKeyring())
+    except Exception:
+        import keyring  # Fallback: dejar que keyring intente auto-detectar
+else:
+    import keyring
+
 from cryptography.fernet import Fernet
 from .errors import ErrorCode
 

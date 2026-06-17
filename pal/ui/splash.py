@@ -68,11 +68,17 @@ class SplashScreen(tk.Toplevel):
         self.container.pack(expand=True, fill="both", padx=50, pady=20)
         
         try:
+            # Detectar entorno de ejecución: PyInstaller, Nuitka o desarrollo
             if getattr(sys, 'frozen', False):
+                # PyInstaller: los datos se extraen en sys._MEIPASS
                 base_path = sys._MEIPASS
+            elif '__compiled__' in dir():
+                # Nuitka: el ejecutable y los datos están junto al .exe
+                base_path = os.path.dirname(sys.executable)
             else:
-                base_path = os.path.dirname(os.path.abspath(__file__))
-            
+                # Desarrollo: dos niveles arriba de ui/ -> raíz del proyecto
+                base_path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
             image_path = os.path.join(base_path, "casapro-icono.png")
             self.logo = tk.PhotoImage(file=image_path).subsample(2, 2)
             tk.Label(self.container, image=self.logo, bg=self.bg_color).pack(pady=(5, 15))

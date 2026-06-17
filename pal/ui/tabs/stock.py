@@ -134,9 +134,10 @@ def setup_stock_tab(app):
         app.stock_tree.heading(col, text=col)
         app.stock_tree.column(col, **config)
 
-    # Colores amigables: Azul suave para quiebres, Amarillo suave para favoritos
+    # Colores amigables: Azul suave para quiebres, Amarillo suave para favoritos, Verde suave para nuevos
     app.stock_tree.tag_configure('quiebre', background='#E3F2FD', foreground='#000000', font=('', 11))
     app.stock_tree.tag_configure('favorito', background='#FFF9C4', foreground='#000000', font=('', 11, 'bold'))
+    app.stock_tree.tag_configure('nuevo_quiebre', background='#E8F5E9', foreground='#000000', font=('', 11, 'bold'))
 
     style.map('LargeStock.Treeview',
         background=[('selected', '#0D47A1')],

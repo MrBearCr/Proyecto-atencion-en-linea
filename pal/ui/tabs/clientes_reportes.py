@@ -2,6 +2,9 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 from tkcalendar import DateEntry
 from datetime import datetime, timedelta
+import os
+from tkinter import filedialog
+from pal.services.exports import export_clientes_reporte_excel, EXCEL_AVAILABLE
 
 class ClientesReportesTab(ttk.Frame):
     def __init__(self, parent, controller):
@@ -9,7 +12,8 @@ class ClientesReportesTab(ttk.Frame):
         self.controller = controller
         self.sedes_config = []
         self.selected_sede_config = None
-        self.vad20_conn = None # Conexión a la BD VAD20 de la sede seleccionada
+        self.vad20_conn = None 
+        self.current_report_data = [] # Para exportar a Excel
 
         self.create_widgets()
         self.load_sedes_config()
@@ -69,7 +73,10 @@ class ClientesReportesTab(ttk.Frame):
         self.status_label.pack(side=tk.LEFT, padx=5)
 
         self.btn_generar_reporte = ttk.Button(search_frame, text="Generar Reporte", command=self.generar_reporte)
-        self.btn_generar_reporte.pack(side=tk.LEFT, padx=10)
+        self.btn_generar_reporte.pack(side=tk.LEFT, padx=5)
+
+        self.btn_exportar_excel = ttk.Button(search_frame, text="Excel", command=self.export_to_excel, state=tk.DISABLED)
+        self.btn_exportar_excel.pack(side=tk.LEFT, padx=5)
         
         # Botón para volver al menú de clientes
         back_button = ttk.Button(control_frame, text="↩ Volver", command=lambda: self.controller.show_clientes_sub_view('menu'))
@@ -79,9 +86,19 @@ class ClientesReportesTab(ttk.Frame):
         tree_frame = ttk.Frame(self)
         tree_frame.pack(side=tk.BOTTOM, fill=tk.BOTH, expand=True, padx=10, pady=10)
 
+        # Configurar estilo para selección highlight y altura de fila (RI style)
+        style = ttk.Style()
+        style.configure('Clientes.Treeview', font=('', 11), rowheight=25)
+        style.map('Clientes.Treeview',
+                  background=[('selected', '#0D47A1')],
+                  foreground=[('selected', 'white')])
+
         # Definir las columnas para el Treeview (para elementos padre)
         columns = ["RIF/ID", "Nombre Cliente", "Factura", "Fecha", "N° Items", "Total USD"]
-        self.report_tree = ttk.Treeview(tree_frame, columns=columns, show='headings') # 'headings' para mostrar solo los encabezados
+        self.report_tree = ttk.Treeview(tree_frame, columns=columns, show='tree headings', style='Clientes.Treeview')
+        
+        # Configurar columna de árbol (#0) para expandir
+        self.report_tree.column("#0", width=30, stretch=tk.NO)
         
         # Configurar encabezados y columnas
         for col in columns:
@@ -105,8 +122,23 @@ class ClientesReportesTab(ttk.Frame):
         vsb.grid(row=0, column=1, sticky="ns")
         hsb.grid(row=1, column=0, sticky="ew")
 
+        # Configurar tags para filas de productos (hijos) - Estilo RI
+        self.report_tree.tag_configure('prod_child', background='#F0F0F0', foreground='#555555')
+        
+        # Vincular doble clic para expandir/colapsar
+        self.report_tree.bind('<Double-1>', self._on_double_click)
+
         tree_frame.grid_rowconfigure(0, weight=1)
         tree_frame.grid_columnconfigure(0, weight=1)
+
+    def _on_double_click(self, event):
+        """Maneja el doble clic para expandir o colapsar una factura."""
+        item = self.report_tree.identify_row(event.y)
+        if item:
+            if self.report_tree.item(item, "open"):
+                self.report_tree.item(item, open=False)
+            else:
+                self.report_tree.item(item, open=True)
 
     def load_sedes_config(self):
         """Carga la configuración de sedes desde la base de datos central."""
@@ -214,12 +246,14 @@ class ClientesReportesTab(ttk.Frame):
             # Procesar datos (agrupación de facturas y sus productos)
             invoices = {}
             for row in report_data_raw:
-                # row: (rif, name, num, date, prod_code, total_bs, total_usd)
-                rif, client_name, invoice_num, invoice_date, product_code, n_total_bs, total_usd = row
+                # row: (rif, name, num, date, prod_code, total_bs, desc_corta, dept, grupo, sub, marca, qty, total_usd, desc_larga)
+                rif, client_name, invoice_num, invoice_date, product_code, n_total_bs, \
+                p_desc_corta, p_dept, p_grupo, p_sub, p_marca, p_qty, total_usd, p_desc_larga = row
+                
                 invoice_key = (rif, invoice_num)
                 
                 if invoice_key not in invoices:
-                    # Primera vez que vemos esta factura: Guardamos sus datos de cabecera y el total
+                    # Primera vez que vemos esta factura
                     invoices[invoice_key] = {
                         'rif': rif, 
                         'client_name': client_name, 
@@ -227,54 +261,124 @@ class ClientesReportesTab(ttk.Frame):
                         'invoice_date': invoice_date, 
                         'total_bs': float(n_total_bs) if n_total_bs else 0.0,
                         'total_usd': float(total_usd) if total_usd else 0.0,
-                        'products': set() 
+                        'products_map': {} # Use a map for aggregation: (code, metadata) -> qty
                     }
                 
-                # Añadir el producto al set (evita duplicados si hay re-pagos o datos sucios)
+                # Añadir/Agregar el producto
                 if product_code:
-                    invoices[invoice_key]['products'].add(product_code)
+                    # Metadata incluye ambas descripciones para UI y Excel
+                    metadata_key = (product_code, p_desc_corta, p_dept, p_grupo, p_sub, p_marca, p_desc_larga)
+                    current_qty = float(p_qty) if p_qty else 0.0
+                    
+                    if metadata_key not in invoices[invoice_key]['products_map']:
+                        invoices[invoice_key]['products_map'][metadata_key] = current_qty
+                    else:
+                        invoices[invoice_key]['products_map'][metadata_key] += current_qty
             
             # Convertir a lista y ordenar por monto descendente
             invoices_list = list(invoices.values())
             for inv in invoices_list:
-                inv['products'] = sorted(list(inv['products'])) # Ordenar productos por código
+                # Reconstruir products_full desde el map
+                inv['products_full'] = []
+                for (code, desc_c, dept, grupo, sub, marca, desc_l), total_qty in inv['products_map'].items():
+                    # (code, desc_corta, dept, grupo, sub, marca, total_qty, desc_larga)
+                    inv['products_full'].append((code, desc_c, dept, grupo, sub, marca, total_qty, desc_l))
+                
+                # Ordenar productos por código
+                inv['products_full'].sort(key=lambda x: x[0])
             
             invoices_list.sort(key=lambda x: x['total_usd'], reverse=True)
+            
+            # Guardar para exportar
+            self.current_report_data = invoices_list
             
             # Actualizar UI
             self.after(0, lambda: self._on_report_loaded(invoices_list))
             
         except Exception as e:
-            self.after(0, lambda: self._on_report_error(str(e)))
+            error_msg = str(e)
+            self.after(0, lambda: self._on_report_error(error_msg))
 
     def _on_report_loaded(self, invoices_list):
         """Muestra los resultados en el Treeview"""
         self.btn_generar_reporte.state(['!disabled'])
+        if invoices_list:
+            self.btn_exportar_excel.state(['!disabled'])
+        else:
+            self.btn_exportar_excel.state(['disabled'])
         self.progress_bar.stop()
         self.progress_bar.config(mode='determinate', value=100)
         self.status_label.config(text="✓ Completado", foreground="#10B981")
         
         for invoice_data in invoices_list:
             formatted_date = invoice_data['invoice_date'].strftime('%Y-%m-%d')
-            num_items = len(invoice_data['products'])
+            num_items = len(invoice_data['products_full'])
             parent_values = (
                 str(invoice_data['rif']), str(invoice_data['client_name']),
                 str(invoice_data['invoice_num']), formatted_date,
                 str(num_items), f"{invoice_data['total_usd']:,.2f}"
             )
             parent_iid = self.report_tree.insert("", tk.END, values=parent_values, open=False) 
-            for product_code in invoice_data['products']:
-                self.report_tree.insert(parent_iid, tk.END, values=(str(product_code), "", "", "", "", ""))
+            for p_tuple in invoice_data['products_full']:
+                # p_tuple: (code, desc, dept, grupo, sub, marca, qty)
+                # Mostramos [Cant] x Código - Descripción alineado con el nombre (segunda columna)
+                p_code, p_desc, p_qty = p_tuple[0], p_tuple[1], p_tuple[6]
+                qty_str = f"{p_qty:g}" if p_qty is not None else "0" # g format remove trailing zeros
+                display_text = f"◈ {qty_str} x {p_code} - {p_desc if p_desc else ''}"
+                # Usamos el tag 'prod_child' para el estilo grisáceo similar a RI
+                # El formato RI suele poner la info en la segunda columna (values[1])
+                self.report_tree.insert(parent_iid, tk.END, values=("", display_text, "", "", "", ""), tags=('prod_child',))
 
         messagebox.showinfo("Reporte Generado", f"Se encontraron {len(invoices_list)} facturas.")
 
     def _on_report_error(self, message):
         """Maneja errores en el reporte"""
         self.btn_generar_reporte.state(['!disabled'])
+        self.btn_exportar_excel.state(['disabled'])
         self.progress_bar.stop()
         self.progress_bar.config(mode='determinate', value=0)
         self.status_label.config(text="⚠ Error", foreground="#EF4444")
         messagebox.showerror("Error", f"No se pudo generar el reporte: {message}")
+
+    def export_to_excel(self):
+        """Exporta los datos actuales a Excel."""
+        if not self.current_report_data:
+            messagebox.showwarning("Exportar", "No hay datos para exportar.")
+            return
+            
+        if not EXCEL_AVAILABLE:
+            messagebox.showerror("Error", "La librería openpyxl no está instalada.")
+            return
+
+        filename = filedialog.asksaveasfilename(
+            defaultextension=".xlsx",
+            filetypes=[("Excel files", "*.xlsx"), ("All files", "*.*")],
+            initialfile=f"Reporte_Clientes_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        )
+        
+        if not filename:
+            return
+            
+        try:
+            sede_nombre = self.selected_sede_config['nombre_sede'] if self.selected_sede_config else "Desconocida"
+            num_rows = export_clientes_reporte_excel(
+                filename, 
+                self.current_report_data, 
+                sede_nombre,
+                db_manager=self.controller.db_manager,
+                fecha_inicio=self.fecha_inicio_entry.get_date(),
+                fecha_fin=self.fecha_fin_entry.get_date()
+            )
+            
+            messagebox.showinfo("Exportación Exitosa", f"Se han exportado {num_rows} registros a:\n{filename}")
+            
+            # Intentar abrir el archivo
+            try:
+                os.startfile(filename)
+            except:
+                pass
+        except Exception as e:
+            messagebox.showerror("Error de Exportación", f"No se pudo exportar el archivo: {e}")
 
     def on_tab_close(self):
         """Se llama cuando la pestaña es cerrada para limpiar recursos."""

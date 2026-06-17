@@ -20,6 +20,13 @@ _LEVELS = set(_LEVEL_ORDER.keys())
 # Configuración global de niveles por componente
 _default_level = "INFO"
 _component_levels = {}
+_log_callback = None
+
+
+def set_log_callback(callback):
+    """Establece una función callback para redirigir los logs (ej: a la UI)."""
+    global _log_callback
+    _log_callback = callback
 
 
 def set_level(level: str):
@@ -71,8 +78,19 @@ class Logger:
         # Filtrar por nivel efectivo
         if not _should_emit(self.component, level):
             return
+        
+        formatted_msg = self._format(level, message, caller_offset=3)
+        
+        # Redirigir al callback si existe (ej: para mostrar en UI)
+        if _log_callback:
+            try:
+                # El callback suele ser app.log(message, level)
+                _log_callback(message, level)
+            except Exception:
+                pass
+
         try:
-            print(self._format(level, message, caller_offset=3))
+            print(formatted_msg)
         except Exception:
             try:
                 print(message)

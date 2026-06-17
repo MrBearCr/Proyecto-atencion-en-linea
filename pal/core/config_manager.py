@@ -165,14 +165,42 @@ class ConfigManager:
             logger.error(f"Error set_setting({key}): {e}")
             return False
 
+    def get_tratables_by_sede(self, sede_code):
+        """
+        Obtiene la lista de almacenes tratables para una sede específica.
+        Si sede_code es '%' o '00' o 'ICH', devuelve todos los tratables.
+        """
+        if sede_code in (None, '%', '00', 'ICH', 'ALL'):
+            return self.get_all_tratables()
+            
+        config = self.get_sedes_config()
+        # Buscar por código (prefijo del nombre de la sede) o por nombre exacto
+        for s_name, s_cfg in config.items():
+            if s_name.startswith(str(sede_code)) or s_name == str(sede_code):
+                return s_cfg.get("almacenes_tratables", [])
+        
+        # Fallback si no se encuentra (por ejemplo, si pasan el código directamente como '0301')
+        for s_name, s_cfg in config.items():
+            tratables = s_cfg.get("almacenes_tratables", [])
+            if str(sede_code) in tratables:
+                return tratables
+                
+        return [str(sede_code)] if sede_code else []
+
+    def get_all_tratables(self):
+        """
+        Obtiene la unión de todos los almacenes tratables de todas las sedes configuradas.
+        """
+        config = self.get_sedes_config()
+        todos = set()
+        for s_cfg in config.values():
+            tratables = s_cfg.get("almacenes_tratables", [])
+            for t in tratables:
+                todos.add(str(t))
+        return sorted(list(todos)) if todos else self.get_sales_warehouses()
+
     def get_sales_warehouses(self):
         """
         Obtiene TODOS los almacenes que se consideran para análisis de ventas (Global/ICH).
-        Por ahora esto puede ser la unión de todos los almacenes tratables o una lista fija global
-        si se requiere separar scope.
         """
-        # Por defecto, devolvemos 'ICH' o una lista de todos los almacenes conocidos para ventas
-        # O podríamos leer otra key 'global_sales_warehouses' si existiera.
-        # Para TRA, generalmente se filtra por 'sedes' en la UI, pero el cálculo base
-        # suele ser sobre toda la data disponible.
         return ["0101", "0102", "0108", "0301", "0401", "0402", "0106"]

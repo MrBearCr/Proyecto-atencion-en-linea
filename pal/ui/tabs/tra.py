@@ -31,24 +31,30 @@ def setup_tra_tab(app):
     # Configurar fecha máxima: ayer (las ventas no se cargan hasta el cierre)
     from datetime import timedelta
     ayer = datetime.now() - timedelta(days=1)
-    # Ampliar rango para permitir análisis histórico hasta 2 años
-    hace_2_anos = ayer - timedelta(days=730)
+    # Ampliar rango para permitir análisis histórico prolongado (10 años de respaldo)
+    hace_10_anos = ayer - timedelta(days=3650)
     
     app.fecha_inicio_entry = DateEntry(fecha_frame, width=12, date_pattern='yyyy-mm-dd',
-                                      mindate=hace_2_anos, maxdate=ayer)
+                                      mindate=hace_10_anos, maxdate=ayer)
     app.fecha_inicio_entry.set_date(ayer - timedelta(days=30))  # Default: últimos 30 días
     app.fecha_inicio_entry.pack(side=tk.LEFT, padx=5)
 
     ttk.Label(fecha_frame, text="Hasta:").pack(side=tk.LEFT)
     app.fecha_fin_entry = DateEntry(fecha_frame, width=12, date_pattern='yyyy-mm-dd',
-                                   mindate=hace_2_anos, maxdate=ayer)
+                                   mindate=hace_10_anos, maxdate=ayer)
     app.fecha_fin_entry.set_date(ayer)  # Default: hasta ayer
     app.fecha_fin_entry.pack(side=tk.LEFT, padx=5)
 
     ttk.Label(fecha_frame, text="Sede:").pack(side=tk.LEFT, padx=10)
     app.sede_var = tk.StringVar()
     app.sede_combo = ttk.Combobox(fecha_frame, textvariable=app.sede_var, state='readonly', width=18)
-    app.sede_combo['values'] = ["00 - ICH", "0301 - Cabudare", "0401 - Guanare", "0101 - Barinas"]
+    sedes_config = app.config_manager.get_sedes_config()
+    combo_values = ["00 - ICH"]
+    for sede_name, cfg in sedes_config.items():
+        tratables = cfg.get("almacenes_tratables", [])
+        cod = tratables[0] if tratables else cfg.get("codigo_localidad", "XX") + "01"
+        combo_values.append(f"{cod} - {sede_name}")
+    app.sede_combo['values'] = combo_values
     app.sede_combo.current(0)  # Por defecto 00 - ICH
     app.sede_combo.pack(side=tk.LEFT)
 
@@ -57,13 +63,24 @@ def setup_tra_tab(app):
         try:
             sel = (app.sede_var.get() or '')
             if sel.startswith('00'):
-                if hasattr(app, 'notification_manager'):
-                    app.notification_manager.show_banner(
-                        "Filtro ICH seleccionado: consulta global de todas las sedes; puede tardar más en procesar.",
-                        bg="#FFB81C",
-                        fg="black",
-                        duration=5500,
-                    )
+                import tkinter as _tk
+                banner = _tk.Toplevel(app.root)
+                banner.overrideredirect(True)
+                banner.attributes("-topmost", True)
+                banner.configure(bg="#FFB81C")
+                # Posicionar sobre la ventana principal
+                app.root.update_idletasks()
+                rx, ry, rw = app.root.winfo_x(), app.root.winfo_y(), app.root.winfo_width()
+                bw = 420
+                banner.geometry(f"{bw}x60+{rx + (rw - bw)//2}+{ry + 10}")
+                _tk.Label(
+                    banner,
+                    text="⚠️  Filtro ICH (RI) — Consulta global de todas las sedes.\nPuede tardar más en procesar.",
+                    bg="#FFB81C", fg="black",
+                    font=("Segoe UI", 9, "bold"),
+                    justify="center", pady=8
+                ).pack(expand=True, fill=_tk.BOTH)
+                banner.after(4500, banner.destroy)
         except Exception:
             pass
     app.sede_combo.bind('<<ComboboxSelected>>', _on_sede_selected)
@@ -187,30 +204,71 @@ def setup_tra_tab(app):
     def _on_tra_rango_selected(event=None):
         rango = app.tra_rango_var.get()
         ayer = datetime.now() - timedelta(days=1)
-        hace_2_anos = ayer - timedelta(days=730)
+        hace_10_anos = ayer - timedelta(days=3650)
         
         if rango == "Personalizado":
             # Mostrar mensaje informativo sobre el rango permitido
             try:
-                app.log(f"Rango personalizado seleccionado. Fechas permitidas: {hace_2_anos.strftime('%Y-%m-%d')} a {ayer.strftime('%Y-%m-%d')}", "INFO")
+                app.log(f"Rango personalizado seleccionado. Fechas permitidas: {hace_10_anos.strftime('%Y-%m-%d')} a {ayer.strftime('%Y-%m-%d')}", "INFO")
             except Exception:
                 pass
             return
         
         # Extraer número de días
-        dias = int(rango.split()[0])
-        fecha_inicio = ayer - timedelta(days=dias)
+        try:
+            dias = int(rango.split()[0])
+            fecha_inicio = ayer - timedelta(days=dias)
+        except (ValueError, IndexError):
+            return
         
-        # Asegurar que la fecha no exceda el límite mínimo
-        if fecha_inicio < hace_2_anos:
-            fecha_inicio = hace_2_anos
+        # Asegurar que la fecha no exceda el límite histórico
+        if fecha_inicio < hace_10_anos:
+            fecha_inicio = hace_10_anos
             try:
-                app.log(f"Fecha inicio ajustada al límite mínimo: {hace_2_anos.strftime('%Y-%m-%d')}", "WARNING")
+                app.log(f"Fecha inicio ajustada al límite histórico: {hace_10_anos.strftime('%Y-%m-%d')}", "WARNING")
             except Exception:
                 pass
         
         app.fecha_inicio_entry.set_date(fecha_inicio)
         app.fecha_fin_entry.set_date(ayer)
+        _check_tra_wide_range()
+
+    def _show_tra_wide_range_warning():
+        """Muestra banner de advertencia para rangos muy amplios"""
+        try:
+            import tkinter as _tk
+            banner = _tk.Toplevel(app.root)
+            banner.overrideredirect(True)
+            banner.attributes("-topmost", True)
+            banner.configure(bg="#F44336") # Rojo para mayor visibilidad en rangos históricos
+            app.root.update_idletasks()
+            rx, ry, rw = app.root.winfo_x(), app.root.winfo_y(), app.root.winfo_width()
+            bw = 500
+            banner.geometry(f"{bw}x60+{rx + (rw - bw)//2}+{ry + 10}")
+            _tk.Label(
+                banner,
+                text="⚠️  Rango amplio detectado (+1 año) — La obtención de datos\ny el cálculo para el reporte pueden tardar considerablemente.",
+                bg="#F44336", fg="white",
+                font=("Segoe UI", 9, "bold"),
+                justify="center", pady=8
+            ).pack(expand=True, fill=_tk.BOTH)
+            banner.after(5500, banner.destroy)
+        except Exception:
+            pass
+
+    def _check_tra_wide_range(event=None):
+        """Verifica si el rango es > 365 días y muestra aviso"""
+        try:
+            f1 = app.fecha_inicio_entry.get_date()
+            f2 = app.fecha_fin_entry.get_date()
+            if (f2 - f1).days > 365:
+                _show_tra_wide_range_warning()
+        except Exception:
+            pass
+
+    # Vincular cambios de fecha manuales al aviso de rango
+    app.fecha_inicio_entry.bind('<<DateEntrySelected>>', _check_tra_wide_range)
+    app.fecha_fin_entry.bind('<<DateEntrySelected>>', _check_tra_wide_range)
     
     # Función para verificar y recargar filtros si están vacíos
     def _verificar_y_recargar_filtros_tra(event=None):

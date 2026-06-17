@@ -27,10 +27,13 @@ class DatabaseManager:
         self._pool_lock = threading.Lock()
         # Lock para conectar/reconectar de forma serializada
         self._connect_lock = threading.Lock()
-        # Evitar correr migraciones/DDL en cada reconexión
+        
+        # Estado de inicialización del esquema (evita loops o re-ejecuciones innecesarias)
         self._schema_initialized = False
-        # Flag de depuración para controlar prints [DB DEBUG]
-        self.debug_enabled = False
+
+        # Driver y opciones determinados en el primer connect()
+        self.current_odbc_driver = None
+        self.current_encrypt_opts = ""
 
     def _log(self, message: str, level: str = 'INFO'):
         """Logger interno con prefijo para identificar origen en consola"""
@@ -43,6 +46,43 @@ class DatabaseManager:
                 print(message)
             except Exception:
                 pass
+
+    def _get_best_odbc_driver(self) -> str:
+        """
+        Detecta el mejor driver ODBC de SQL Server disponible en esta máquina.
+        Prioriza las versiones más recientes para mayor compatibilidad.
+        Retorna el nombre del driver listo para incluir en la cadena de conexión.
+        """
+        try:
+            drivers = pyodbc.drivers()
+        except Exception:
+            drivers = []
+
+        # Orden de preferencia: más nuevo primero
+        preferred = [
+            "ODBC Driver 18 for SQL Server",
+            "ODBC Driver 17 for SQL Server",
+            "ODBC Driver 13 for SQL Server",
+            "ODBC Driver 11 for SQL Server",
+            "SQL Server Native Client 11.0",
+            "SQL Server Native Client 10.0",
+            "SQL Server",   # driver legacy, incluido en Windows
+        ]
+
+        for drv in preferred:
+            if drv in drivers:
+                self._log(f"Driver ODBC seleccionado: {drv}", "INFO")
+                return drv
+
+        # Si no encontramos ninguno de la lista, usar el primero SQL-relacionado disponible
+        sql_drivers = [d for d in drivers if 'SQL' in d.upper()]
+        if sql_drivers:
+            self._log(f"Driver ODBC de fallback: {sql_drivers[0]}", "WARNING")
+            return sql_drivers[0]
+
+        # Último recurso: el legacy que siempre ha estado en Windows
+        self._log("No se encontró driver ODBC de SQL Server, usando legacy 'SQL Server'", "ERROR")
+        return "SQL Server"
 
     def table_exists(self, table_name: str) -> bool:
         """Verifica si una tabla existe en la base de datos con manejo de errores mejorado"""
@@ -77,15 +117,35 @@ class DatabaseManager:
         """
         # Log connection attempt with sanitized info
         self._log(f"Attempting to connect to server: {server}, database: {database}, user: {user if user else 'Windows Auth'}", "INFO")
+
+        # Guardar parámetros base para reconexiones y hilos secundarios
+        self.server = server
+        self.database = database
+        self.user = user
+        self.password = password
+
+        # Detectar el mejor driver disponible en esta máquina
+        odbc_driver = self._get_best_odbc_driver()
+        self.current_odbc_driver = odbc_driver
+
+        # Cadena inicial sin database para crear la BD si no existe.
+        # El driver legacy "SQL Server" (DBNETLIB) no soporta TLS moderno y lanza
+        # el error 08001 (SSL handshake) si se activa Encrypt=yes, por lo que se
+        # fuerza Encrypt=no para ese driver. Los drivers ODBC 17/18 usan cifrado
+        # con certificado auto-firmado aceptado (TrustServerCertificate=yes).
+        _legacy_driver = odbc_driver == "SQL Server"
+        if _legacy_driver:
+            _encrypt_opts = "Encrypt=no;"
+        else:
+            _encrypt_opts = "Encrypt=yes;TrustServerCertificate=yes;"
         
-        # Cadena inicial sin database para crear la BD si no existe
+        self.current_encrypt_opts = _encrypt_opts
+
         initial_conn_str = (
-            f"DRIVER={{SQL Server}};"
+            f"DRIVER={{{odbc_driver}}};"
             f"SERVER={server};"
-            "Encrypt=no;"          
-            "TrustServerCertificate=yes;"  # Changed to yes for better compatibility
-            "Connection Timeout=30;"       # Increased timeout
-            "MARS_Connection=yes;"         # Enable Multiple Active Result Sets
+            f"{_encrypt_opts}"
+            "Connection Timeout=30;"
         )
     
         if user:
@@ -142,11 +202,6 @@ class DatabaseManager:
                 self.conn = pyodbc.connect(final_conn_str)
                 self.cursor = self.conn.cursor()
                 self.connected_server = server
-                # Store connection parameters for potential reconnection
-                self.server = server
-                self.database = database
-                self.user = user
-                self.password = password
                 # Ejecutar DDL solo una vez por proceso (evita conflictos en reconexiones/hilos)
                 if not self._schema_initialized:
                     try:
@@ -160,13 +215,16 @@ class DatabaseManager:
                     missing = self.check_security_schema()
                     if missing:
                         self._log(f"Security schema missing tables: {', '.join(missing)}", "WARNING")
+                    
+                    # Auto-create logistics tables if security schema is mostly OK
+                    # or at least try to ensure they exist for the new module
+                    self.ensure_logistica_tables()
                 except Exception as se:
-                    self._log(f"Security schema check failed: {se}", "ERROR")
+                    self._log(f"Schema check failed: {se}", "ERROR")
                 return True
         except pyodbc.Error as e:
             error_msg = f"{ErrorCode.DB_CONNECTION_FAILED}: {str(e)}"
             raise Exception(error_msg) from e
-
 
     def create_table(self):
         try:
@@ -341,7 +399,7 @@ class DatabaseManager:
                     codigo NVARCHAR(50) NOT NULL UNIQUE,
                     modulo NVARCHAR(50) NOT NULL,
                     descripcion NVARCHAR(MAX) NULL,
-                    CONSTRAINT chk_perm_modulo CHECK (modulo IN (N'TRA', N'MBRP', N'STOCK', N'MENSAJES', N'ESTADISTICAS', N'CALENDARIO', N'ADMIN'))
+                    CONSTRAINT chk_perm_modulo CHECK (modulo IN (N'TRA', N'MBRP', N'STOCK', N'MENSAJES', N'ESTADISTICAS', N'CALENDARIO', N'ADMIN', N'LOGISTICA'))
                 );
             END;
 
@@ -396,7 +454,7 @@ class DatabaseManager:
                     CONSTRAINT pk_pal_usuarios_modulos PRIMARY KEY (usuario_id, modulo),
                     CONSTRAINT fk_pal_um_usuario FOREIGN KEY (usuario_id) REFERENCES pal_usuarios(id) ON DELETE CASCADE,
                     CONSTRAINT fk_pal_um_asignado_por FOREIGN KEY (asignado_por) REFERENCES pal_usuarios(id),
-                    CONSTRAINT chk_pal_um_modulo CHECK (modulo IN (N'TRA', N'MBRP', N'STOCK', N'MENSAJES', N'ESTADISTICAS', N'CALENDARIO', N'ADMIN'))
+                    CONSTRAINT chk_pal_um_modulo CHECK (modulo IN (N'TRA', N'MBRP', N'STOCK', N'MENSAJES', N'ESTADISTICAS', N'CALENDARIO', N'ADMIN', N'LOGISTICA'))
                 );
             END;
 
@@ -460,6 +518,10 @@ class DatabaseManager:
                 INSERT INTO pal_roles (nombre, descripcion, es_sistema) VALUES (N'Mensajería', N'Envío y gestión de mensajes', 1);
             IF NOT EXISTS (SELECT 1 FROM pal_roles WHERE nombre = N'Consulta')
                 INSERT INTO pal_roles (nombre, descripcion, es_sistema) VALUES (N'Consulta', N'Solo lectura', 1);
+            IF NOT EXISTS (SELECT 1 FROM pal_roles WHERE nombre = N'Gerente Logistica')
+                INSERT INTO pal_roles (nombre, descripcion, es_sistema) VALUES (N'Gerente Logistica', N'Autorización y gestión total de logística', 1);
+            IF NOT EXISTS (SELECT 1 FROM pal_roles WHERE nombre = N'Subgerente Logistica')
+                INSERT INTO pal_roles (nombre, descripcion, es_sistema) VALUES (N'Subgerente Logistica', N'Autorización y gestión de logística', 1);
 
             -- Seed permissions
             DECLARE @perm TABLE(codigo NVARCHAR(50), modulo NVARCHAR(50), descripcion NVARCHAR(MAX));
@@ -493,7 +555,13 @@ class DatabaseManager:
             ,(N'admin.roles', N'ADMIN', N'Gestionar roles')
             ,(N'admin.permisos', N'ADMIN', N'Gestionar permisos')
             ,(N'admin.sistema', N'ADMIN', N'Configuración general')
-            ,(N'admin.auditoria', N'ADMIN', N'Ver logs de auditoría');
+            ,(N'admin.auditoria', N'ADMIN', N'Ver logs de auditoría')
+            ,(N'logistica.ver', N'LOGISTICA', N'Acceso al módulo de logística')
+            ,(N'abastecimiento.ver', N'LOGISTICA', N'Ver módulo de abastecimiento')
+            ,(N'abastecimiento.generar', N'LOGISTICA', N'Generar sugerencias de transferencia')
+            ,(N'abastecimiento.autorizar', N'LOGISTICA', N'Autorizar transferencias entre sedes')
+            ,(N'abastecimiento.exportar', N'LOGISTICA', N'Exportar reportes a Excel')
+            ,(N'abastecimiento.configurar', N'LOGISTICA', N'Configurar parámetros de abastecimiento');
 
             INSERT INTO pal_permisos (codigo, modulo, descripcion)
             SELECT p.codigo, p.modulo, p.descripcion
@@ -508,6 +576,8 @@ class DatabaseManager:
             DECLARE @rol_stock INT = (SELECT id FROM pal_roles WHERE nombre = N'Operador Stock');
             DECLARE @rol_msg INT = (SELECT id FROM pal_roles WHERE nombre = N'Mensajería');
             DECLARE @rol_consulta INT = (SELECT id FROM pal_roles WHERE nombre = N'Consulta');
+            DECLARE @rol_ger_log INT = (SELECT id FROM pal_roles WHERE nombre = N'Gerente Logistica');
+            DECLARE @rol_sub_log INT = (SELECT id FROM pal_roles WHERE nombre = N'Subgerente Logistica');
 
             DECLARE @rp TABLE(rol_id INT, perm_code NVARCHAR(50));
             INSERT INTO @rp(rol_id, perm_code)
@@ -547,6 +617,12 @@ class DatabaseManager:
                 N'tra.ver', N'mbrp.ver', N'stock.ver', N'estadisticas.ver', N'calendario.ver', N'mensajes.ver'
             );
 
+            INSERT INTO @rp(rol_id, perm_code)
+            SELECT @rol_ger_log, codigo FROM pal_permisos WHERE modulo = N'LOGISTICA';
+
+            INSERT INTO @rp(rol_id, perm_code)
+            SELECT @rol_sub_log, codigo FROM pal_permisos WHERE modulo = N'LOGISTICA';
+
             INSERT INTO pal_roles_permisos (rol_id, permiso_id)
             SELECT r.rol_id, p.id
             FROM @rp r
@@ -576,7 +652,7 @@ class DatabaseManager:
 
             DECLARE @mods TABLE(modulo NVARCHAR(50));
             INSERT INTO @mods(modulo)
-            VALUES (N'TRA'),(N'MBRP'),(N'STOCK'),(N'MENSAJES'),(N'ESTADISTICAS'),(N'CALENDARIO'),(N'ADMIN');
+            VALUES (N'TRA'),(N'MBRP'),(N'STOCK'),(N'MENSAJES'),(N'ESTADISTICAS'),(N'CALENDARIO'),(N'ADMIN'),(N'LOGISTICA');
 
             INSERT INTO pal_usuarios_modulos (usuario_id, modulo, habilitado, asignado_por)
             SELECT @admin_user_id, m.modulo, 1, @admin_user_id
@@ -584,13 +660,260 @@ class DatabaseManager:
             LEFT JOIN pal_usuarios_modulos um ON um.usuario_id = @admin_user_id AND um.modulo = m.modulo
             WHERE um.usuario_id IS NULL;
             """
+            if not self.conn:
+                return
             cursor = self.conn.cursor()
             cursor.execute(sql)
             self.conn.commit()
             cursor.close()
         except Exception as e:
             raise
-        
+
+    def ensure_logistica_tables(self):
+        """Crea las tablas pal_ para el módulo de Logística / Abastecimiento si no existen."""
+        try:
+            sql = """
+            -- Settings globales (Sedes dinámicas, etc)
+            IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'pal_global_settings' AND type = 'U')
+            BEGIN
+                CREATE TABLE pal_global_settings (
+                    setting_key NVARCHAR(50) PRIMARY KEY,
+                    setting_value NVARCHAR(MAX),
+                    description NVARCHAR(255),
+                    last_modified DATETIME DEFAULT GETDATE()
+                );
+            END;
+
+            -- Parámetros de abastecimiento (días de stock por categoría)
+            IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'pal_parametros_abastecimiento' AND type = 'U')
+            BEGIN
+                CREATE TABLE pal_parametros_abastecimiento (
+                    id INT IDENTITY(1,1) PRIMARY KEY,
+                    categoria_id NVARCHAR(50) NULL, -- Código de grupo en Profit (NULL = Global)
+                    dias_stock INT DEFAULT 7,
+                    umbral_quiebre DECIMAL(10,2) DEFAULT 50, -- Cantidad mínima física para considerar quiebre
+                    umbral_autorizacion DECIMAL(10,2) DEFAULT 10,
+                    dias_analisis_ventas INT DEFAULT 365, -- Rango de días de rotación a usar (30, 90, 365)
+                    fecha_actualizacion DATETIME DEFAULT GETDATE()
+                );
+            END;
+            ELSE
+            BEGIN
+                IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[pal_parametros_abastecimiento]') AND name = 'umbral_autorizacion')
+                BEGIN
+                    ALTER TABLE [dbo].[pal_parametros_abastecimiento] ADD [umbral_autorizacion] DECIMAL(10,2) DEFAULT 10;
+                END
+                IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[pal_parametros_abastecimiento]') AND name = 'umbral_quiebre')
+                BEGIN
+                    ALTER TABLE [dbo].[pal_parametros_abastecimiento] ADD [umbral_quiebre] DECIMAL(10,2) DEFAULT 50;
+                END
+                IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[pal_parametros_abastecimiento]') AND name = 'dias_analisis_ventas')
+                BEGIN
+                    ALTER TABLE [dbo].[pal_parametros_abastecimiento] ADD [dias_analisis_ventas] INT DEFAULT 365;
+                END
+            END
+
+            -- Auditoría de autorizaciones
+            IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'pal_auditoria_autorizaciones' AND type = 'U')
+            BEGIN
+                CREATE TABLE pal_auditoria_autorizaciones (
+                    id INT IDENTITY(1,1) PRIMARY KEY,
+                    usuario_id INT,
+                    producto_codigo NVARCHAR(15),
+                    sucursal_origen NVARCHAR(50),
+                    sucursal_destino NVARCHAR(50),
+                    cantidad_original DECIMAL(10,2),
+                    cantidad_autorizada DECIMAL(10,2),
+                    motivo TEXT,
+                    fecha_autorizacion DATETIME DEFAULT GETDATE()
+                );
+            END;
+
+            -- Sugerencias de transferencia
+            IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'pal_sugerencias_transferencia' AND type = 'U')
+            BEGIN
+                CREATE TABLE pal_sugerencias_transferencia (
+                    id INT IDENTITY(1,1) PRIMARY KEY,
+                    producto_codigo NVARCHAR(15),
+                    sucursal_destino NVARCHAR(50),
+                    sucursal_origen_sugerida NVARCHAR(50),
+                    cantidad_sugerida DECIMAL(10,2),
+                    cantidad_disponible DECIMAL(10,2),
+                    stock_actual DECIMAL(10,2),
+                    dias_stock_actual INT,
+                    dias_stock_necesario INT,
+                    tiene_odc_activa BIT DEFAULT 0,
+                    es_producto_rojo BIT DEFAULT 0,
+                    tipo_solicitud NVARCHAR(20) DEFAULT 'normal', -- normal, odc, producto_rojo
+                    requiere_autorizacion BIT DEFAULT 0,
+                    fue_autorizada BIT DEFAULT 0,
+                    usuario_autoriza INT,
+                    cantidad_pre_ajuste DECIMAL(10,2) NULL,
+                    fecha_autorizacion DATETIME,
+                    fecha_generacion DATETIME DEFAULT GETDATE(),
+                    estado NVARCHAR(20) DEFAULT 'pendiente' -- pendiente, aprobada, rechazada, exportada
+                );
+            END;
+            ELSE
+            BEGIN
+                IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[pal_sugerencias_transferencia]') AND name = 'stock_actual')
+                BEGIN
+                    ALTER TABLE [dbo].[pal_sugerencias_transferencia] ADD [stock_actual] DECIMAL(10,2) NULL;
+                END
+                IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[pal_sugerencias_transferencia]') AND name = 'cantidad_pre_ajuste')
+                BEGIN
+                    ALTER TABLE [dbo].[pal_sugerencias_transferencia] ADD [cantidad_pre_ajuste] DECIMAL(10,2) NULL;
+                END
+                IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[pal_sugerencias_transferencia]') AND name = 'maestro_id')
+                BEGIN
+                    ALTER TABLE [dbo].[pal_sugerencias_transferencia] ADD [maestro_id] INT NULL;
+                END
+            END
+
+            -- Maestro de Transferencias (Agrupación por Órden)
+            IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'pal_transferencias_maestro' AND type = 'U')
+            BEGIN
+                CREATE TABLE pal_transferencias_maestro (
+                    id INT IDENTITY(1,1) PRIMARY KEY,
+                    numero_transf NVARCHAR(20) UNIQUE NOT NULL,
+                    sucursal_destino NVARCHAR(50) NOT NULL,
+                    fecha_creacion DATETIME DEFAULT GETDATE(),
+                    usuario_crea INT,
+                    estado NVARCHAR(20) DEFAULT 'en_transito' -- en_transito, recibida, anulada
+                );
+            END;
+
+            -- Productos no trasladables (Lista ROJA) - Por sede destino
+            IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'pal_productos_no_trasladables' AND type = 'U')
+            BEGIN
+                CREATE TABLE pal_productos_no_trasladables (
+                    id INT IDENTITY(1,1) PRIMARY KEY,
+                    producto_codigo NVARCHAR(15) NOT NULL,
+                    sede_destino NVARCHAR(50) NULL, -- NULL = todas las sedes destino
+                    motivo NVARCHAR(255) NULL,
+                    fecha_registro DATETIME DEFAULT GETDATE(),
+                    usuario_id INT NULL,
+                    activo BIT DEFAULT 1
+                );
+            END;
+            ELSE
+            BEGIN
+                -- Agregar columnas faltantes si la tabla ya existía
+                IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[pal_productos_no_trasladables]') AND name = 'fecha_registro')
+                BEGIN
+                    ALTER TABLE [dbo].[pal_productos_no_trasladables] ADD [fecha_registro] [datetime] NULL DEFAULT (getdate())
+                END
+                
+                IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[pal_productos_no_trasladables]') AND name = 'usuario_id')
+                BEGIN
+                    ALTER TABLE [dbo].[pal_productos_no_trasladables] ADD [usuario_id] [int] NULL
+                END
+
+                IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[pal_productos_no_trasladables]') AND name = 'activo')
+                BEGIN
+                    ALTER TABLE [dbo].[pal_productos_no_trasladables] ADD [activo] [bit] NULL DEFAULT ((1))
+                END
+            END
+
+            -- Compromisos Centralizados de Inventario
+            IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'pal_compromisos_inventario' AND type = 'U')
+            BEGIN
+                CREATE TABLE pal_compromisos_inventario (
+                    id INT IDENTITY(1,1) PRIMARY KEY,
+                    producto_codigo NVARCHAR(15) NOT NULL,
+                    sucursal_origen NVARCHAR(50) NOT NULL,
+                    sucursal_destino NVARCHAR(50) NOT NULL,
+                    cantidad DECIMAL(10,2) NOT NULL,
+                    estado NVARCHAR(20) DEFAULT 'activo', -- activo, completado, anulado
+                    referencia_maestro INT NULL,
+                    usuario_id INT NULL,
+                    fecha_creacion DATETIME DEFAULT GETDATE(),
+                    fecha_actualizacion DATETIME DEFAULT GETDATE()
+                );
+            END;
+            ELSE
+            BEGIN
+                IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'idx_pal_compromisos_producto')
+                    CREATE INDEX idx_pal_compromisos_producto ON pal_compromisos_inventario(producto_codigo, estado);
+            END
+
+            -- Índices
+            IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'idx_pal_sugerencias_estado')
+                CREATE INDEX idx_pal_sugerencias_estado ON pal_sugerencias_transferencia(estado, fecha_generacion);
+
+            -- Asegurar permisos base para Logística
+            IF NOT EXISTS (SELECT * FROM pal_permisos WHERE codigo = 'abastecimiento.ver')
+                INSERT INTO pal_permisos (codigo, modulo, descripcion) VALUES ('abastecimiento.ver', 'LOGISTICA', 'Ver módulo de abastecimiento');
+            IF NOT EXISTS (SELECT * FROM pal_permisos WHERE codigo = 'abastecimiento.generar')
+                INSERT INTO pal_permisos (codigo, modulo, descripcion) VALUES ('abastecimiento.generar', 'LOGISTICA', 'Generar sugerencias de transferencia');
+            IF NOT EXISTS (SELECT * FROM pal_permisos WHERE codigo = 'abastecimiento.autorizar')
+                INSERT INTO pal_permisos (codigo, modulo, descripcion) VALUES ('abastecimiento.autorizar', 'LOGISTICA', 'Autorizar transferencias');
+
+            -- Asegurar roles para Logística
+            IF NOT EXISTS (SELECT * FROM pal_roles WHERE nombre = 'Gerente Logistica')
+                INSERT INTO pal_roles (nombre, descripcion) VALUES ('Gerente Logistica', 'Gestión completa de abastecimiento y transferencias');
+            IF NOT EXISTS (SELECT * FROM pal_roles WHERE nombre = 'Subgerente Logistica')
+                INSERT INTO pal_roles (nombre, descripcion) VALUES ('Subgerente Logistica', 'Generación de sugerencias y visualización');
+
+            -- Recepciones Parciales
+            IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'pal_recepciones_maestro' AND type = 'U')
+            BEGIN
+                CREATE TABLE pal_recepciones_maestro (
+                    id INT IDENTITY(1,1) PRIMARY KEY,
+                    numero_recepcion NVARCHAR(20) UNIQUE NOT NULL,
+                    transferencia_id INT NOT NULL,
+                    fecha_recepcion DATETIME DEFAULT GETDATE(),
+                    usuario_recibe INT,
+                    observaciones TEXT NULL,
+                    estado NVARCHAR(20) DEFAULT 'completada'
+                );
+            END;
+
+            IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'pal_recepciones_detalle' AND type = 'U')
+            BEGIN
+                CREATE TABLE pal_recepciones_detalle (
+                    id INT IDENTITY(1,1) PRIMARY KEY,
+                    recepcion_id INT NOT NULL,
+                    sugerencia_id INT NOT NULL,
+                    cantidad_recibida DECIMAL(18,2) NOT NULL
+                );
+            END;
+
+            IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'pal_recepciones_lotes' AND type = 'U')
+            BEGIN
+                CREATE TABLE pal_recepciones_lotes (
+                    id INT IDENTITY(1,1) PRIMARY KEY,
+                    recepcion_detalle_id INT NOT NULL,
+                    lote_interno NVARCHAR(50) NOT NULL,
+                    lote_fabrica NVARCHAR(50) NULL,
+                    fecha_vencimiento DATE NULL,
+                    cantidad DECIMAL(18,2) NOT NULL,
+                    fecha_registro DATETIME DEFAULT GETDATE()
+                );
+            END;
+
+            -- Agregar columnas a pal_sugerencias_transferencia si no existen
+            IF EXISTS (SELECT * FROM sys.tables WHERE name = 'pal_sugerencias_transferencia' AND type = 'U')
+            BEGIN
+                IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[pal_sugerencias_transferencia]') AND name = 'cantidad_recibida_total')
+                BEGIN
+                    ALTER TABLE [dbo].[pal_sugerencias_transferencia] ADD [cantidad_recibida_total] DECIMAL(18,2) DEFAULT 0;
+                END
+                IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[pal_sugerencias_transferencia]') AND name = 'estado_recepcion')
+                BEGIN
+                    ALTER TABLE [dbo].[pal_sugerencias_transferencia] ADD [estado_recepcion] NVARCHAR(20) DEFAULT 'pendiente';
+                END
+            END
+            """
+            if not self.conn:
+                return
+            cursor = self.conn.cursor()
+            cursor.execute(sql)
+            self.conn.commit()
+            cursor.close()
+        except Exception as e:
+            self._log(f"Error creando tablas de logística: {e}", "ERROR")
+
     def obtener_alertas_stock(self, limit=None):
         max_retries = 3
         
@@ -612,17 +935,21 @@ class DatabaseManager:
                 query = """
                     SELECT 
                         c_codarticulo AS codigo,
-                        MAX(p.C_DESCRI) AS descripcion,
+                        COALESCE(p.cu_descripcion_corta, 'SIN DESCRIPCIÓN') AS descripcion,
+                        'Dep. 0301' AS sede,
                         CAST(SUM(n_cantidad) AS INT) AS stock,  
                     CASE
                         WHEN SUM(n_cantidad) BETWEEN 15 AND 20 THEN 'Leve'  
                         WHEN SUM(n_cantidad) BETWEEN 8 AND 14 THEN 'Media'
                         ELSE 'Crítica'
-                    END AS nivel
+                    END AS nivel,
+                    '' AS dummy1,
+                    '' AS dummy2,
+                    COALESCE(p.C_DESCRI, 'SIN DESCRIPCIÓN') AS descripcion_larga
                     FROM MA_DEPOPROD d
                         INNER JOIN MA_PRODUCTOS p ON d.c_codarticulo = p.C_CODIGO
                         WHERE c_coddeposito = '0301'
-                        GROUP BY c_codarticulo
+                        GROUP BY c_codarticulo, p.cu_descripcion_corta, p.C_DESCRI
                     HAVING SUM(n_cantidad) <= 20  
                     ORDER BY CAST(SUM(n_cantidad) AS INT) ASC
                     """
@@ -706,13 +1033,12 @@ class DatabaseManager:
                 import pyodbc
                 
                 conn_str = (
-                    f"DRIVER={{SQL Server}};"
+                    f"DRIVER={{{self.current_odbc_driver}}};" 
                     f"SERVER={self.server};"
                     f"DATABASE={self.database};"
-                    "Encrypt=no;"
-                    "TrustServerCertificate=yes;"
+                    f"{self.current_encrypt_opts}" # current_encrypt_opts already includes trailing semicolon
                     "Connection Timeout=30;"
-                    "MARS_Connection=yes;"  # Enable Multiple Active Result Sets
+                    "MARS_Connection=yes;"
                 )
                 
                 if self.user:
@@ -1025,11 +1351,12 @@ class DatabaseManager:
                         SELECT 
                             d.c_codarticulo,
                             SUM(d.n_cantidad) as stock_total,
-                            COALESCE(p.cu_descripcion_corta, 'SIN DESCRIPCIÓN') as C_DESCRI
+                            COALESCE(p.cu_descripcion_corta, 'SIN DESCRIPCIÓN') as C_DESCRI,
+                            COALESCE(p.C_DESCRI, 'SIN DESCRIPCIÓN') as C_DESCRI_FULL
                         FROM MA_DEPOPROD d
                         INNER JOIN MA_PRODUCTOS p ON d.c_codarticulo = p.C_CODIGO
                         WHERE d.c_coddeposito = ?
-                        GROUP BY d.c_codarticulo, p.cu_descripcion_corta
+                        GROUP BY d.c_codarticulo, p.cu_descripcion_corta, p.C_DESCRI
                         HAVING SUM(d.n_cantidad) < 21
                     ),
                     stock_ranked AS (
@@ -1042,10 +1369,11 @@ class DatabaseManager:
                                 WHEN stock_total BETWEEN 8 AND 14 THEN 'Media'
                                 ELSE 'Crítica'
                             END AS nivel,
-                            ROW_NUMBER() OVER (ORDER BY stock_total ASC) as rn
+                            ROW_NUMBER() OVER (ORDER BY stock_total ASC) as rn,
+                            C_DESCRI_FULL AS desc_larga
                         FROM stock_summary
                     )
-                    SELECT codigo, descripcion, stock, nivel
+                    SELECT codigo, desc_corta, 'Dep. ' + CAST(? AS VARCHAR) as sede, stock, nivel, '' as dummy1, '' as dummy2, desc_larga
                     FROM stock_ranked
                     WHERE rn BETWEEN ? AND ?
                     """
@@ -1179,7 +1507,11 @@ class DatabaseManager:
                         WHEN i.c_Concepto = 'VEN' THEN i.n_Cantidad
                         WHEN i.c_Concepto = 'DEV' THEN -i.n_Cantidad 
                         ELSE 0 
-                    END) AS neto
+                    END) AS neto,
+                    0.0 AS precio,
+                    0.0 AS impuesto1,
+                    0.0 AS costo,
+                    COALESCE(p.C_DESCRI, 'SIN DESCRIPCIÓN') AS descripcion_larga
                 FROM TR_INVENTARIO i
                 LEFT JOIN MA_PRODUCTOS p ON i.c_Codarticulo = p.C_CODIGO
                 WHERE i.f_fecha BETWEEN CONVERT(DATE, ?, 105) AND CONVERT(DATE, ?, 105)
@@ -1192,7 +1524,8 @@ class DatabaseManager:
                     p.C_DESCRI,
                     p.C_DEPARTAMENTO,
                     p.C_GRUPO,
-                    p.C_SUBGRUPO
+                    p.C_SUBGRUPO,
+                    p.C_DESCRI
                 ORDER BY neto DESC
             """
             
@@ -1219,7 +1552,7 @@ class DatabaseManager:
         Args:
             fecha_inicio: Fecha inicio del rango
             fecha_fin: Fecha fin del rango  
-            sede_codigo: Código de sede/depósito
+            sede_codigo: Código de sede/depósito o lista de depósitos
             start_row: Fila inicial (1-indexed)
             fetch_size: Cantidad de filas a obtener
             include_zero_sales: Si True, incluye productos con neto <= 0
@@ -1227,7 +1560,13 @@ class DatabaseManager:
         """
         try:
             # OPTIMIZACIÓN CRÍTICA: CTE + NOLOCK + filtro dinámico por depósito
-            global_query = (sede_codigo in (None, '%', '00', 'ICH', 'ALL'))
+            is_list = isinstance(sede_codigo, (list, tuple))
+            if is_list:
+                depositos_list = list(sede_codigo)
+                global_query = False
+            else:
+                global_query = (sede_codigo in (None, '%', '00', 'ICH', 'ALL'))
+                depositos_list = [sede_codigo] if not global_query else []
             
             # Construir cláusula de exclusión
             exclude_clause = ""
@@ -1247,6 +1586,16 @@ class DatabaseManager:
             # Parametros para la query
             params = [fecha_inicio.strftime("%d-%m-%Y"), fecha_fin.strftime("%d-%m-%Y")]
             
+            # Construir filtro de depósitos
+            dep_filter = ""
+            if is_list:
+                placeholders_dep = ','.join(['?'] * len(depositos_list))
+                dep_filter = f"AND i.c_Deposito IN ({placeholders_dep})"
+                params.extend(depositos_list)
+            elif not global_query:
+                dep_filter = "AND i.c_Deposito = ?"
+                params.append(sede_codigo)
+
             # CTE común - calcula ventas por producto
             cte_part = f"""
                 WITH VentasAgregadas AS (
@@ -1260,15 +1609,12 @@ class DatabaseManager:
                     FROM TR_INVENTARIO i WITH (NOLOCK)
                     WHERE i.f_fecha BETWEEN CONVERT(DATE, ?, 105) AND CONVERT(DATE, ?, 105)
                         AND i.c_Concepto IN ('VEN', 'DEV') 
-                        {'AND i.c_Deposito = ?' if not global_query else ''}
+                        {dep_filter}
                     GROUP BY i.c_Codarticulo
                     {having_clause}
                 )
             """
             
-            if not global_query:
-                params.append(sede_codigo)
-
             # Query principal
             if include_zero_sales:
                 # MODO MASIVO: FROM MA_PRODUCTOS LEFT JOIN Ventas
@@ -1282,7 +1628,9 @@ class DatabaseManager:
                         COALESCE(v.neto, 0) AS neto,
                         COALESCE(p.n_precio1, 0) AS precio,
                         COALESCE(p.n_impuesto1, 0) AS impuesto1,
-                        COALESCE(p.n_costoact, 0) AS costo
+                        COALESCE(p.n_costoact, 0) AS costo,
+                        COALESCE(p.C_DESCRI, 'SIN DESCRIPCIÓN') AS descripcion_larga,
+                        p.C_DESCRI as desc_larga_raw
                     FROM MA_PRODUCTOS p WITH (NOLOCK)
                     LEFT JOIN VentasAgregadas v ON p.C_CODIGO = v.codigo
                     WHERE 1=1 {exclude_clause}
@@ -1301,7 +1649,9 @@ class DatabaseManager:
                         v.neto,
                         COALESCE(p.n_precio1, 0) AS precio,
                         COALESCE(p.n_impuesto1, 0) AS impuesto1,
-                        COALESCE(p.n_costoact, 0) AS costo
+                        COALESCE(p.n_costoact, 0) AS costo,
+                        COALESCE(p.C_DESCRI, 'SIN DESCRIPCIÓN') AS descripcion_larga,
+                        p.C_DESCRI as desc_larga_raw
                     FROM VentasAgregadas v
                     LEFT JOIN MA_PRODUCTOS p WITH (NOLOCK) ON v.codigo = p.C_CODIGO
                     WHERE 1=1 {exclude_clause}
@@ -1337,53 +1687,144 @@ class DatabaseManager:
     
     def obtener_fechas_criticas_tra(self, codigos, sede_codigo):
         """
-        Obtiene Update_date, última venta y TOTAL VENTAS desde UC hasta hoy.
-        
-        Returns:
-            dict: {codigo: (update_date, last_ven_date, total_sales_since_uc)}
+        Obtiene fecha de actualización, última venta y suma de ventas desde la actualización
+        para un conjunto de productos en una sede.
         """
         if not codigos:
             return {}
             
+        fechas = {}
+        chunk_size = 1000
+        
         try:
-            placeholders = ','.join(['?'] * len(codigos))
-            
-            # Subconsulta para última venta y suma de ventas desde Update_date
-            query = f"""
-                SELECT 
-                    RTRIM(LTRIM(p.C_CODIGO)) as codigo,
-                    p.Update_date,
-                    dates.last_ven,
-                    dates.total_qty
-                FROM MA_PRODUCTOS p WITH (NOLOCK)
-                OUTER APPLY (
-                    SELECT 
-                        MAX(i.f_fecha) as last_ven,
-                        SUM(CASE WHEN i.c_Concepto = 'DEV' THEN i.n_Cantidad * -1 ELSE i.n_Cantidad END) AS total_qty
-                    FROM TR_INVENTARIO i WITH (NOLOCK)
-                    WHERE i.c_Codarticulo = p.C_CODIGO 
-                      AND (i.c_Concepto = 'VEN' OR i.c_Concepto = 'DEV')
-                      AND i.f_fecha >= p.Update_date
-                      AND (i.c_Deposito = ? OR ? IN ('00', 'ICH', 'ALL', '%'))
-                ) dates
-                WHERE p.C_CODIGO IN ({placeholders})
-            """
-            
-            params = [sede_codigo, sede_codigo] + list(codigos)
-            rows = self.fetch_data(query, params)
-            
-            fechas = {}
-            for row in rows:
-                codigo = str(row[0]).strip()
-                update_date = row[1]
-                last_ven = row[2]
-                total_qty = float(row[3] or 0)
-                fechas[codigo] = (update_date, last_ven, total_qty)
+            for i in range(0, len(codigos), chunk_size):
+                chunk = codigos[i:i + chunk_size]
+                placeholders = ','.join(['?'] * len(chunk))
                 
+                query = f"""
+                    SELECT 
+                        RTRIM(LTRIM(p.C_CODIGO)) as codigo,
+                        p.Update_date,
+                        dates.last_ven,
+                        dates.total_qty
+                    FROM MA_PRODUCTOS p WITH (NOLOCK)
+                    OUTER APPLY (
+                        SELECT 
+                            MAX(i.f_fecha) as last_ven,
+                            SUM(CASE WHEN i.c_Concepto = 'DEV' THEN i.n_Cantidad * -1 ELSE i.n_Cantidad END) AS total_qty
+                        FROM TR_INVENTARIO i WITH (NOLOCK)
+                        WHERE i.c_Codarticulo = p.C_CODIGO 
+                          AND (i.c_Concepto = 'VEN' OR i.c_Concepto = 'DEV')
+                          AND i.f_fecha >= p.Update_date
+                          AND (i.c_Deposito = ? OR ? IN ('00', 'ICH', 'ALL', '%'))
+                    ) dates
+                    WHERE p.C_CODIGO IN ({placeholders})
+                """
+                
+                params = [sede_codigo, sede_codigo] + list(chunk)
+                rows = self.fetch_data(query, params)
+                
+                for row in rows:
+                    codigo = str(row[0]).strip()
+                    fechas[codigo] = {
+                        'update_date': row[1],
+                        'last_ven': row[2],
+                        'total_sales': float(row[3] or 0)
+                    }
+                    
             return fechas
         except Exception as e:
             print(f"Error obteniendo fechas críticas TRA: {str(e)}")
+            return fechas
+
+    def obtener_fechas_liquidacion_y_ventas(self, codigos, depositos, dias_estudio=365, dias_obj=30):
+        """
+        Obtiene fecha de última liquidación, fecha de última venta y unidades vendidas
+        por períodos en cascada (dias_obj, dias_obj*2, dias_obj*4 ... dias_obj²) para un
+        conjunto de productos y depósitos. Todo en una sola consulta SQL.
+
+        Returns:
+            dict: {
+                codigo: {
+                    'ultima_liquidacion': date,
+                    'ultima_venta': date,
+                    'periodos': {30: float, 60: float, 120: float, ...}  # unidades por período
+                }
+            }
+        """
+        if not codigos or not depositos:
             return {}
+
+        # Construir ventanas en cascada: [N, 2N, 3N] donde N = dias_obj
+        # Máximo = dias_obj × 3 (sin valores hardcodeados)
+        max_dias = int(dias_obj * 3)
+        periodos = [int(dias_obj), int(dias_obj * 2), max_dias]
+
+        resultado = {}
+        chunk_size = 1000
+
+        try:
+            placeholders_deps = ','.join(['?'] * len(depositos))
+
+            # Agregate CASE WHEN expressions para el OUTER APPLY
+            cases_ven = ',\n                            '.join([
+                f"SUM(CASE WHEN i.c_Concepto = 'VEN' AND i.f_fecha >= DATEADD(day, -{p}, GETDATE()) THEN i.n_cantidad ELSE 0 END)"
+                f" - SUM(CASE WHEN i.c_Concepto = 'DEV' AND i.f_fecha >= DATEADD(day, -{p}, GETDATE()) THEN i.n_cantidad ELSE 0 END)"
+                f" as units_{p}d"
+                for p in periodos
+            ])
+            # Referencias a las columnas del OUTER APPLY en el SELECT exterior
+            select_period_cols = ',\n                        '.join([f"stats.units_{p}d" for p in periodos])
+
+            for i in range(0, len(codigos), chunk_size):
+                chunk = codigos[i:i + chunk_size]
+                placeholders_cods = ','.join(['?'] * len(chunk))
+
+                query = f"""
+                    SELECT
+                        RTRIM(LTRIM(p.C_CODIGO)) as codigo,
+                        ISNULL(liq.ultima_liquidacion, p.Update_date) as ultima_liquidacion,
+                        stats.last_sale as ultima_venta,
+                        {select_period_cols}
+                    FROM MA_PRODUCTOS p WITH (NOLOCK)
+                    OUTER APPLY (
+                        SELECT MAX(h.d_fechaCambio) as ultima_liquidacion
+                        FROM MA_HISTORICO_COSTO_PRECIO h WITH (NOLOCK)
+                        WHERE h.c_codarticulo = p.C_CODIGO
+                          AND h.c_procesoOrigen = 'REGISTRO DE FACTURA'
+                    ) liq
+                    OUTER APPLY (
+                        SELECT
+                            MAX(i.f_fecha) as last_sale,
+                            {cases_ven}
+                        FROM TR_INVENTARIO i WITH (NOLOCK)
+                        WHERE i.c_Codarticulo = p.C_CODIGO
+                            AND i.c_Deposito IN ({placeholders_deps})
+                            AND i.f_fecha >= DATEADD(day, -{max_dias}, GETDATE())
+                            AND (i.c_Concepto = 'VEN' OR i.c_Concepto = 'DEV')
+                    ) stats
+                    WHERE p.C_CODIGO IN ({placeholders_cods})
+                """
+
+                params = list(depositos) + list(chunk)
+                rows = self.fetch_data(query, params)
+
+                for row in rows:
+                    codigo = str(row[0]).strip()
+                    periodos_vals = {}
+                    # Columnas: 0=codigo, 1=ult_liq, 2=ult_venta, 3..N-1=periods, N=dummy
+                    for idx, p in enumerate(periodos):
+                        val = row[3 + idx]
+                        periodos_vals[p] = float(val or 0)
+                    resultado[codigo] = {
+                        'ultima_liquidacion': row[1],
+                        'ultima_venta': row[2],
+                        'periodos': periodos_vals
+                    }
+            return resultado
+        except Exception as e:
+            print(f"Error en obtener_fechas_liquidacion_y_ventas: {str(e)}")
+            return resultado
 
     def obtener_depositos(self):
         """Obtiene lista de depósitos desde MA_DEPOSITO
@@ -1545,19 +1986,26 @@ class DatabaseManager:
             query = f"""
                 SELECT 
                     RTRIM(LTRIM(p.C_CODIGO)) as codigo,
-                    p.c_Descri as descripcion,
+                    COALESCE(p.cu_descripcion_corta, 'SIN DESCRIPCIÓN') as descripcion,
+                    COALESCE(p.C_DESCRI, 'SIN DESCRIPCIÓN') as descripcion_larga,
                     '{sede_label}' as sede,
-                    p.Update_date as ultima_compra,
+                    ISNULL(liq.ultima_liquidacion, p.Update_date) as ultima_compra,
                     stats.last_sale as ultima_venta,
                     -- Cálculo de Venta Perdida Proyectada: (Ventas / Días con Stock) * Días en Quiebre
-                    CAST(ROUND(
-                        (ISNULL(stats.sold_units, 0) / 
-                         NULLIF(DATEDIFF(DAY, p.Update_date, stats.last_sale) + 1, 0)) -- Días con stock
-                        * DATEDIFF(DAY, ISNULL(stats.last_sale, p.Update_date), GETDATE()) -- Días en quiebre
-                    , 2) AS FLOAT) as unidades_perdidas,
-                    DATEDIFF(DAY, ISNULL(stats.last_sale, p.Update_date), GETDATE()) as dias_quiebre
+                    CAST(CEILING(
+                        (CAST(ISNULL(stats.sold_units, 0) AS FLOAT) / 
+                         NULLIF(DATEDIFF(DAY, ISNULL(liq.ultima_liquidacion, p.Update_date), stats.last_sale) + 1, 0)) -- Días con stock
+                        * DATEDIFF(DAY, ISNULL(stats.last_sale, ISNULL(liq.ultima_liquidacion, p.Update_date)), GETDATE()) -- Días en quiebre
+                    ) AS INT) as unidades_perdidas,
+                    DATEDIFF(DAY, ISNULL(stats.last_sale, ISNULL(liq.ultima_liquidacion, p.Update_date)), GETDATE()) as dias_quiebre
                 FROM MA_PRODUCTOS p WITH (NOLOCK)
                 {rotation_join}
+                OUTER APPLY (
+                    SELECT MAX(h.d_fechaCambio) as ultima_liquidacion
+                    FROM MA_HISTORICO_COSTO_PRECIO h WITH (NOLOCK)
+                    WHERE h.c_codarticulo = p.C_CODIGO
+                      AND h.c_procesoOrigen = 'REGISTRO DE FACTURA'
+                ) liq
                 CROSS APPLY (
                     SELECT 
                         SUM(ISNULL(n_cantidad, 0)) as total_stock
@@ -1572,7 +2020,7 @@ class DatabaseManager:
                     FROM TR_INVENTARIO i WITH (NOLOCK)
                     WHERE i.c_Codarticulo = p.C_CODIGO 
                         AND i.c_Deposito IN ({placeholders})
-                        AND i.f_fecha >= p.Update_date
+                        AND i.f_fecha >= ISNULL(liq.ultima_liquidacion, p.Update_date)
                         AND (i.c_Concepto = 'VEN' OR i.c_Concepto = 'DEV')
                 ) stats
                 WHERE stock.total_stock <= 0
@@ -1591,15 +2039,18 @@ class DatabaseManager:
             
             quiebres = []
             for row in rows:
-                quiebres.append({
-                    'codigo': row[0],
-                    'descripcion': row[1],
-                    'sede': row[2],
-                    'ultima_compra': row[3],
-                    'ultima_venta': row[4],
-                    'unidades_perdidas': float(row[5]),
-                    'dias_quiebre': row[6]
-                })
+                # Retornar como tupla para compatibilidad con Treeview en app.py
+                # Estructura: (codigo, descripcion, sede, unidades_perdidas, dias_quiebre, ultima_compra, ultima_venta, descripcion_larga)
+                quiebres.append((
+                    str(row[0]).strip(),      # codigo
+                    str(row[1]).strip(),      # descripcion (corta)
+                    row[3],                   # sede
+                    float(row[6] or 0),       # unidades_perdidas
+                    int(row[7] or 0),         # dias_quiebre
+                    row[4],                   # ultima_compra (datetime)
+                    row[5],                   # ultima_venta (datetime)
+                    str(row[2]).strip()       # descripcion_larga
+                ))
             return quiebres
             
         except Exception as e:
@@ -1644,28 +2095,32 @@ class DatabaseManager:
         Requiere un diccionario de configuración de sede obtenido de get_sedes_config().
         La contraseña se desencripta usando SecureCredentialsManager.
         """
-        server = sede_config['ip_servidor']
-        database = sede_config['nombre_bd']
-        user = sede_config['usuario_bd']
-        encrypted_password = sede_config['password_bd_enc']
+        if not sede_config:
+            raise Exception("Configuración de sede no proporcionada")
+
+        server = sede_config.get('ip_servidor')
+        database = sede_config.get('nombre_bd')
+        user = sede_config.get('usuario_bd')
+        encrypted_password = sede_config.get('password_bd_enc')
+
+        if not server or not database:
+            raise Exception(f"Configuración incompleta para sede {sede_config.get('nombre_sede', 'Unknown')}")
 
         password = None
         if encrypted_password and self.credentials_manager:
             try:
-                # La contraseña se desencripta aquí
                 password = self.credentials_manager.decrypt(encrypted_password)
             except Exception as e:
-                self._log(f"Error desencriptando contraseña para {sede_config['nombre_sede']}: {e}", "ERROR")
-                raise Exception(f"Fallo al desencriptar contraseña VAD20 para {sede_config['nombre_sede']}")
+                self._log(f"Error desencriptando contraseña para {sede_config.get('nombre_sede')}: {e}", "ERROR")
+                # fallback al password en texto plano si existe o seguir sin pass
+                password = encrypted_password # Intento desesperado si no estaba encriptado realmente
 
-        # Cadena de conexión para la sede VAD20
+        # Cadena de conexión simplificada para mayor compatibilidad
+        # Algunos drivers antiguos fallan con Encrypt/TrustServerCertificate
         conn_str = (
             f"DRIVER={{SQL Server}};"
             f"SERVER={server};"
             f"DATABASE={database};"
-            "Encrypt=no;"
-            "TrustServerCertificate=yes;"
-            "Connection Timeout=15;" # Timeout más corto para conexiones secundarias
         )
 
         if user:
@@ -1673,13 +2128,63 @@ class DatabaseManager:
         else:
             conn_str += "Trusted_Connection=yes;"
         
+        # Agregar timeouts básicos
+        conn_str += "Connection Timeout=30;"
+        
         try:
+            self._log(f"Intentando conectar a VAD20 ({sede_config.get('nombre_sede')}) en {server}...", "INFO")
             temp_conn = pyodbc.connect(conn_str)
-            self._log(f"Conectado exitosamente a VAD20 para sede: {sede_config['nombre_sede']}", "INFO")
+            self._log(f"Conectado exitosamente a VAD20 para sede: {sede_config.get('nombre_sede')}", "INFO")
             return temp_conn
         except Exception as e:
-            self._log(f"Fallo al conectar a VAD20 para sede {sede_config['nombre_sede']}: {e}", "ERROR")
-            raise Exception(f"Fallo al conectar a VAD20 para {sede_config['nombre_sede']}")
+            self._log(f"Fallo al conectar a VAD20 para sede {sede_config.get('nombre_sede')}: {e}", "ERROR")
+            raise Exception(f"Fallo al conectar a VAD20 para {sede_config.get('nombre_sede')}. Verifique IP {server} y red.")
+
+    def connect_to_vad10_sede(self, sede_config):
+        """
+        Establece una conexión pyodbc temporal a la base de datos VAD10 de una sede específica.
+        Usa la misma IP y credenciales de la sede configurada, pero apunta a VAD10 en lugar de VAD20.
+        Útil para obtener datos de usuarios/cajeras que residen en VAD10 de cada sede.
+        """
+        if not sede_config:
+            raise Exception("Configuración de sede no proporcionada")
+
+        server = sede_config.get('ip_servidor')
+        user = sede_config.get('usuario_bd')
+        encrypted_password = sede_config.get('password_bd_enc')
+
+        if not server:
+            raise Exception(f"Configuración incompleta para sede {sede_config.get('nombre_sede', 'Unknown')}")
+
+        password = None
+        if encrypted_password and self.credentials_manager:
+            try:
+                password = self.credentials_manager.decrypt(encrypted_password)
+            except Exception as e:
+                self._log(f"Error desencriptando contraseña para VAD10 {sede_config.get('nombre_sede')}: {e}", "ERROR")
+                password = encrypted_password
+
+        conn_str = (
+            f"DRIVER={{SQL Server}};"
+            f"SERVER={server};"
+            f"DATABASE=VAD10;"
+        )
+
+        if user:
+            conn_str += f"UID={user};PWD={password or ''};"
+        else:
+            conn_str += "Trusted_Connection=yes;"
+
+        conn_str += "Connection Timeout=30;"
+
+        try:
+            self._log(f"Intentando conectar a VAD10 ({sede_config.get('nombre_sede')}) en {server}...", "INFO")
+            temp_conn = pyodbc.connect(conn_str)
+            self._log(f"Conectado exitosamente a VAD10 para sede: {sede_config.get('nombre_sede')}", "INFO")
+            return temp_conn
+        except Exception as e:
+            self._log(f"Fallo al conectar a VAD10 para sede {sede_config.get('nombre_sede')}: {e}", "ERROR")
+            raise Exception(f"Fallo al conectar a VAD10 para {sede_config.get('nombre_sede')}. Verifique IP {server} y red.")
 
     def add_sede(self, sede_data):
         """Agrega una nueva sede a la tabla pal_sedes_configuracion."""
@@ -1762,10 +2267,23 @@ class DatabaseManager:
         """
         import datetime
         
-        # 1. Obtener Factores de la BD Principal (self)
-        # Ampliamos un poco el rango de años por si acaso
+        # 1. Obtener Factores y Metadatos de la BD Principal (self)
         factors_dict = self._get_factors_dict_for_range(fecha_inicio.year, fecha_fin.year)
         
+        # Cargar nombres de departamentos, grupos y subgrupos como mapeos (VAD10 -> Python)
+        try:
+            depts_raw = self.fetch_data("SELECT C_CODIGO, C_DESCRIPCIO FROM MA_DEPARTAMENTOS WITH (NOLOCK)")
+            dept_map = {str(c).strip(): str(d).strip() for c, d in depts_raw if c}
+            
+            groups_raw = self.fetch_data("SELECT C_CODIGO, C_DESCRIPCIO FROM MA_GRUPOS WITH (NOLOCK)")
+            group_map = {str(c).strip(): str(d).strip() for c, d in groups_raw if c}
+            
+            subs_raw = self.fetch_data("SELECT C_CODIGO, C_DESCRIPCIO FROM MA_SUBGRUPOS WITH (NOLOCK)")
+            sub_map = {str(c).strip(): str(d).strip() for c, d in subs_raw if c}
+        except Exception as e:
+            self._log(f"Error cargando metadatos maestros: {e}", "WARNING")
+            dept_map, group_map, sub_map = {}, {}, {}
+
         # Último factor conocido (fallback)
         last_factor = 1.0
         if factors_dict:
@@ -1801,6 +2319,7 @@ class DatabaseManager:
                 
             where_sql = " AND ".join(where_clauses)
             
+            # Query modificado: Omitimos JOINs a tablas de metadatos faltantes en sede
             query = f"""
                 SELECT
                     p.C_RIF,
@@ -1808,11 +2327,20 @@ class DatabaseManager:
                     p.C_NUMERO,
                     p.F_Fecha,
                     t.COD_PRINCIPAL,
-                    p.N_Total
+                    p.N_Total,
+                    COALESCE(pr.cu_descripcion_corta, pr.C_DESCRI, 'SIN DESCRIPCIÓN') AS desc_corta,
+                    pr.C_DEPARTAMENTO, 
+                    pr.C_GRUPO,
+                    pr.C_SUBGRUPO,
+                    pr.c_marca,
+                    t.CANTIDAD,
+                    pr.C_DESCRI AS desc_larga
                 FROM
                     MA_PAGOS p WITH (NOLOCK)
                 JOIN
                     MA_TRANSACCION t WITH (NOLOCK) ON p.C_NUMERO = t.C_numero
+                LEFT JOIN
+                    MA_PRODUCTOS pr WITH (NOLOCK) ON t.COD_PRINCIPAL = pr.C_CODIGO
                 WHERE
                     {where_sql}
                 ORDER BY
@@ -1825,24 +2353,34 @@ class DatabaseManager:
                 
                 # Procesar en Python
                 for r in chunk_rows:
-                    # r: (rif, nombre, numero, fecha, prod_cod, total_bs)
+                    # r: (rif, nombre, numero, fecha, prod_cod, total_bs, desc_corta, dept_code, group_code, sub_code, marca, cantidad, desc_larga)
                     fecha = r[3]
                     total_bs = float(r[5]) if r[5] else 0.0
+                    
+                    # Resolver nombres desde mapeos de la BD Principal
+                    d_code = str(r[7]).strip() if r[7] else ""
+                    g_code = str(r[8]).strip() if r[8] else ""
+                    s_code = str(r[9]).strip() if r[9] else ""
+                    
+                    dept_name = dept_map.get(d_code, d_code)
+                    group_name = group_map.get(g_code, g_code)
+                    sub_name = sub_map.get(s_code, s_code)
+                    
+                    # Reconstruir la fila con los nombres resueltos para la UI
+                    # (rif, name, num, date, prod_code, total_bs, desc_corta, dept_name, group_name, sub_name, marca, qty, desc_larga)
+                    row_with_names = (
+                        r[0], r[1], r[2], r[3], r[4], r[5], r[6],
+                        dept_name, group_name, sub_name, r[10], r[11], r[12]
+                    )
                     
                     # Buscar factor
                     key = (fecha.year, fecha.month, fecha.day)
                     factor = factors_dict.get(key)
                     
                     if factor is None:
-                        # Intentar buscar hacia atrás unos días sutilmente o usar last_known del dict?
-                        # Por simplicidad usamos 1.0 o el último global si es fecha futura?
-                        # Mejor lógica: si no hay factor dia exacto, tomar el mas reciente anterior.
-                        # (Implementación simplificada: si key existe usa, sino usa 1.0 o Warning)
-                        # OJO: El usuario pidió lógica específica en la query original (MAX/TOP 1).
-                        # Simulamos "último disponible"
-                        factor = last_factor # Fallback rudo, idealmente buscaría el previo mas cercano
-                        # Intento de fallback local mejorado:
-                        for d in range(15): # mirar hasta 15 dias atras
+                        # Intentar buscar hacia atrás unos días sutilmente
+                        factor = last_factor
+                        for d in range(15):
                              prev = fecha - datetime.timedelta(days=d)
                              k = (prev.year, prev.month, prev.day)
                              if k in factors_dict:
@@ -1852,11 +2390,15 @@ class DatabaseManager:
                     total_usd = total_bs / factor if factor else 0.0
                     
                     # Estructura de retorno compatible con UI:
-                    # (rif, name, num, date, item_cod, total_bs, total_usd)
-                    all_rows.append(tuple(r) + (total_usd,))
+                    # (rif, name, num, date, prod_code, total_bs, desc_corta, dept, grupo, sub, marca, qty, total_usd, desc_larga)
+                    row_final = (
+                        r[0], r[1], r[2], r[3], r[4], r[5], r[6],
+                        dept_name, group_name, sub_name, r[10], r[11], total_usd, r[12]
+                    )
+                    all_rows.append(row_final)
                     
             except Exception as e:
-                self._log(f"Error procesando chunk {f_start}: {e}", "ERROR")
+                self._log(f"Error procesando chunk: {e}", "ERROR")
             
             # Actualizar progreso
             days_in_chunk = (chunk_end - current_date).days + 1
@@ -2005,6 +2547,184 @@ class DatabaseManager:
                 inv_summary = "\n".join(invoices)
                 
             result.append((rif, name, ym, total, inv_summary))
+            
+        result.sort(key=lambda x: (x[0], x[2]))
+        return result
+
+    def get_ma_usuarios_map(self, connection=None):
+        """
+        Obtiene un mapa de código de usuario -> descripción.
+        Si se proporciona connection, busca en esa base de datos (Sede).
+        Si no, busca en la base de datos principal (VAD10).
+        """
+        def normalize(v):
+            try:
+                s = str(v or "").strip().lstrip('0')
+                return s if s else "0"
+            except: return ""
+
+        posibles_columnas = ["codusuario", "c_codigo", "c_usuario", "cu_usuario", "c_codusu", "C_USUARIO"]
+        rows = None
+        
+        # Determinar origen para el log
+        if connection:
+            try:
+                # Intentar obtener info del servidor de la conexión
+                server_info = str(connection.getinfo(pyodbc.SQL_SERVER_NAME))
+                db_info = "Conexión Seleccionada"
+                self._log(f"Obteniendo mapa de usuarios desde SERVER: {server_info} ({db_info})", "INFO")
+            except:
+                self._log("Obteniendo mapa de usuarios desde conexión externa proporcionada", "INFO")
+        else:
+            self._log(f"Obteniendo mapa de usuarios desde CONEXIÓN PRINCIPAL ({self.server})", "WARNING")
+
+        for col in posibles_columnas:
+            try:
+                query = f"SELECT RTRIM(LTRIM({col})), descripcion FROM MA_USUARIOS WITH (NOLOCK)"
+                if connection:
+                    cursor = connection.cursor()
+                    cursor.execute(query)
+                    rows = cursor.fetchall()
+                    cursor.close()
+                else:
+                    rows = self.fetch_data(query)
+                
+                if rows:
+                    break
+            except Exception:
+                continue
+        
+        if not rows:
+            return {}
+            
+        return {normalize(r[0]): str(r[1]).strip() for r in rows if r and r[0]}
+
+    def get_client_cajera_history(self, connection, client_ids: list = None, fecha_inicio = None, fecha_fin = None, progress_callback=None, usuarios_map=None):
+        """
+        Obtiene el historial de atención por cajera. Granularidad Diaria.
+        
+        Args:
+            usuarios_map: Mapa de código -> nombre de usuarios. Si se proporciona, se usa directamente.
+                         Si es None, se obtiene automáticamente de VAD10 y la sede.
+        """
+        import datetime
+        from collections import defaultdict
+        
+        def normalize_user_id(v):
+            try:
+                s = str(v or "").strip().lstrip('0')
+                return s if s else "0"
+            except: return ""
+
+        # 1. Factores de conversión 
+        factors_dict = self._get_factors_dict_for_range(fecha_inicio.year, fecha_fin.year)
+        
+        # 2. Mapa de Usuarios (Estricto por sede)
+        if usuarios_map is None:
+            # Si no se pasó mapa, intentamos obtenerlo de la conexión actual de la sede (VAD20/VAD10)
+            # pero NO usamos el fallback local para evitar cruce de datos entre sucursales
+            try:
+                usuarios_map = self.get_ma_usuarios_map(connection)
+            except Exception:
+                usuarios_map = {}
+                self._log("No se pudo obtener mapa de usuarios de la sede. Se usarán códigos genéricos.", "WARNING")
+        
+        # 3. Chunking por fechas para progreso
+        delta = fecha_fin - fecha_inicio
+        total_days = delta.days + 1
+        chunk_size = 10 
+        
+        # Agregador local: {(user_code, user_name, yyyy-mm-dd): {'total': 0.0, 'count': 0, 'invoices': []}}
+        aggregated = defaultdict(lambda: {'total': 0.0, 'count': 0, 'invoices': []})
+        
+        cursor = connection.cursor()
+        current_date = fecha_inicio
+        days_processed = 0
+        
+        while current_date <= fecha_fin:
+            chunk_end = min(current_date + datetime.timedelta(days=chunk_size - 1), fecha_fin)
+            
+            # Filtro dinámico de RIFs
+            where_rif = ""
+            params_rif = []
+            if client_ids:
+                placeholders = ','.join(['?' for _ in client_ids])
+                where_rif = f"AND p.C_RIF IN ({placeholders})"
+                params_rif = client_ids
+            
+            query = f"""
+                SELECT 
+                    p.C_USUARIO,
+                    p.F_Fecha,
+                    p.N_Total,
+                    p.C_NUMERO,
+                    p.C_DESC_CLIENTE
+                FROM MA_PAGOS p WITH (NOLOCK)
+                WHERE p.F_Fecha BETWEEN CONVERT(DATETIME, ?, 120) AND CONVERT(DATETIME, ?, 120)
+                {where_rif}
+            """
+            
+            f_start = current_date.strftime('%Y-%m-%d 00:00:00')
+            f_end = chunk_end.strftime('%Y-%m-%d 23:59:59')
+            params = [f_start, f_end] + params_rif
+            
+            try:
+                cursor.execute(query, params)
+                rows = cursor.fetchall()
+                
+                for r in rows:
+                    user_code_raw, fecha, total_bs, invoice_num, client_name = r
+                    user_code_norm = normalize_user_id(user_code_raw)
+                    user_name = usuarios_map.get(user_code_norm, f"Usuario ({user_code_raw})")
+                    
+                    total_bs = float(total_bs) if total_bs else 0.0
+                    
+                    # Factor de cambio
+                    key = (fecha.year, fecha.month, fecha.day)
+                    factor = factors_dict.get(key)
+                    if factor is None:
+                        for d in range(15):
+                             prev = fecha - datetime.timedelta(days=d)
+                             k = (prev.year, prev.month, prev.day)
+                             if k in factors_dict:
+                                 factor = factors_dict[k]
+                                 break
+                        if not factor: factor = 1.0
+                    
+                    total_usd = total_bs / factor
+                    ymd = fecha.strftime('%Y-%m-%d')
+                    
+                    agg_key = (user_code_norm, user_name, ymd)
+                    aggregated[agg_key]['total'] += total_usd
+                    aggregated[agg_key]['count'] += 1
+                    aggregated[agg_key]['invoices'].append(f"{invoice_num}: {client_name} (${total_usd:,.2f})")
+                    
+            except Exception:
+                pass
+
+            days_in_chunk = (chunk_end - current_date).days + 1
+            days_processed += days_in_chunk
+            if progress_callback:
+                progress_callback(days_processed, total_days)
+                
+            current_date = chunk_end + datetime.timedelta(days=1)
+            
+        cursor.close()
+        
+        # Formatear salida: [(user_code, user_name, year_month_day, total_usd, invoices_summary), ...]
+        result = []
+        for (u_code, u_name, ymd), data in aggregated.items():
+            total = data['total']
+            count = data['count']
+            invoices = data['invoices']
+            
+            if len(invoices) > 5:
+                inv_summary = f"Total facturado: ${total:,.2f} en {count} tickets.\n" + \
+                             "\n".join(invoices[:5]) + f"\n... y {len(invoices)-5} facturas más"
+            else:
+                inv_summary = f"Total facturado: ${total:,.2f} en {count} tickets.\n" + "\n".join(invoices)
+                
+            result.append((u_code, u_name, ymd, total, inv_summary))
             
         result.sort(key=lambda x: (x[0], x[2]))
         return result

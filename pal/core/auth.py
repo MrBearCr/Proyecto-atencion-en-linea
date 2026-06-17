@@ -88,7 +88,7 @@ class AuthManager:
                 )
             except Exception:
                 pass  # Si falla auditoría, continuar
-            return {"success": False, "message": "Usuario o contraseña inválidos"}
+            return {"success": False, "message": "Usuario no encontrado"}
 
         user_id, pwd_hash, activo, intentos, bloqueado_hasta = rows[0]
         ahora = self._now()
@@ -145,7 +145,7 @@ class AuthManager:
                 )
             except Exception:
                 pass
-            return {"success": False, "message": "Usuario o contraseña inválidos"}
+            return {"success": False, "message": "Contraseña incorrecta"}
 
         # Resetear intentos fallidos y actualizar último acceso
         self.db.execute_query(

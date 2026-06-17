@@ -4,6 +4,23 @@ import json
 import os
 
 THEMES = {
+    "legacy": {
+        "name": "Legacy",
+        "description": "Interfaz limpia original (Brand Blue #004C97)",
+        "colors": {
+            "bg_main": "#F5F6F8",
+            "bg_card": "#FFFFFF",
+            "accent": "#004C97",
+            "accent_yellow": "#FFB81C",
+            "text": "#333333",
+            "text_secondary": "#666666",
+            "hover": "#003d7a",
+            "sidebar": "#e9ecef",
+            "success": "#10B981",
+            "warning": "#F59E0B",
+            "error": "#D32F2F",
+        }
+    },
     "retro": {
         "name": "Retro",
         "description": "Estilo clásico de Windows",
@@ -83,12 +100,12 @@ def get_current_theme_key():
         if os.path.exists(config_path):
             with open(config_path, 'r') as f:
                 data = json.load(f)
-                return data.get("theme", "retro")
+                return data.get("theme", "legacy")
     except Exception as e:
         print(f"Error leyendo preferencia de tema: {e}")
     
     # Intentar desde config_manager si está disponible
-    return "retro"
+    return "legacy"
 
 def apply_theme(app, theme_key):
     """
@@ -112,17 +129,41 @@ def apply_theme(app, theme_key):
     except Exception as e:
         print(f"Nota: No se pudo guardar tema en BD: {e}")
     
+    # Usar el tema base apropiado
     try:
-        app.style.theme_use("alt")
+        if theme_key == "legacy":
+            # Legacy usa el tema "modern" con estilos personalizados
+            app.style.theme_use("modern")
+        else:
+            app.style.theme_use("alt")
     except:
         pass
     
+    # Aplicar estilos específicos del tema
     try:
-        app.style.configure("TFrame", background=colors["bg_main"])
-        app.style.configure("TLabel", background=colors["bg_main"], foreground=colors["text"])
-        app.style.configure("TButton", background=colors["accent"])
-        app.style.configure("TNotebook", background=colors["bg_card"])
-        app.style.configure("TNotebook.Tab", background=colors["bg_card"], foreground=colors["text"])
+        if theme_key == "legacy":
+            # Estilos legacy específicos según UI_COLORES_ESTILOS.md
+            app.style.configure("TFrame", background=colors.get("bg_main", "#F5F6F8"))
+            app.style.configure("TLabel", background=colors.get("bg_main", "#F5F6F8"), foreground=colors.get("text", "#333333"))
+            app.style.configure("TButton", background="#e9ecef", foreground="#004C97")
+            app.style.configure("TNotebook", background=colors.get("bg_card", "#FFFFFF"))
+            app.style.configure("TNotebook.Tab", background="#e9ecef", foreground="#333333")
+            app.style.map("TNotebook.Tab", background=[("selected", "#004C97")], foreground=[("selected", "white")])
+            
+            # Estilos legacy de botones
+            app.style.configure("Accent.TButton", background="#004C97", foreground="white", relief="flat")
+            app.style.map("Accent.TButton", background=[("active", "#003d7a")], foreground=[("active", "white")])
+            app.style.configure("Nav.TButton", background="#e9ecef", foreground="inherit", relief="flat")
+            app.style.map("Nav.TButton", background=[("active", "#004C97")], foreground=[("active", "white")])
+            app.style.configure("ModuleCard.TButton", background="#F3F4F6", foreground="#004C97", relief="flat")
+            app.style.configure("Disabled.TButton", background="#e0e0e0", foreground="#666666")
+        else:
+            # Estilos para otros temas
+            app.style.configure("TFrame", background=colors.get("bg_main", "#F5F6F8"))
+            app.style.configure("TLabel", background=colors.get("bg_main", "#F5F6F8"), foreground=colors.get("text", "#000000"))
+            app.style.configure("TButton", background=colors.get("accent", "#004C97"))
+            app.style.configure("TNotebook", background=colors.get("bg_card", "#FFFFFF"))
+            app.style.configure("TNotebook.Tab", background=colors.get("bg_card", "#FFFFFF"), foreground=colors.get("text", "#000000"))
     except Exception as e:
         print(f"Error aplicando estilos: {e}")
     

@@ -25,15 +25,17 @@ from pal.core.auth import AuthManager
 from pal.core.credentials import SecureCredentialsManager
 from pal.core.errors import ErrorCode
 from pal.core.license import LicenseChecker, LicenseError
-from pal.core.log import set_component_level
+from pal.core.log import set_component_level, set_log_callback
 from pal.core.session import SessionManager
 from pal.core.updater import UpdateManager
 UPDATE_MANAGER_AVAILABLE = True
 from pal.infrastructure.database import DatabaseManager
+from pal.infrastructure.notification_db_backend import PyodbcNotificationBackend
 from pal.services.cache import CacheDescripciones
 from pal.services.envios import EnvioProgramado, ProgramadorEnvios
+from pal.services.notifications import NotificationManager as CentralNotificationManager, NotificationPriority
 from pal.ui.debug_console import DebugConsole
-from pal.ui.header import create_header, setup_styles as ui_setup_styles
+from pal.ui.header import create_header, setup_styles as ui_setup_styles, NotificationBell
 from pal.ui.splash import SplashScreen
 from pal.ui.clientes_menu import ClientesMenu
 from tkcalendar import Calendar, DateEntry
@@ -43,7 +45,7 @@ from pal.core.config_manager import ConfigManager
 CONFIG_FILE = 'db_config.ini'
 LICENSE_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTdAdOg6pI7tOF-9UdFDzw0P5aSpNRc-jGIYHwOHmXb7qqOtag9QTYAi4JU0U2VoIZLd_TjvK_7cxX9/pub?output=csv"
 LICENSE_CLIENT_NAME = "PALPY"
-APP_VERSION = "1.6.4" # Versión actual de la aplicación
+APP_VERSION = "1.6.9" # Versión actual de la aplicación
 UPDATE_URL_DEFAULT = "https://raw.githubusercontent.com/MrBearCr/nexus/main/updates"  # URL base por defecto para actualizaciones (formato raw)
 
 def load_update_url():
@@ -91,11 +93,7 @@ def save_last_update_check(dt: datetime):
 JERARQUIA_CACHE_FILE = "productos_jerarquia_cache.json"
 FAVORITOS_CACHE_FILE = 'favoritos_cache.json'
 JERARQUIA_CACHE_TTL = timedelta(hours=15)
-LOCATION_GROUPS = {
-    'BARINAS': ['0101', '0108'],
-    'GUANARE': ['0401', '0402'],
-    'CDT': ['0106'],
-}
+
 
 # Mapeo de módulos entre BD (mayúsculas) y flags de la app (minúsculas)
 DB_MODULE_TO_FLAG = {
@@ -107,6 +105,7 @@ DB_MODULE_TO_FLAG = {
     'CALENDARIO': 'calendario',
     'ADMIN': 'admin',
     'CLIENTES': 'clientes',
+    'LOGISTICA': 'logistica',
 }
 FLAG_TO_DB_MODULE = {v: k for k, v in DB_MODULE_TO_FLAG.items()}
 
@@ -368,6 +367,7 @@ class DatabaseApp:
          # Carga paralela de stock
             self.stock_full_loading_started = False
             self._stock_loading_in_progress = False
+            self.new_stock_break_codes = set()
 
             self.tra_page_size = 500
             self.tra_current_page = 1
@@ -408,6 +408,8 @@ class DatabaseApp:
                 set_component_level("STOCK", "DEBUG" if self.stock_debug else "WARNING")
                 set_component_level("MBRP", "DEBUG" if self.mbrp_debug else "WARNING")
                 set_component_level("DB", "DEBUG" if self.debug_flags.get('db', False) else "INFO")
+                # Redirigir todos los logs de servicios (pal.core.log) a la UI/consola de la app
+                set_log_callback(self.log)
             except Exception:
                 pass
             try:
@@ -433,8 +435,9 @@ class DatabaseApp:
             
             # Sistema de Paginacion ya inicializado arriba
             # Sistema de notificaciones (inicializar antes de auto-connect)
-            self.notification_manager = self.NotificationManager(self.root)  
-            self.help_tooltips = self.HelpTooltips(self.root)  
+            # Usar CentralNotificationManager desde el inicio (sin backend BD aún)
+            self.notification_manager = CentralNotificationManager()
+            self.help_tooltips = self.HelpTooltips(self.root)
             # Tooltips y update manager se inicializarán después del login para acelerar inicio
             self.update_manager = None
             
@@ -594,8 +597,8 @@ class DatabaseApp:
     def actualizar_alertas_stock(self, force_refresh=False):
         """Actualiza las alertas de stock respetando permisos y filtros de rotación"""
         if not self.modules_enabled.get("stock", False):
-            if hasattr(self, 'stock_alert_label'):
-                self.stock_alert_label.pack_forget()
+            if hasattr(self, 'alerts_display_label') and self.alerts_display_label.winfo_exists():
+                self.alerts_display_label.pack_forget()
             return
 
         try:
@@ -647,59 +650,89 @@ class DatabaseApp:
                     if quiebres:
                         quiebres_totales.extend(quiebres)
                 
-                # Convertir a tuplas para compatibilidad
-                self.cached_alertas = [
-                    (q['codigo'], q['descripcion'], q['sede'], q['unidades_perdidas'], q['dias_quiebre'], q['ultima_compra'], q['ultima_venta'])
-                    for q in quiebres_totales
-                ]
+                # Detectar nuevos quiebres comparando con los códigos anteriores (si existen)
+                new_codes = {str(q[0]).strip() for q in quiebres_totales}
+                if hasattr(self, 'cached_alertas') and self.cached_alertas:
+                    old_codes = {str(q[0]).strip() for q in self.cached_alertas}
+                    self.new_stock_break_codes = new_codes - old_codes
+                else:
+                    self.new_stock_break_codes = set()
+
+                self.cached_alertas = quiebres_totales
                 self.last_refresh = datetime.now()
                 self._rebuild_effective_views()
                 self.root.after(0, self.aplicar_filtro_stock)
                 
-                # POPUP AUTOMÁTICO: Informar si hay quiebres críticos detectados
-                if self.cached_alertas and len(self.cached_alertas) > 0:
-                    # Mostrar alerta parpadeante en el dashboard
-                    if hasattr(self, 'stock_alert_label'):
-                        self.stock_alert_label.pack(side=tk.LEFT, padx=10)
-                        self.toggle_stock_blink()
-
-                    # Lógica de revisión: Solo abrir popup si los datos cambiaron (ID diferente)
-                    import hashlib
-                    codigos_actuales = "".join(sorted([str(q[0]) for q in self.cached_alertas]))
-                    current_id = hashlib.md5(codigos_actuales.encode()).hexdigest()
-                    
-                    last_id = getattr(self, 'quiebre_revisado_id', None)
-                    if current_id != last_id:
-                        self.abrir_popup_quiebres()
-                    else:
-                        self.log("ℹ️ Quiebres detectados pero ya fueron revisados previamente.", "DEBUG")
-                else:
-                    # Ocultar alerta si no hay quiebres
-                    if hasattr(self, 'stock_alert_label'):
-                        self.stock_alert_label.pack_forget()
+                self._mostrar_alertas_stock_ui()
                 
                 self.log(f"Quiebres de stock actualizados automáticamente ({len(self.cached_alertas)} encontrados)", "INFO")
 
         except Exception as e:
             self.log(f"Error al actualizar alertas: {e}", "ERROR")
-    
+
+    def _mostrar_alertas_stock_ui(self):
+        """Muestra popup y alerta visual si hay quiebres de stock en self.cached_alertas"""
+        # POPUP AUTOMÁTICO: Informar si hay quiebres críticos detectados
+        if hasattr(self, 'cached_alertas') and self.cached_alertas and len(self.cached_alertas) > 0:
+            # Mostrar alerta en el display de alertas
+            if hasattr(self, 'alerts_display_label') and self.alerts_display_label.winfo_exists():
+                self.alerts_display_label.config(text="🚨 Alerta: Quiebres de stock")
+                self.alerts_display_label.pack(side=tk.LEFT, padx=10)
+                self.toggle_stock_blink()
+
+            # Agregar notificación al Centro de Notificaciones
+            if hasattr(self, 'notification_manager') and self.notification_manager:
+                try:
+                    self.notification_manager.add_notification(
+                        title="🚨 Alerta de Quiebres de Stock",
+                        message=f"Se detectaron {len(self.cached_alertas)} productos en quiebre de stock. Revisa los detalles para más información.",
+                        priority=NotificationPriority.URGENT,
+                        module="STOCK",
+                        modulo_ruta="stock",
+                        accion_etiqueta="Ver Quiebres"
+                    )
+                    # Actualizar display de alertas
+                    self.root.after(100, self._update_alerts_display)
+                except Exception as e:
+                    self.log(f"Error agregando notificación de quiebres: {e}", "WARNING")
+
+            # Lógica de revisión: Solo abrir popup si los datos cambiaron (ID diferente)
+            import hashlib
+            codigos_actuales = "".join(sorted([str(q[0]) for q in self.cached_alertas]))
+            current_id = hashlib.md5(codigos_actuales.encode()).hexdigest()
+            
+            last_id = getattr(self, 'quiebre_revisado_id', None)
+            if current_id != last_id:
+                self.abrir_popup_quiebres()
+            else:
+                self.log("ℹ️ Quiebres detectados pero ya fueron revisados previamente.", "DEBUG")
+        else:
+            # Ocultar alerta si no hay quiebres
+            if hasattr(self, 'alerts_display_label') and self.alerts_display_label.winfo_exists():
+                self.alerts_display_label.pack_forget()
+
     def abrir_popup_quiebres(self):
         """Abre el popup de quiebres manualmente desde la alerta o el menú"""
         if not self.modules_enabled.get("stock", False):
             return
 
-        if hasattr(self, 'cached_alertas') and self.cached_alertas:
-            from pal.ui.stock_break_popup import StockBreakPopup
-            # Pasar la instancia de la app para poder llamar a marcar_revisado
-            popup = StockBreakPopup(self.root, self.cached_alertas)
-            # Modificar el botón del popup para que llame a la revisión
-            if hasattr(popup, 'top'):
-                # Buscamos el botón de cierre para inyectar la lógica de revisión
-                for widget in popup.top.winfo_children():
-                    if isinstance(widget, tk.Frame): # El footer
-                        for btn in widget.winfo_children():
-                            if isinstance(btn, tk.Button) and "Entendido" in btn.cget("text"):
-                                btn.configure(command=lambda: self.marcar_quiebres_como_revisados(popup))
+        from pal.ui.popups.stock_break_popup import show_stock_break_popup
+        # Usar los códigos de quiebre de stock actuales si están disponibles
+        new_codes = getattr(self, 'new_stock_break_codes', set())
+        show_stock_break_popup(self.root, self.cached_alertas, new_codes=new_codes)
+        
+        # Recuperar la instancia del popup para inyectar la lógica de cierre (marcar como revisado)
+        from pal.ui.popups.stock_break_popup import _active_popup
+        popup = _active_popup
+        
+        # Modificar el botón del popup para que llame a la revisión
+        if popup and hasattr(popup, 'top'):
+            # Buscamos el botón de cierre para inyectar la lógica de revisión
+            for widget in popup.top.winfo_children():
+                if isinstance(widget, tk.Frame): # El footer
+                    for btn in widget.winfo_children():
+                        if isinstance(btn, tk.Button) and "Entendido" in btn.cget("text"):
+                            btn.configure(command=lambda: self.marcar_quiebres_como_revisados(popup))
 
     def marcar_quiebres_como_revisados(self, popup_instance):
         """Marca los quiebres actuales como revisados para no molestar con el popup"""
@@ -715,20 +748,65 @@ class DatabaseApp:
 
     def toggle_stock_blink(self):
         """Efecto de parpadeo para la alerta de stock en la barra de estado"""
-        if not hasattr(self, 'stock_alert_label') or not self.stock_alert_label.winfo_exists():
+        if not hasattr(self, 'alerts_display_label') or not self.alerts_display_label.winfo_exists():
             return
 
-        current_color = self.stock_alert_label.cget("foreground")
+        current_color = self.alerts_display_label.cget("foreground")
         # El color de fondo para "apagar" el texto
         bg_color = self.root.cget("background") 
         
         # Alternar entre rojo y el color de fondo (efecto desaparecer)
         next_color = bg_color if current_color == "#D32F2F" else "#D32F2F"
-        self.stock_alert_label.configure(foreground=next_color)
+        self.alerts_display_label.configure(foreground=next_color)
         
         # Solo seguir parpadeando si hay quiebres y la etiqueta es visible
-        if hasattr(self, 'cached_alertas') and self.cached_alertas and self.stock_alert_label.winfo_ismapped():
+        if hasattr(self, 'cached_alertas') and self.cached_alertas and self.alerts_display_label.winfo_ismapped():
             self.root.after(600, self.toggle_stock_blink)
+
+    def _handle_alert_click(self):
+        """Maneja el clic en el display de alertas."""
+        # Si hay quiebres de stock activos, abrir el popup directamente (prioridad)
+        if hasattr(self, 'cached_alertas') and self.cached_alertas:
+            self.abrir_popup_quiebres()
+            return
+
+        # Si no hay quiebres, ver si hay otras notificaciones urgentes
+        if hasattr(self, 'notification_manager') and self.notification_manager:
+            notifications = self.notification_manager.get_notifications()
+            for notif in notifications:
+                if not notif.read and notif.priority.value in ('urgent', 'warning'):
+                    # Navegar al módulo si tiene ruta
+                    if notif.modulo_ruta and hasattr(self, 'navigate_to_module'):
+                        self.navigate_to_module(notif.modulo_ruta)
+                    return
+
+    def _update_alerts_display(self):
+        """Actualiza el display de alertas basado en notificaciones."""
+        if not hasattr(self, 'alerts_display_label'):
+            return
+            
+        try:
+            # Buscar notificaciones urgentes/warnings no leídas
+            alert_text = ""
+            alert_callback = None
+            
+            if hasattr(self, 'notification_manager') and self.notification_manager:
+                notifications = self.notification_manager.get_notifications()
+                for notif in notifications:
+                    if not notif.read and notif.priority.value in ('urgent', 'warning'):
+                        # Mostrar el título de la primera alerta encontrada
+                        alert_text = notif.title
+                        alert_callback = notif.modulo_ruta
+                        break
+            
+            if alert_text:
+                self.alerts_display_label.config(text=alert_text)
+                self.alerts_display_label.pack(side=tk.LEFT, padx=10)
+                self._alert_callback = alert_callback
+            else:
+                self.alerts_display_label.pack_forget()
+        except Exception as e:
+            print(f"Error actualizando alerts display: {e}")
 
     def recargar_stock(self):
         """Recarga completamente el módulo de stock"""
@@ -1490,7 +1568,7 @@ class DatabaseApp:
         usando la lógica directa de ventas después de última compra.
         """
         try:
-            from pal.ui.stock_break_popup import show_stock_break_popup
+            from pal.ui.popups import show_stock_break_popup
             
             sedes_config = self.config_manager.get_sedes_config()
             quiebres_consolidados = {}
@@ -1513,12 +1591,12 @@ class DatabaseApp:
                     # Verificar si hay alguno nuevo para disparar el popup
                     for q in quiebres:
                         # La llave ahora incluye sede para notificar individualmente por ocurrencia
-                        notif_key = f"QUIEBRE_{q['codigo']}_{sede_name}"
+                        notif_key = f"QUIEBRE_{q[0]}_{sede_name}"
                         if notif_key not in self.ultimas_notificaciones:
-                            self.log(f"⚠️ ¡QUIEBRE! {q['codigo']} ({q['descripcion']}) - Sede: {sede_name} | Perdidas: {int(q['unidades_perdidas'])}", "WARNING")
+                            self.log(f"⚠️ ¡QUIEBRE! {q[0]} ({q[1]}) - Sede: {sede_name} | Perdidas: {int(q[3])}", "WARNING")
                             self.ultimas_notificaciones.add(notif_key)
                             # Mostrar notificación tipo toast individual
-                            self.mostrar_notificacion_quiebre(q['codigo'], q['descripcion'], sede_name)
+                            self.mostrar_notificacion_quiebre(q[0], q[1], sede_name)
                             found_new_quiebre = True
                 
         except Exception as e:
@@ -1531,7 +1609,25 @@ class DatabaseApp:
     def mostrar_notificacion_quiebre(self, codigo, desc, sede_name):
         """Muestra un toast para quiebre de stock en una sede específica."""
         mensaje = f"Código: {codigo} | Sede: {sede_name}\nDescripción: {desc}"
-        
+
+        # Persistir en el Centro de Notificaciones
+        try:
+            if hasattr(self, 'notification_manager'):
+                usuario = self.current_user.get('username') if self.current_user else None
+                self.notification_manager.add(
+                    title="Quiebre de Stock Detectado",
+                    message=mensaje,
+                    priority="urgent",
+                    module="Stock",
+                    modulo_ruta="stock",
+                    accion_etiqueta="Ver Stock",
+                    usuario=usuario,
+                    datos={"codigo": codigo, "sede": sede_name},
+                )
+        except Exception as e:
+            self.log(f"Error al registrar quiebre en notificaciones: {e}", "DEBUG")
+
+        # Toast visual (mantener compatibilidad)
         try:
             if hasattr(self, 'toaster'):
                 self.toaster.show_toast(
@@ -1862,6 +1958,7 @@ class DatabaseApp:
                         sede_codigo=tra_sede_cod,
                         fecha_inicio=fecha_ini,
                         fecha_fin=fecha_fin,
+                        config_manager=self.config_manager,
                     )
                     
                     # Notificar éxito en el hilo principal
@@ -2052,6 +2149,7 @@ class DatabaseApp:
                         sede_codigo=self.mbrp_sede_codigo,
                         fecha_inicio=self.mbrp_fecha_inicio,
                         fecha_fin=self.mbrp_fecha_fin,
+                        config_manager=self.config_manager,
                     )
                     
                     # Notificar éxito en el hilo principal
@@ -2949,7 +3047,7 @@ class DatabaseApp:
 
     def aplicar_filtro_stock(self):
         """Actualiza la vista del treeview de quiebres aplicando filtros y paginación"""
-        if not hasattr(self, 'stock_tree') or not hasattr(self, 'cached_alertas'):
+        if not hasattr(self, 'stock_tree') or not self.stock_tree.winfo_exists() or not hasattr(self, 'cached_alertas'):
             return
             
         try:
@@ -3017,7 +3115,13 @@ class DatabaseApp:
                 # Crear nueva tupla para visualización con el valor redondeado
                 row_values = (is_fav, q[0], q[1], q[2], u_display, q[4], q[5], q[6])
                 
-                tags = ('favorito',) if codigo in favoritos else ('quiebre',)
+                if codigo in favoritos:
+                    tags = ('favorito',)
+                elif hasattr(self, 'new_stock_break_codes') and codigo in self.new_stock_break_codes:
+                    tags = ('nuevo_quiebre',)
+                else:
+                    tags = ('quiebre',)
+                    
                 self.stock_tree.insert("", tk.END, values=row_values, tags=tags)
                 
         except Exception as e:
@@ -3043,35 +3147,6 @@ class DatabaseApp:
         #     )
         # except Exception:
         #     pass
-        # Sanitizar filas (ahora con 7 elementos)
-        filtrados_clean = []
-        for r in filtrados:
-            try:
-                if len(r) < 7: continue 
-                codigo = str(r[0])
-                desc = str(r[1])
-                sede = str(r[2])
-                unid_perd = float(r[3])
-                dias = int(r[4])
-                ult_compra = r[5]
-                ult_venta = r[6]
-                filtrados_clean.append((codigo, desc, sede, unid_perd, dias, ult_compra, ult_venta))
-            except Exception:
-                continue
-        # Paginación
-        datos_pagina, total_paginas, self.current_page = paginate(
-            filtrados_clean, self.current_page, self.page_size
-        )
-        # DEBUG: Log de resultados finales
-        self.stock_debug_log(
-            f"Resultado filtrado: {len(filtrados_clean)} productos | "
-            f"Página {self.current_page}/{total_paginas} | "
-            f"Mostrando: {len(datos_pagina)} productos"
-        )
-        
-        # Actualizar UI
-        self.mostrar_alertas_paginadas(datos_pagina)
-        self.actualizar_controles_paginacion(total_paginas)
 
     def _coincide_jerarquia(self, codigo, dept_code, group_code, sub_code):
         """Helper function para filtro jerárquico optimizado"""
@@ -3199,15 +3274,15 @@ class DatabaseApp:
                 cod = str(cod).strip()
                 desc = str(desc).strip()
                 
-                # Determinar localidad por prefijo
-                if cod.startswith('03'):
-                    localidad = 'Cabudare'
-                elif cod.startswith('01'):
-                    localidad = 'Barinas'
-                elif cod.startswith('04'):
-                    localidad = 'Guanare'
-                else:
-                    localidad = 'Otra'
+                # Determinar localidad por prefijo dinámicamente
+                localidad = 'Otra'
+                sedes_config = self.config_manager.get_sedes_config()
+                for sede_name, cfg in sedes_config.items():
+                    codigo_loc = cfg.get("codigo_localidad", "")
+                    tratables = cfg.get("almacenes_tratables", [])
+                    if (codigo_loc and cod.startswith(codigo_loc)) or cod in tratables:
+                        localidad = sede_name
+                        break
                 
                 if localidad not in localidades:
                     localidades[localidad] = []
@@ -3331,7 +3406,8 @@ class DatabaseApp:
             del_sede_var = tk.StringVar()
             def _custom_sedes_list():
                 sc = getattr(self, 'stock_localidades_custom', {}) or {}
-                return sorted([s for s in sc.keys() if s not in ['Cabudare','Barinas','Guanare','Otra']])
+                base_sedes = list(self.config_manager.get_sedes_config().keys()) + ['Otra']
+                return sorted([s for s in sc.keys() if s not in base_sedes])
             cb_del_sede = ttk.Combobox(row_del, textvariable=del_sede_var, width=22, values=_custom_sedes_list(), state='readonly')
             cb_del_sede.pack(side=tk.LEFT, padx=6)
             def eliminar_sede():
@@ -3378,7 +3454,8 @@ class DatabaseApp:
                         lst = [x for x in lst if x != dep]
                         self.stock_localidades_custom[s] = lst
                 # Si el destino es una sede personalizada, asignar ahí; si es base, no lo incluimos en custom (volverá a su sede por prefijo)
-                if sede_dest not in ['Cabudare','Barinas','Guanare','Otra']:
+                base_sedes = list(self.config_manager.get_sedes_config().keys()) + ['Otra']
+                if sede_dest not in base_sedes:
                     self.stock_localidades_custom.setdefault(sede_dest, [])
                     if dep not in self.stock_localidades_custom[sede_dest]:
                         self.stock_localidades_custom[sede_dest].append(dep)
@@ -3899,7 +3976,13 @@ class DatabaseApp:
                 '0101': 'Barinas'
             }
         
-        for idx, (codigo, desc, sede_codigo, unid_perd, dias, ult_compra, ult_venta) in enumerate(datos):
+        for idx, row_data in enumerate(datos):
+            # unpack exactly 8 elements
+            if len(row_data) >= 8:
+                codigo, desc, sede_codigo, unid_perd, dias, ult_compra, ult_venta, desc_larga = row_data[:8]
+            else:
+                codigo, desc, sede_codigo, unid_perd, dias, ult_compra, ult_venta = row_data[:7]
+            
             es_favorito = codigo in favoritos
             estado = "✓" if es_favorito else "☐"
 
@@ -4024,6 +4107,14 @@ class DatabaseApp:
             self.main_notebook.add(self.stock_tab, text="⚠️ Quiebre de Stock")
             from pal.ui.tabs.stock import setup_stock_tab as setup_stock_tab_ui
             setup_stock_tab_ui(self)
+
+        # Pestaña de Logística (Abastecimiento)
+        if self.modules_enabled.get("logistica", False):
+            self.logistica_tab = ttk.Frame(self.main_notebook)
+            self.main_notebook.add(self.logistica_tab, text="🚚 Logística")
+            from pal.ui.tabs.abastecimiento import AbastecimientoTab
+            self.abastecimiento_view = AbastecimientoTab(self.logistica_tab, self)
+            self.abastecimiento_view.pack(expand=True, fill=tk.BOTH)
         
         # Pestaña de Administración (Configuraciones Globales)
         if self.modules_enabled.get("admin", False):
@@ -5611,12 +5702,8 @@ class DatabaseApp:
             # Use new quiebre detection logic
             quiebres = self.db_manager.obtener_quiebres_directos(all_warehouses)
             if quiebres:
-                # Convert dict format to tuple format for compatibility
-                self.cached_alertas = [
-                    (q['codigo'], q['descripcion'], q['sede'], q['unidades_perdidas'], 
-                     q['dias_quiebre'], q['ultima_compra'], q['ultima_venta'])
-                    for q in quiebres
-                ]
+                # Direct assignment as the SQL returns tuples directly (len 8)
+                self.cached_alertas = quiebres
                 self.last_refresh = datetime.now()
                 self.log(f"Quiebres stock cargados: {len(quiebres)} registros", "SUCCESS")
             else:
@@ -5673,6 +5760,11 @@ class DatabaseApp:
                 resultados.get("stock_filters", {}).get("status") == "success"):
                 # Esto se ejecuta en hilo principal para actualizar UI
                 pass  # search_records ya se ejecutó antes
+                
+            # Renderizar alertas iniciales si el hilo paralelo fue exitoso
+            if (self.modules_enabled.get("stock", False) and 
+                resultados.get("stock_alerts", {}).get("status") == "success"):
+                self._mostrar_alertas_stock_ui()
                 
         except Exception as e:
             self.log(f"Error en tareas post-inicialización: {e}", "ERROR")
@@ -5900,27 +5992,16 @@ class DatabaseApp:
             fecha_fin = self.fecha_fin_entry.get_date()
             
             dias_diferencia = (fecha_fin - fecha_inicio).days
-            if dias_diferencia > 365:
-                messagebox.showwarning(
-                    "Rango muy amplio", 
-                    "Por favor seleccione un rango menor a 1 año para evitar problemas de rendimiento."
-                )
+            # Se ha eliminado la restricción de 1 año; ahora se permite cualquier rango 
+            # pero con previo aviso visual en la UI.
+            if dias_diferencia < 0:
+                messagebox.showerror("Error", "La fecha de fin no puede ser anterior a la de inicio.")
                 return
             
             sede = self.sede_var.get().split(" - ")[0]
             # Mapear ICH a consulta global
             if sede == '00':
                 sede = '%'
-                try:
-                    if hasattr(self, 'notification_manager'):
-                        self.notification_manager.show_banner(
-                            "Filtro ICH (RI): consulta global de todas las sedes; puede tardar más en procesar.",
-                            bg="#FFB81C",
-                            fg="black",
-                            duration=5500,
-                        )
-                except Exception:
-                    pass
             
             # Si ya hay una carga en curso, evitar lanzar otra simultáneamente
             try:
@@ -6179,45 +6260,54 @@ class DatabaseApp:
             return 0
     
     def obtener_stock_actual_bulk(self, codigos: list, deposito: str) -> dict:
-        """Obtiene stock actual por código; si deposito es global ('%' o '00'), suma en todas las sedes."""
+        """Obtiene stock actual por código filtrando por los almacenes tratables de la sede seleccionada."""
         try:
             if not codigos:
                 return {}
+            
+            # Obtener los almacenes vendibles (tratables) para esta sede/contexto
+            # Esto implementa el "nuevo motor" de segregación
+            tratables = self.config_manager.get_tratables_by_sede(deposito)
+            if not tratables:
+                # Si no hay configuración, fallback al comportamiento anterior pero logueando advertencia
+                self.log(f"Advertencia: No se encontraron almacenes tratables para {deposito}", "WARNING")
+                return {str(c): 0 for c in codigos}
+
             # Evitar IN () muy grande dividiendo en chunks si es necesario
             MAX_IN = 900  # límite seguro para SQL Server
             resultado = {}
-            global_query = (deposito in (None, '%', '00', 'ICH', 'ALL'))
+            
+            # Preparar placeholders para los depósitos
+            dep_placeholders = ",".join(["?"] * len(tratables))
+            
             for i in range(0, len(codigos), MAX_IN):
                 chunk = codigos[i:i+MAX_IN]
-                placeholders = ",".join(["?"] * len(chunk))
-                if global_query:
-                    sql = (
-                        f"SELECT c_codarticulo, SUM(n_cantidad) "
-                        f"FROM MA_DEPOPROD WITH (NOLOCK) "
-                        f"WHERE c_codarticulo IN ({placeholders}) "
-                        f"GROUP BY c_codarticulo"
-                    )
-                    params = chunk
-                else:
-                    sql = (
-                        f"SELECT c_codarticulo, SUM(n_cantidad) "
-                        f"FROM MA_DEPOPROD WITH (NOLOCK) "
-                        f"WHERE c_coddeposito = ? AND c_codarticulo IN ({placeholders}) "
-                        f"GROUP BY c_codarticulo"
-                    )
-                    params = [deposito] + chunk
+                art_placeholders = ",".join(["?"] * len(chunk))
+                
+                sql = (
+                    f"SELECT c_codarticulo, SUM(n_cantidad) "
+                    f"FROM MA_DEPOPROD WITH (NOLOCK) "
+                    f"WHERE c_coddeposito IN ({dep_placeholders}) "
+                    f"  AND c_codarticulo IN ({art_placeholders}) "
+                    f"GROUP BY c_codarticulo"
+                )
+                
+                params = list(tratables) + list(chunk)
                 rows = self.db_manager.fetch_data(sql, params)
+                
                 for cod, sum_qty in (rows or []):
                     try:
                         resultado[str(cod)] = int(sum_qty or 0)
                     except Exception:
                         resultado[str(cod)] = 0
+                
                 # asegurar claves para todos los códigos del chunk
                 for cod in chunk:
                     resultado.setdefault(str(cod), 0)
+                    
             return resultado
         except Exception as e:
-            self.log(f"Error obteniendo stock actual: {str(e)}", "ERROR")
+            self.log(f"Error obteniendo stock actual bulk: {str(e)}", "ERROR")
             return {}
     
     def calcular_stock_ideal(self, fecha_inicio, fecha_fin):
@@ -6242,6 +6332,39 @@ class DatabaseApp:
 
 
 
+
+    def navigate_to_module(self, modulo_ruta: str):
+        """
+        Navega a la pestaña correspondiente al módulo indicado.
+        Llamado por NotificationBell al hacer clic en "Tratar".
+
+        modulo_ruta puede ser:
+          'stock', 'tra', 'mbrp', 'clientes', 'admin', 'mensajes',
+          'estadisticas', 'calendario', 'registros'
+        """
+        try:
+            ruta = (modulo_ruta or '').lower().strip()
+            tab_map = {
+                'stock':        'stock_tab',
+                'tra':          'tra_tab',
+                'mbrp':         'mbrp_tab',
+                'clientes':     'clientes_tab',
+                'admin':        'admin_tab',
+                'mensajes':     'messaging_tab',
+                'estadisticas': 'stats_tab',
+                'calendario':   'calendar_tab',
+                'registros':    'records_tab',
+                'inicio':       'dashboard_tab',
+            }
+            attr = tab_map.get(ruta)
+            if attr and hasattr(self, attr):
+                tab = getattr(self, attr)
+                if tab and tab.winfo_exists():
+                    self.main_notebook.select(tab)
+                    return
+            self.log(f"[navigate_to_module] Módulo desconocido o no disponible: '{modulo_ruta}'", "WARNING")
+        except Exception as e:
+            self.log(f"[navigate_to_module] Error navegando a '{modulo_ruta}': {e}", "ERROR")
 
     def show_records_view(self):
         self.main_notebook.select(self.records_tab)
@@ -6352,16 +6475,22 @@ class DatabaseApp:
             server_enc = config['Database'].get('server', '')
             database_enc = config['Database'].get('database', '')
             user_enc = config['Database'].get('user', '')
+            pass_enc = config['Database'].get('password', '')
 
             # Desencriptar solo si existen datos
             server = self.cred_manager.decrypt(server_enc) if server_enc else ''
             database = self.cred_manager.decrypt(database_enc) if database_enc else ''
             user = self.cred_manager.decrypt(user_enc) if user_enc else ''
+            password = self.cred_manager.decrypt(pass_enc) if pass_enc else None
+            
+            if password:
+                self.cred_manager.store_temp_password(password)
 
             return {
                 'server': server,
                 'database': database,
-                'user': user
+                'user': user,
+                'password': password
             }
         except Exception as e:
             # Mostrar error usando ErrorCode en la interfaz
@@ -6441,7 +6570,7 @@ class DatabaseApp:
             server = settings.get('server')
             database = settings.get('database')
             user = settings.get('user')
-            password = self.cred_manager.get_temp_password()
+            password = self.cred_manager.get_temp_password() or settings.get('password') or ''
             api_token = self.cred_manager.get_whatsapp_token()
 
             if server and database:
@@ -6523,19 +6652,38 @@ class DatabaseApp:
         self.api_status = ttk.Label(status_frame, text="API: Inactiva", foreground="orange")
         self.api_status.pack(side=tk.LEFT)
         
-        # Anuncio de Alerta (Parpadeante) - Ubicado al lado de API
-        self.stock_alert_label = tk.Label(
+        # ── Campana de Notificaciones (Centro de Notificaciones) ──────
+        # Debe estar ANTES de la alerta para aparecer a la izquierda
+        self.notification_bell = None
+        try:
+            navigate_fn = getattr(self, "navigate_to_module", None)
+            usuario = None
+            if self.current_user:
+                usuario = self.current_user.get("username")
+            bell = NotificationBell(
+                parent=status_frame,
+                notification_manager=self.notification_manager,
+                navigate_fn=navigate_fn,
+                usuario_actual=usuario,
+            )
+            bell.pack(side=tk.LEFT, padx=8)
+            self.notification_bell = bell
+        except Exception as _bell_err:
+            self.log(f"[create_status_panel] Error creando NotificationBell: {_bell_err}", "ERROR")
+        
+        # Anuncio de Alerta (Parpadeante) - Display de alertas basada en notificaciones
+        self.alerts_display_label = tk.Label(
             status_frame,
-            text="🚨 Alerta: Quiebres de stock",
+            text="",
             font=("Segoe UI", 9, "bold"),
             foreground="#D32F2F",
             cursor="hand2",
             padx=10
         )
         # Oculto por defecto
-        self.stock_alert_label.pack_forget()
-        self.stock_alert_label.bind("<Button-1>", lambda e: self.abrir_popup_quiebres())
-        
+        self.alerts_display_label.pack_forget()
+        self.alerts_display_label.bind("<Button-1>", lambda e: self._handle_alert_click())
+
         # Menú de usuario (Cerrar sesión, Configuración solo para admin)
         self.user_menu = ttk.Menubutton(status_frame, text="Usuario")
         user_menu_popup = tk.Menu(self.user_menu, tearoff=0)
@@ -7982,7 +8130,7 @@ class DatabaseApp:
                 self._reset_session_on_db_change()
 
             if self.db_manager.connect(server, database, user, password):
-                self.save_connection_settings(server, database, user, token)
+                self.save_connection_settings(server, database, user, password, token)
                 self.update_status('connected', server=server, api_token=token)
                 # Inicializar servicios de seguridad
                 from pal.core.audit_db import AuditDB
@@ -8005,12 +8153,21 @@ class DatabaseApp:
         except Exception as e:
             self.log(f"Error de conexión: {str(e)}", "ERROR")
             error_msg = str(e)
+            # Construir detalle técnico con contexto de la conexión fallida
+            _srv  = self.server_entry.get().strip() if hasattr(self, 'server_entry') else '?'
+            _db   = self.db_entry.get().strip()     if hasattr(self, 'db_entry')     else '?'
+            _usr  = self.user_entry.get().strip()   if hasattr(self, 'user_entry')   else '?'
+            _detail = (
+                f"Server={_srv} | DB={_db} | User={_usr or 'Windows Auth'} | "
+                f"Exception={type(e).__name__} | Msg={error_msg}"
+            )
             self.audit_log.log_event(
-            "DB_CONNECTION_ERROR",
-            os.getlogin(),
-            "FAILED",
-            ErrorCode.DB_CONNECTION_FAILED
-        )
+                "DB_CONNECTION_ERROR",
+                os.getlogin(),
+                "FAILED",
+                ErrorCode.DB_CONNECTION_FAILED,
+                extra_detail=_detail,
+            )
             self.update_status('error', message=error_msg)
             try:
                 if hasattr(self, 'audit_db'):
@@ -8464,6 +8621,8 @@ class DatabaseApp:
                         missing = self.db_manager.check_security_schema()
                         if missing:
                             self.db_manager.ensure_security_tables()
+                        # Asegurar tablas y permisos de Logística
+                        self.db_manager.ensure_logistica_tables()
                     except Exception as e:
                         self.log(f"Nota: {e}", "INFO")
                     
@@ -8484,6 +8643,10 @@ class DatabaseApp:
                     
                     self.log(f"Módulos disponibles para usuario {self.current_user['username']}: {', '.join(db_mods) or 'ninguno'}", "INFO")
                     
+                    # 4. Verificar autorizaciones pendientes de logística
+                    if "logistica" in self.modules_enabled and self.modules_enabled["logistica"]:
+                        self.root.after(2000, self._check_pending_authorizations)
+
                     # Recrear workspace con módulos actualizados
                     try:
                         # Limpiar dashboard_tab específicamente antes de destruir
@@ -8508,6 +8671,58 @@ class DatabaseApp:
                     except Exception as e:
                         self.log(f"Error recreando workspace: {e}", "WARNING")
                     
+                    # ── Integración post-login del sistema de notificaciones ──────────
+                    try:
+                        from pal.infrastructure.notification_db_backend import PyodbcNotificationBackend
+                        from pal.services.notifications import NotificationManager as CentralNotificationManager
+
+                        # Guardar referencia al manager anterior para migrar notificaciones en memoria
+                        old_manager = getattr(self, 'notification_manager', None)
+
+                        # Crear nuevo manager con backend persistente
+                        backend = PyodbcNotificationBackend(self.db_manager)
+                        new_manager = CentralNotificationManager(db_backend=backend)
+
+                        # Migrar notificaciones en memoria del manager anterior (si las hay)
+                        if old_manager is not None and hasattr(old_manager, 'notifications'):
+                            try:
+                                for n in list(old_manager.notifications):
+                                    if n.id not in {x.id for x in new_manager.notifications}:
+                                        new_manager.notifications.append(n)
+                            except Exception:
+                                pass
+
+                        # Reemplazar el manager
+                        self.notification_manager = new_manager
+
+                        # Cargar notificaciones activas del usuario desde la BD
+                        usuario = self.current_user.get('username') if self.current_user else None
+                        self.notification_manager.load_from_db(usuario=usuario)
+
+                        # Actualizar la campana si ya existe en el status panel
+                        if hasattr(self, 'notification_bell') and self.notification_bell:
+                            # Desconectar observador del manager viejo (si existe)
+                            if old_manager is not None and hasattr(old_manager, 'remove_observer'):
+                                try:
+                                    old_manager.remove_observer(
+                                        self.notification_bell._on_notifications_changed
+                                    )
+                                except Exception:
+                                    pass
+
+                            # Conectar campana al nuevo manager
+                            self.notification_bell._mgr = self.notification_manager
+                            self.notification_bell.set_usuario(usuario)
+                            self.notification_manager.add_observer(
+                                self.notification_bell._on_notifications_changed
+                            )
+                            self.notification_bell._refresh_badge()
+
+                        self.log("✅ Sistema de notificaciones persistente activado", "SUCCESS")
+                    except Exception as _notif_err:
+                        self.log(f"[Notificaciones] Error activando backend persistente: {_notif_err}", "WARNING")
+                    # ─────────────────────────────────────────────────────────────────
+
                     # Inicializar servicios de fondo según módulos habilitados
                     self._start_module_services()
                     
@@ -8524,6 +8739,33 @@ class DatabaseApp:
         except Exception as e:
             self.log(f"Error en login: {e}", "ERROR")
             return False, f"Error: {str(e)[:50]}"
+    
+    def _check_pending_authorizations(self):
+        """Verifica si hay autorizaciones de logística pendientes y notifica al usuario."""
+        try:
+            if not self.db_manager or not self.current_user:
+                return
+
+            # Solo notificar a usuarios con permiso de autorizar
+            if not self.permissions.tiene_permiso(self.current_user['id'], 'LOGISTICA', 'autorizar'):
+                return
+
+            # Contar pendientes
+            sql = "SELECT COUNT(*) FROM pal_sugerencias_transferencia WHERE requiere_autorizacion = 1 AND fue_autorizada = 0 AND estado = 'pendiente'"
+            res = self.db_manager.fetch_data(sql)
+            count = res[0][0] if res and res[0] else 0
+
+            if count > 0:
+                self.log(f"📢 Hay {count} autorizaciones de abastecimiento pendientes", "WARNING")
+                if hasattr(self, 'notification_manager'):
+                    self.notification_manager.show_banner(
+                        title="Autorizaciones Pendientes",
+                        message=f"Atención: Hay {count} transferencias pendientes de autorización en Logística.",
+                        bg="#f39c12", # Orange
+                        duration=10000
+                    )
+        except Exception as e:
+            self.log(f"Error verificando autorizaciones: {e}", "ERROR")
     
     def _prompt_change_admin_password(self):
         """
@@ -8875,7 +9117,7 @@ class DatabaseApp:
         else:
             self.pwd_entry.config(show="*")
 
-    def save_connection_settings(self, server: str, database: str, user: str, token: str = None):
+    def save_connection_settings(self, server: str, database: str, user: str, password: str = None, token: str = None):
         """Guarda la configuración en el archivo .ini"""
         try:
             config = configparser.ConfigParser()
@@ -8892,6 +9134,8 @@ class DatabaseApp:
             config['Database']['server'] = self.cred_manager.encrypt(server)
             config['Database']['database'] = self.cred_manager.encrypt(database)
             config['Database']['user'] = self.cred_manager.encrypt(user)
+            if password is not None:
+                config['Database']['password'] = self.cred_manager.encrypt(password)
             
             # Escribir archivo
             with open(CONFIG_FILE, 'w') as configfile:
@@ -9289,12 +9533,15 @@ class DatabaseApp:
 
             self.tra_debug_log("Iniciando carga completa de datos TRA en background (adaptativa)...")
 
+            # Obtener lista de almacenes tratables (Nuevo Motor)
+            sedes_list = self.config_manager.get_tratables_by_sede(self.tra_sede_codigo)
+
             while True:
                 t0 = time.perf_counter()
                 rows = self.db_manager.obtener_ventas_por_producto_chunk(
                     fecha_inicio=self.tra_fecha_inicio,
                     fecha_fin=self.tra_fecha_fin,
-                    sede_codigo=self.tra_sede_codigo,
+                    sede_codigo=sedes_list,
                     start_row=start,
                     fetch_size=int(chunk_size),
                     include_zero_sales=getattr(self, 'tra_include_zero_sales', False),
@@ -10169,16 +10416,6 @@ class DatabaseApp:
             # Mapear ICH a consulta global
             if sede == '00':
                 sede = '%'
-                try:
-                    if hasattr(self, 'notification_manager'):
-                        self.notification_manager.show_banner(
-                            "Filtro ICH (MBRP): consulta global de todas las sedes; puede tardar más en procesar.",
-                            bg="#FFB81C",
-                            fg="black",
-                            duration=5500,
-                        )
-                except Exception:
-                    pass
             self.mbrp_sede_codigo = sede
             
             # Invalidar caché de últimas ventas al cargar nuevos datos
@@ -10230,6 +10467,9 @@ class DatabaseApp:
             self.log(f"[MBRP] Iniciando carga adaptativa (chunk inicial: {chunk_size})", "INFO")
 
             chunk_count = 0
+            # Obtener lista de almacenes tratables (Nuevo Motor)
+            sedes_list = self.config_manager.get_tratables_by_sede(self.mbrp_sede_codigo)
+
             while True:
                 chunk_count += 1
                 
@@ -10237,7 +10477,7 @@ class DatabaseApp:
                 rows = self.db_manager.obtener_ventas_por_producto_chunk(
                     fecha_inicio=self.mbrp_fecha_inicio,
                     fecha_fin=self.mbrp_fecha_fin,
-                    sede_codigo=self.mbrp_sede_codigo,
+                    sede_codigo=sedes_list,
                     start_row=start,
                     fetch_size=chunk_size,
                     exclude_depts=getattr(self, 'excluded_depts', [])
@@ -10685,15 +10925,15 @@ class DatabaseApp:
             self.log(f"Error actualizando últimas ventas MBRP: {e}", "ERROR")
 
     def _map_deposito_to_sede(self, cod: str) -> str:
-        """Mapea un código de depósito a una sede legible (Cabudare, Barinas, Guanare, Otra)."""
+        """Mapea un código de depósito a una sede legible leyendo de la configuración."""
         try:
             c = (cod or "").strip()
-            if c.startswith('03'):
-                return 'Cabudare'
-            if c.startswith('01'):
-                return 'Barinas'
-            if c.startswith('04'):
-                return 'Guanare'
+            sedes_config = self.config_manager.get_sedes_config()
+            for sede_name, cfg in sedes_config.items():
+                codigo_loc = cfg.get("codigo_localidad", "")
+                tratables = cfg.get("almacenes_tratables", [])
+                if (codigo_loc and c.startswith(codigo_loc)) or c in tratables:
+                    return sede_name
             return 'Otra'
         except Exception:
             return 'Otra'

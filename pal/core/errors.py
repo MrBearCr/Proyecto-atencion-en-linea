@@ -2,6 +2,9 @@
 Módulo de códigos de error para la aplicación PAL
 """
 from enum import Enum
+import traceback
+import sys
+from typing import Optional, Dict, Any
 
 class ErrorCode(Enum):
     # Errores de base de datos (1000-1999)
@@ -40,3 +43,61 @@ class ErrorCode(Enum):
 
     def __str__(self):
         return f"[{self.code}] {self.description}"
+
+
+class PalError(Exception):
+    """
+    Excepción base para la aplicación PAL.
+    Permite encapsular un ErrorCode corporativo junto con detalles técnicos,
+    la excepción original que lo causó y el contexto en el que ocurrió,
+    facilitando un debug exacto de lo que está ocurriendo en el sistema.
+    """
+    def __init__(
+        self, 
+        error_code: ErrorCode, 
+        message: str = "", 
+        original_exception: Optional[Exception] = None, 
+        context: Optional[Dict[str, Any]] = None
+    ):
+        self.error_code = error_code
+        self.custom_message = message
+        self.original_exception = original_exception
+        self.context = context or {}
+        
+        # Guardar el traceback en el momento de creación para no perderlo
+        self._tb = traceback.format_exc() if sys.exc_info()[0] is not None else ""
+        
+        # Construir el mensaje detallado de la excepción
+        detail = f"[{self.error_code.code}] {self.error_code.description}"
+        if self.custom_message:
+            detail += f" - {self.custom_message}"
+        if self.original_exception:
+            detail += f"\n  ↳ Causa: {type(self.original_exception).__name__}: {str(self.original_exception)}"
+        if self.context:
+            detail += f"\n  ↳ Contexto: {self.context}"
+            
+        super().__init__(detail)
+        
+    def get_full_traceback(self) -> str:
+        """
+        Devuelve un texto formateado con el traceback exacto de este error
+        y de la excepción original si fue capturada, ideal para logs de auditoría o archivos de debug.
+        """
+        lines = []
+        lines.append(f"--- DETALLES DEL ERROR: {self.error_code.name} ---")
+        lines.append(str(self))
+        
+        if self._tb and self._tb.strip() != "NoneType: None":
+            lines.append("\n--- TRACEBACK DE LA CAPTURA ---")
+            lines.append(self._tb)
+            
+        if self.original_exception:
+            lines.append("\n--- EXCEPCIÓN ORIGINAL ---")
+            orig_tb = "".join(traceback.format_exception(
+                type(self.original_exception), 
+                self.original_exception, 
+                self.original_exception.__traceback__
+            ))
+            lines.append(orig_tb)
+            
+        return "\n".join(lines)

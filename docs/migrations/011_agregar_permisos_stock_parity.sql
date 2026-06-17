@@ -1,11 +1,10 @@
 -- ============================================================================
--- Migración 010: Paridad de permisos para el módulo STOCK
+-- Migración 011: Paridad de permisos para el módulo STOCK
 -- Fecha: 2026-02-18
 -- Descripción: Agrega permisos 'stock.ver_proveedores' y 'stock.ver_ventas_dolares'
 --              para alinear funcionalmente el módulo STOCK con RI (TRA).
 --              También asegura que 'stock.ver_costo_utilidad' esté asignado.
 -- ============================================================================
-
 USE VAD10; 
 GO
 

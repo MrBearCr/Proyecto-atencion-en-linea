@@ -24,8 +24,7 @@ stock_depositos_preference.json
 stock_depositos_preference.json
 setup.iss
 desuso
-
 posmigra/nexus-example
+pal/theme_config.json
+pal/deprecated
 
-
-app.py

@@ -468,6 +468,7 @@ def export_stock_excel(filename: str, datos_exportar: List, seleccionadas: List[
             reverse=True
         )
         
+        t_loop_start = time.time()
         for i, item in enumerate(datos_exportar):
             try:
                 row = data_start_row + i
@@ -862,35 +863,43 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
         def _get_stock_por_sede_tra(codigos: List[str]) -> Dict[str, Dict[str, int]]:
             """
             Obtiene distribución de stock por sede/grupo para cada código,
-            agrupando múltiples depósitos según reglas específicas.
+            agrupando múltiples depósitos según lo configurado en pal_global_settings:
+              - 'almacenes_tratables' por sede → columnas 'Stock <Sede>'
+              - 'almacenes_cdt'       (all sedes) → columna 'CDT'
+              - 'almacenes_transito'  (all sedes) → columna 'Transito SEDES'
             """
             resultados: Dict[str, Dict[str, int]] = {}
             if not db_manager or not db_manager.ensure_connection() or not codigos:
                 return resultados
             try:
-                # Definir grupos de depósitos
-                # Barinas: 0101, 0102, 0108
-                # Cabudare: 0301, 0302
-                # Guanare: 0401, 0402
-                # CDT: 0106
-                # Transito SEDES: 0104, 0110, 0112
-                GRUPOS_DEPOSITOS = {}
-                if config_manager:
-                    for sede_name, cfg in sedes_config_cache.items():
-                        tratables = cfg.get("almacenes_tratables", [])
-                        if tratables:
-                            GRUPOS_DEPOSITOS[sede_name] = tratables
-                        else:
-                            loc = cfg.get("codigo_localidad", "")
-                            if loc:
-                                GRUPOS_DEPOSITOS[sede_name] = [loc + "01"]
+                # === Construir GRUPOS_DEPOSITOS desde sedes_config_cache ===
+                if sedes_config_cache:
+                    GRUPOS_DEPOSITOS = {}
+                    # 1. Grupos por Sede (Tratables)
+                    for s_name, s_cfg in sedes_config_cache.items():
+                        deps = s_cfg.get('almacenes_tratables', [])
+                        if deps:
+                            GRUPOS_DEPOSITOS[f'Stock {s_name}'] = list(deps)
+                    # 2. CDT consolidado (de todas las sedes que tengan almacenes_cdt)
+                    cdts = []
+                    for s_cfg in sedes_config_cache.values():
+                        cdts.extend(s_cfg.get('almacenes_cdt', []))
+                    if cdts:
+                        GRUPOS_DEPOSITOS['CDT'] = sorted(set(cdts))
+                    # 3. Tránsito consolidado (de todas las sedes que tengan almacenes_transito)
+                    transitos = []
+                    for s_cfg in sedes_config_cache.values():
+                        transitos.extend(s_cfg.get('almacenes_transito', []))
+                    if transitos:
+                        GRUPOS_DEPOSITOS['Transito SEDES'] = sorted(set(transitos))
                 else:
+                    # Fallback hardcoded si no hay configuración de BD
                     GRUPOS_DEPOSITOS = {
-                        'Barinas':  ['0101', '0102', '0108'],
-                        'Cabudare': ['0301', '0302'],
-                        'Guanare':  ['0401', '0402'],
-                        'CDT':      ['0106'],
-                        'Transito': ['0104', '0110', '0112']
+                        'Stock Barinas':  ['0101', '0102', '0108'],
+                        'Stock Cabudare': ['0301', '0302'],
+                        'Stock Guanare':  ['0401', '0402'],
+                        'CDT':            ['0106'],
+                        'Transito SEDES': ['0104', '0110', '0112'],
                     }
 
                 # Crear un mapa inverso: deposito -> nombre_grupo
@@ -981,14 +990,24 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
         # Headers de la tabla (fila 7) - Orden: Ventas Netas, Stock/Stocks, Estado Stock, Rotación
         headers = ['Código', 'Descripción', 'Marca', 'Departamento', 'Grupo', 'Subgrupo', 'Ventas Netas']
         
-        # Agregar columnas de stock según modo ICH
+        # Construir lista de columnas de stock derivada de sedes_config_cache
+        # (misma lógica que _get_stock_por_sede_tra para garantizar consistencia)
         if ich_mode:
-            if config_manager:
+            if sedes_config_cache:
                 for sede in sedes_config_cache.keys():
                     headers.append(f'Stock {sede}')
-                headers.append('Stock Total')
+                # CDT: solo si alguna sede tiene almacenes_cdt
+                has_cdt = any(cfg.get('almacenes_cdt') for cfg in sedes_config_cache.values())
+                if has_cdt:
+                    headers.append('CDT')
+                # Tránsito: solo si alguna sede tiene almacenes_transito
+                has_transito = any(cfg.get('almacenes_transito') for cfg in sedes_config_cache.values())
+                if has_transito:
+                    headers.append('Transito SEDES')
             else:
-                headers.extend(['Stock Cabudare', 'Stock Barinas', 'Stock Guanare', 'CDT', 'Transito SEDES', 'Stock Total'])
+                # Fallback cuando no hay config de BD
+                headers.extend(['Stock Barinas', 'Stock Cabudare', 'Stock Guanare', 'CDT', 'Transito SEDES'])
+            headers.append('Stock Total')
         else:
             headers.append('Stock')
         
@@ -1099,23 +1118,13 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
                     dist = stock_por_sede_map_tra.get(codigo_str, {})
                     stock_total = int(stock_map_tra.get(codigo_str, 0) or 0)
                     
-                    if config_manager:
-                        for sede in sedes_config_cache.keys():
-                            stock_sede = dist.get(sede, 0)
-                            ws_main.cell(row=row, column=current_col, value=stock_sede)
-                            current_col += 1
-                    else:
-                        ws_main.cell(row=row, column=current_col, value=dist.get('Cabudare', 0))
+                    # Escribir una celda por cada columna dinámica de stock
+                    # Los headers ya están ordenados igual que GRUPOS_DEPOSITOS
+                    for h in headers[7:]:  # Saltar las 7 columnas fijas iniciales
+                        if h == 'Stock Total':
+                            break
+                        ws_main.cell(row=row, column=current_col, value=dist.get(h, 0))
                         current_col += 1
-                        ws_main.cell(row=row, column=current_col, value=dist.get('Barinas', 0))
-                        current_col += 1
-                        ws_main.cell(row=row, column=current_col, value=dist.get('Guanare', 0))
-                        current_col += 1
-                        ws_main.cell(row=row, column=current_col, value=dist.get('CDT', 0))
-                        current_col += 1
-                        ws_main.cell(row=row, column=current_col, value=dist.get('Transito', 0))
-                        current_col += 1
-                        
                     ws_main.cell(row=row, column=current_col, value=stock_total)
                     current_col += 1
                     stock_para_calculo = stock_total
@@ -1227,8 +1236,9 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
         
         # Formato condicional para rotación (columna después de estado stock)
         # Sin ICH: Código(1), Descripción(2), Marca(3), Dept(4), Grupo(5), Subgrupo(6), Ventas Netas(7), Stock(8), Estado Stock(9), Rotación(10)
-        # Con ICH: Código(1), Descripción(2), Marca(3), Dept(4), Grupo(5), Subgrupo(6), Ventas Netas(7), Stock Cabudare(8), ..., Stock Total(13), Estado Stock(14), Rotación(15)
-        rotacion_col = 10 if not ich_mode else 15
+        # Con ICH (variable sedes): col 8..N = stocks por sede + CDT + Tránsito + Stock Total, luego Estado Stock, luego Rotación
+        # Calculamos rotacion_col dinámicamente desde headers (Rotación siempre sigue a Estado Stock)
+        rotacion_col = headers.index('Rotación') + 1  # headers es 0-indexed, columnas Excel son 1-indexed
         rotacion_col_letter = get_column_letter(rotacion_col)
         rotacion_range = f"{rotacion_col_letter}{data_start_row}:{rotacion_col_letter}{data_start_row + total_registros - 1}"
         
@@ -1294,35 +1304,31 @@ def export_tra_excel(filename: str, datos_tra: List, db_manager=None, progress_c
             logger.warning(f"Error ajustando anchos de columna dinámicos en RI: {e}")
 
         if ich_mode:
+            # Anchos dinámicos: iterar sobre los headers de stock (col 8 en adelante)
+            # incluyendo todas las columnas de sede, CDT, Tránsito y Stock Total
             col_idx = 8
-            if config_manager:
-                for _ in sedes_config_cache.keys():
-                    ws_main.column_dimensions[get_column_letter(col_idx)].width = 15
-                    col_idx += 1
-            else:
-                for _ in range(5):
-                    ws_main.column_dimensions[get_column_letter(col_idx)].width = 15
-                    col_idx += 1
-            
-            ws_main.column_dimensions[get_column_letter(col_idx)].width = 15 # Stock Total
+            for h in headers[7:]:  # headers[7:] = columnas desde 'Stock X' hasta 'Stock Total'
+                ws_main.column_dimensions[get_column_letter(col_idx)].width = 15
+                col_idx += 1
+            # Estado Stock
+            ws_main.column_dimensions[get_column_letter(col_idx)].width = 15
             col_idx += 1
-            
-            ws_main.column_dimensions[get_column_letter(col_idx)].width = 12 # Rotación
+            ws_main.column_dimensions[get_column_letter(col_idx)].width = 12  # Rotación
             col_idx += 1
-            ws_main.column_dimensions[get_column_letter(col_idx)].width = 15 # Representación %
+            ws_main.column_dimensions[get_column_letter(col_idx)].width = 15  # Representación %
             col_idx += 1
-            
+
             if mostrar_costo_utilidad:
-                ws_main.column_dimensions[get_column_letter(col_idx)].width = 15
+                ws_main.column_dimensions[get_column_letter(col_idx)].width = 15  # Precio + IVA
                 col_idx += 1
-                ws_main.column_dimensions[get_column_letter(col_idx)].width = 15
+                ws_main.column_dimensions[get_column_letter(col_idx)].width = 15  # Costo
                 col_idx += 1
-                ws_main.column_dimensions[get_column_letter(col_idx)].width = 15
+                ws_main.column_dimensions[get_column_letter(col_idx)].width = 15  # Utilidad %
         else:
             ws_main.column_dimensions['H'].width = 15  # Stock
             ws_main.column_dimensions['I'].width = 12  # Rotación
             ws_main.column_dimensions['J'].width = 15  # Representación %
-            
+
             if mostrar_costo_utilidad:
                 ws_main.column_dimensions['K'].width = 15  # Precio + IVA
                 ws_main.column_dimensions['L'].width = 15  # Costo

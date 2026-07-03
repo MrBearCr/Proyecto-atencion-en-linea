@@ -354,41 +354,57 @@ class UpdateManager:
             self.logger.info(f"Lanzando el instalador a través del script: {installer_path}")
             
             try:
-                # Obtener la ruta del ejecutable de Python
-                python_executable = sys.executable
-                self.logger.debug(f"Python executable: {python_executable}")
+                # Generar script batch dinámico para la actualización
+                import tempfile
+                import uuid
                 
-                # Obtener la ruta del script de lanzamiento
-                # Se asume que está en el directorio raíz del proyecto
-                if getattr(sys, 'frozen', False):
-                    # Si es un ejecutable, el launcher debería estar al lado del ejecutable
-                    base_dir = os.path.dirname(sys.executable)
-                    self.logger.debug(f"Running as frozen app. Base dir: {base_dir}")
-                else:
-                    # Si se ejecuta desde el código fuente, buscar en el directorio raíz del proyecto
-                    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-                    self.logger.debug(f"Running from source. Base dir: {base_dir}")
-    
-                launcher_script = os.path.join(base_dir, 'updater_launcher.py')
-                self.logger.debug(f"Calculated launcher_script path: {launcher_script}")
-    
-                if not os.path.exists(launcher_script):
-                    # Fallback al directorio de trabajo actual
-                    self.logger.warning(f"Launcher script not found at {launcher_script}. Trying current working directory.")
-                    launcher_script = os.path.join(os.getcwd(), 'updater_launcher.py')
-                    if not os.path.exists(launcher_script):
-                        self.logger.critical(f"Launcher script 'updater_launcher.py' not found in any expected location.")
-                        raise FileNotFoundError("El script de lanzamiento 'updater_launcher.py' no se encontró.")
-                
-                self.logger.debug(f"Final launcher_script path: {launcher_script}")
                 pid = os.getpid()
-                command = [python_executable, launcher_script, installer_path, str(pid)]
-                self.logger.debug(f"Executing command: {command}")
+                bat_path = os.path.join(tempfile.gettempdir(), f'updater_{uuid.uuid4().hex}.bat')
                 
-                # Ejecutar el script de forma desacoplada
-                subprocess.Popen(command, creationflags=subprocess.DETACHED_PROCESS, close_fds=True)
-                self.logger.info("subprocess.Popen llamado. Script de actualización iniciado.")
-                self.logger.info("checkpass: installer launched")
+                # El script batch:
+                # 1. Espera usando un bucle con tasklist hasta que el PID de la app desaparezca
+                # 2. Inicia el instalador con parámetros silenciosos
+                # 3. Se borra a sí mismo
+                bat_content = f"""@echo off
+setlocal
+set "PID={pid}"
+set "INSTALLER={installer_path}"
+set "APP_EXE={sys.executable}"
+
+:waitloop
+tasklist /FI "PID eq %PID%" 2>NUL | find /I "%PID%" >NUL
+if "%ERRORLEVEL%"=="0" (
+    timeout /t 1 /nobreak >NUL
+    goto waitloop
+)
+
+start /wait "" "%INSTALLER%" /SILENT /CLOSEAPPLICATIONS
+start "" "%APP_EXE%"
+del "%~f0"
+"""
+                with open(bat_path, 'w', encoding='utf-8') as f:
+                    f.write(bat_content)
+                    
+                self.logger.debug(f"Generated updater script at: {bat_path}")
+                
+                # Ejecutar el script batch en segundo plano, sin ventana
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = subprocess.SW_HIDE
+                
+                CREATE_NO_WINDOW = 0x08000000
+                
+                command = ['cmd.exe', '/c', bat_path]
+                self.logger.debug(f"Executing batch command: {command}")
+                
+                subprocess.Popen(
+                    command,
+                    creationflags=CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS,
+                    startupinfo=startupinfo,
+                    close_fds=True
+                )
+                self.logger.info("Script batch de actualización iniciado.")
+                self.logger.info("checkpass: installer launched via batch script")
     
                 # Cerrar la aplicación actual para permitir que el instalador proceda
                 if restart_callback:

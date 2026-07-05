@@ -2551,6 +2551,97 @@ class DatabaseManager:
         result.sort(key=lambda x: (x[0], x[2]))
         return result
 
+    def get_client_heatmap_history(self, connection, client_ids: list, fecha_inicio, fecha_fin, progress_callback=None):
+        """
+        Obtiene historial de compras enfocado en la hora para el mapa de calor.
+        Usa JOIN con MA_TRANSACCION para consistencia con reportes de clientes.
+        Retorna: lista de tuplas (rif, nombre, fecha, hora_int, total_usd)
+        """
+        import datetime
+        
+        # 1. Factores
+        factors_dict = self._get_factors_dict_for_range(fecha_inicio.year, fecha_fin.year)
+        
+        cursor = connection.cursor()
+        
+        f_start = fecha_inicio.strftime('%Y-%m-%d 00:00:00')
+        f_end = fecha_fin.strftime('%Y-%m-%d 23:59:59')
+        
+        if client_ids:
+            placeholders = ','.join(['?' for _ in client_ids])
+            query = f"""
+                SELECT DISTINCT
+                    p.C_RIF,
+                    p.C_DESC_CLIENTE,
+                    p.F_Fecha,
+                    p.F_Hora,
+                    p.N_Total
+                FROM MA_PAGOS p WITH (NOLOCK)
+                INNER JOIN MA_TRANSACCION t WITH (NOLOCK) ON p.C_NUMERO = t.C_numero
+                WHERE p.C_RIF IN ({placeholders})
+                    AND p.F_Fecha BETWEEN CONVERT(DATETIME, ?, 120) AND CONVERT(DATETIME, ?, 120)
+            """
+            params = client_ids + [f_start, f_end]
+        else:
+            query = f"""
+                SELECT DISTINCT
+                    p.C_RIF,
+                    p.C_DESC_CLIENTE,
+                    p.F_Fecha,
+                    p.F_Hora,
+                    p.N_Total
+                FROM MA_PAGOS p WITH (NOLOCK)
+                INNER JOIN MA_TRANSACCION t WITH (NOLOCK) ON p.C_NUMERO = t.C_numero
+                WHERE p.F_Fecha BETWEEN CONVERT(DATETIME, ?, 120) AND CONVERT(DATETIME, ?, 120)
+            """
+            params = [f_start, f_end]
+        
+        result = []
+        try:
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+            
+            for r in rows:
+                rif, name, fecha, hora, total_bs = r
+                hora_int = 0
+                if hora:
+                    try:
+                        if hasattr(hora, 'hour'):
+                            hora_int = hora.hour
+                        else:
+                            parts = str(hora).split()
+                            if len(parts) > 1:
+                                hora_int = int(parts[1].split(':')[0])
+                            else:
+                                hora_int = int(parts[0].split(':')[0])
+                    except:
+                        pass
+                
+                # Conversion USD
+                total_bs = float(total_bs) if total_bs else 0.0
+                key = (fecha.year, fecha.month, fecha.day)
+                factor = factors_dict.get(key)
+                if factor is None:
+                    for d in range(15):
+                         prev = fecha - datetime.timedelta(days=d)
+                         k = (prev.year, prev.month, prev.day)
+                         if k in factors_dict:
+                             factor = factors_dict[k]
+                             break
+                    if not factor: factor = 1.0
+                total_usd = total_bs / factor
+                
+                result.append((rif, name, fecha, hora_int, total_usd))
+        except Exception as e:
+            self._log(f"Error en heatmap history: {e}", "ERROR")
+        finally:
+            cursor.close()
+            
+        if progress_callback:
+            progress_callback(100, 100)
+            
+        return result
+
     def get_ma_usuarios_map(self, connection=None):
         """
         Obtiene un mapa de código de usuario -> descripción.

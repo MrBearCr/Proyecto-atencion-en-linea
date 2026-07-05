@@ -816,7 +816,7 @@ def _stats_compute_and_draw(app):
     except Exception:
         chart_type = 'pie'
 
-    # Determinar modo de vista (Jerarquía TRA, Proveedores, MBRP días sin venta)
+    # Determinar modo de vista (Jerarquía TRA, Proveedores, MBRP días sin venta, Mapa de Calor)
     view_mode_var = getattr(app, 'stats_view_mode_var', None)
     stats_mode = 'hierarchy'
     try:
@@ -826,12 +826,19 @@ def _stats_compute_and_draw(app):
                 stats_mode = 'providers'
             elif 'MBRP' in sel or 'sin venta' in sel or 'Sin venta' in sel:
                 stats_mode = 'mbrp_days'
+            elif 'Mapa de Calor' in sel or 'calor' in sel.lower():
+                stats_mode = 'heatmap'
     except Exception:
         stats_mode = 'hierarchy'
 
     # Si el usuario seleccionó vista basada en MBRP (días sin venta), delegar a rutina específica
     if stats_mode == 'mbrp_days':
         _stats_compute_and_draw_mbrp(app, chart_type)
+        return
+
+    # Si el usuario seleccionó mapa de calor, delegar a rutina específica
+    if stats_mode == 'heatmap':
+        _stats_compute_and_draw_heatmap(app)
         return
 
     # ==========================
@@ -1669,6 +1676,167 @@ def _stats_compute_and_draw_mbrp(app, chart_type):
             _stats_render_pie(app, labels, sizes, title, on_pick_codes=meta, legend_rows=legend, hover_meta=hover_meta)
         return
 
+def _stats_on_view_mode_change(app):
+    """Maneja el cambio de modo de vista para mostrar/ocultar controles específicos."""
+    view_mode_var = getattr(app, 'stats_view_mode_var', None)
+    if view_mode_var is None:
+        return
+    
+    sel = (view_mode_var.get() or '').strip()
+    is_heatmap = 'Mapa de Calor' in sel or 'calor' in sel.lower()
+    
+    if is_heatmap:
+        # Mostrar controles de mapa de calor
+        app.heatmap_controls_frame.pack(fill=tk.X, pady=(8, 4))
+        # Ocultar breadcrumb y botón volver
+        if hasattr(app, 'stats_breadcrumb_var'):
+            try:
+                app.stats_breadcrumb_var.set("Mapa de Calor de Facturación")
+            except:
+                pass
+        # Limpiar contenedor y mostrar mensaje instructivo
+        _stats_clear_container(app)
+        ttk.Label(app.graph_container, text="Configure los parámetros y presione 'Generar Mapa'").pack(pady=20)
+    else:
+        # Ocultar controles de mapa de calor
+        app.heatmap_controls_frame.pack_forget()
+        # Refrescar gráficos solo para otros modos
+        getattr(app, 'mostrar_estadisticas', lambda: None)()
+
+def _stats_compute_and_draw_heatmap(app):
+    """Renderiza el mapa de calor de facturación por hora."""
+    _stats_clear_container(app)
+    
+    try:
+        # Obtener parámetros
+        selected_sede = getattr(app, 'stats_heatmap_sede_var', None)
+        if not selected_sede or not selected_sede.get():
+            ttk.Label(app.graph_container, text="Seleccione una sede para generar el mapa de calor.").pack(pady=20)
+            return
+        
+        metrica = getattr(app, 'stats_heatmap_metric_var', None)
+        use_count = metrica and metrica.get() and "Conteo" in metrica.get()
+        
+        fecha_inicio = getattr(app, 'stats_heatmap_fecha_inicio', None)
+        fecha_fin = getattr(app, 'stats_heatmap_fecha_fin', None)
+        
+        if not fecha_inicio or not fecha_fin:
+            ttk.Label(app.graph_container, text="Seleccione las fechas para generar el mapa de calor.").pack(pady=20)
+            return
+        
+        # Conectar a la sede
+        sedes_config = app.db_manager.get_sedes_config()
+        sede_info = next((s for s in sedes_config if s['nombre_sede'] == selected_sede.get()), None)
+        
+        if not sede_info:
+            ttk.Label(app.graph_container, text="No se encontró la configuración de la sede.").pack(pady=20)
+            return
+        
+        conn_sede = app.db_manager.connect_to_vad20_sede(sede_info)
+        if not conn_sede:
+            ttk.Label(app.graph_container, text="No se pudo conectar a la base de datos de la sede.").pack(pady=20)
+            return
+        
+        # Obtener datos (sin filtro de clientes específicos)
+        data = app.db_manager.get_client_heatmap_history(
+            conn_sede, [], fecha_inicio.get_date(), fecha_fin.get_date()
+        )
+        conn_sede.close()
+        
+        if not data:
+            ttk.Label(app.graph_container, text="No se encontraron datos para el período seleccionado.").pack(pady=20)
+            return
+        
+        # Renderizar mapa de calor
+        _stats_render_heatmap(app, data, use_count)
+        
+    except Exception as e:
+        app.log(f"Error generando mapa de calor: {e}", "ERROR")
+        ttk.Label(app.graph_container, text=f"Error: {e}").pack(pady=20)
+
+def _stats_render_heatmap(app, data, use_count=False):
+    """Renderiza el mapa de calor con los datos proporcionados."""
+    _stats_clear_container(app)
+    
+    import numpy as np
+    
+    heatmap_data = np.zeros((7, 24))  # 7 días, 24 horas
+    day_names = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo']
+    
+    total_valor = 0
+    
+    for row in data:
+        rif, name, fecha, hora, total_usd = row
+        if isinstance(fecha, str):
+            try:
+                from datetime import datetime
+                fecha = datetime.strptime(fecha.split(' ')[0], '%Y-%m-%d')
+            except:
+                pass
+        if hasattr(fecha, 'weekday'):
+            day_idx = fecha.weekday()
+            if 0 <= hora < 24:
+                valor_a_sumar = 1 if use_count else total_usd
+                heatmap_data[day_idx, hora] += valor_a_sumar
+                total_valor += valor_a_sumar
+    
+    # Crear contenedor dividido
+    container = ttk.Frame(app.graph_container)
+    container.pack(fill=tk.BOTH, expand=True)
+    
+    left_panel = ttk.Frame(container)
+    left_panel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    
+    right_panel = ttk.Frame(container, padding=(10, 0), width=250)
+    right_panel.pack(side=tk.RIGHT, fill=tk.Y)
+    right_panel.pack_propagate(False)
+    
+    # Crear figura
+    from matplotlib.figure import Figure
+    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+    
+    fig = Figure(figsize=(8, 6), dpi=100)
+    ax = fig.add_subplot(111)
+    
+    im = ax.imshow(heatmap_data, cmap='YlOrRd', aspect='auto')
+    
+    ax.set_xticks(np.arange(24))
+    ax.set_yticks(np.arange(7))
+    ax.set_xticklabels([f"{h:02d}:00" for h in range(24)], rotation=45, ha="right", fontsize=8)
+    ax.set_yticklabels(day_names)
+    
+    ax.set_title("Mapa de Calor de Facturación (Por Día y Hora)", pad=20, fontsize=12, fontweight='bold')
+    ax.set_xlabel("Hora del Día", fontsize=10)
+    ax.set_ylabel("Día de la Semana", fontsize=10)
+    
+    label_color = "Cantidad de Facturas" if use_count else "Monto Facturado (USD)"
+    fig.colorbar(im, ax=ax, label=label_color)
+    
+    canvas = FigureCanvasTkAgg(fig, master=left_panel)
+    canvas.draw()
+    canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+    
+    toolbar_frame = ttk.Frame(left_panel)
+    toolbar_frame.pack(fill=tk.X)
+    NavigationToolbar2Tk(canvas, toolbar_frame)
+    
+    # Panel derecho con resumen
+    ttk.Label(right_panel, text="Resumen del Mapa", font=("Segoe UI", 12, "bold")).pack(pady=(15, 10), anchor=tk.W)
+    
+    if use_count:
+        ttk.Label(right_panel, text=f"Total Registros: {int(total_valor)}").pack(pady=5, padx=10, anchor=tk.W)
+    else:
+        ttk.Label(right_panel, text=f"Total USD: ${total_valor:,.2f}").pack(pady=5, padx=10, anchor=tk.W)
+    
+    if total_valor > 0:
+        max_val = np.max(heatmap_data)
+        max_pos = np.unravel_index(np.argmax(heatmap_data), heatmap_data.shape)
+        ttk.Label(right_panel, text=f"Pico: {day_names[max_pos[0]]} a las {max_pos[1]:02d}:00", foreground="#EF4444").pack(pady=5, padx=10, anchor=tk.W)
+        if use_count:
+            ttk.Label(right_panel, text=f"Max Facturas/Hora: {int(max_val)}").pack(pady=5, padx=10, anchor=tk.W)
+        else:
+            ttk.Label(right_panel, text=f"Max USD/Hora: ${max_val:,.2f}").pack(pady=5, padx=10, anchor=tk.W)
+
 def setup_stats_tab(app):
     app.stats_frame = ttk.Frame(app.stats_tab)
     app.stats_frame.pack(fill=tk.BOTH, expand=True)
@@ -1721,6 +1889,7 @@ def setup_stats_tab(app):
             "Jerarquía productos (Depto/Grupo/Sub)",
             "Distribución por Proveedor",
             "MBRP — Días sin venta (Depto/Grupo/Sub)",
+            "Mapa de Calor (Facturación por Hora)",
         ],
     )
     view_mode_combo.pack(side=tk.RIGHT, padx=(5, 0))
@@ -1733,7 +1902,87 @@ def setup_stats_tab(app):
 
     # Refrescar gráficos automáticamente al cambiar tipo de gráfico o de vista
     chart_type_combo.bind('<<ComboboxSelected>>', lambda e: getattr(app, 'mostrar_estadisticas', lambda: None)())
-    view_mode_combo.bind('<<ComboboxSelected>>', lambda e: getattr(app, 'mostrar_estadisticas', lambda: None)())
+    view_mode_combo.bind('<<ComboboxSelected>>', lambda e: _stats_on_view_mode_change(app))
+
+    # Controles de mapa de calor (inicialmente ocultos, en la barra superior)
+    app.heatmap_controls_frame = ttk.Frame(top_bar)
+    
+    # Sede
+    ttk.Label(app.heatmap_controls_frame, text="Sede:").pack(side=tk.LEFT, padx=(0, 5))
+    app.stats_heatmap_sede_var = tk.StringVar()
+    app.stats_heatmap_sede_combo = ttk.Combobox(app.heatmap_controls_frame, textvariable=app.stats_heatmap_sede_var, state='readonly', width=15)
+    app.stats_heatmap_sede_combo.pack(side=tk.LEFT, padx=(0, 10))
+    
+    # Métrica
+    ttk.Label(app.heatmap_controls_frame, text="Métrica:").pack(side=tk.LEFT, padx=(0, 5))
+    app.stats_heatmap_metric_var = tk.StringVar(value="Monto (USD)")
+    app.stats_heatmap_metric_combo = ttk.Combobox(
+        app.heatmap_controls_frame, 
+        textvariable=app.stats_heatmap_metric_var,
+        state='readonly',
+        width=10,
+        values=["Monto (USD)", "Conteo (Facturas)"]
+    )
+    app.stats_heatmap_metric_combo.pack(side=tk.LEFT, padx=(0, 10))
+    
+    # Fechas
+    from tkcalendar import DateEntry
+    from datetime import datetime, timedelta
+    
+    def set_date_range(days):
+        """Establece el rango de fechas según los días seleccionados"""
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=days)
+        app.stats_heatmap_fecha_fin.set_date(end_date)
+        app.stats_heatmap_fecha_inicio.set_date(start_date)
+    
+    # Combobox de selección rápida de días
+    ttk.Label(app.heatmap_controls_frame, text="Rango:").pack(side=tk.LEFT, padx=(0, 5))
+    app.stats_heatmap_range_var = tk.StringVar(value="30 días")
+    app.stats_heatmap_range_combo = ttk.Combobox(
+        app.heatmap_controls_frame,
+        textvariable=app.stats_heatmap_range_var,
+        state='readonly',
+        width=10,
+        values=["1 día", "7 días", "15 días", "30 días", "60 días"]
+    )
+    app.stats_heatmap_range_combo.pack(side=tk.LEFT, padx=(0, 10))
+    app.stats_heatmap_range_combo.bind('<<ComboboxSelected>>', lambda e: set_date_range(int(app.stats_heatmap_range_var.get().split()[0])))
+    
+    ttk.Label(app.heatmap_controls_frame, text="Desde:").pack(side=tk.LEFT, padx=(0, 5))
+    default_start = datetime.now() - timedelta(days=30)
+    app.stats_heatmap_fecha_inicio = DateEntry(
+        app.heatmap_controls_frame, width=10, background='#004C97', foreground='white',
+        date_pattern='dd/mm/yyyy', year=default_start.year, month=default_start.month, day=default_start.day
+    )
+    app.stats_heatmap_fecha_inicio.pack(side=tk.LEFT, padx=(0, 5))
+    
+    ttk.Label(app.heatmap_controls_frame, text="Hasta:").pack(side=tk.LEFT, padx=(0, 5))
+    app.stats_heatmap_fecha_fin = DateEntry(
+        app.heatmap_controls_frame, width=10, background='#004C97', foreground='white',
+        date_pattern='dd/mm/yyyy'
+    )
+    app.stats_heatmap_fecha_fin.pack(side=tk.LEFT, padx=(0, 10))
+    
+    # Botón generar
+    ttk.Button(
+        app.heatmap_controls_frame,
+        text="Generar",
+        command=lambda: _stats_compute_and_draw_heatmap(app)
+    ).pack(side=tk.LEFT, padx=(0, 5))
+    
+    # Ocultar controles de mapa de calor inicialmente
+    app.heatmap_controls_frame.pack_forget()
+    
+    # Cargar sedes
+    try:
+        sedes_config = app.db_manager.get_sedes_config()
+        sede_nombres = [s['nombre_sede'] for s in sedes_config]
+        app.stats_heatmap_sede_combo['values'] = sede_nombres
+        if sede_nombres:
+            app.stats_heatmap_sede_combo.current(0)
+    except Exception as e:
+        app.log(f"Error cargando sedes para mapa de calor: {e}", "ERROR")
 
     # Contenedor para gráficos
     app.graph_container = ttk.Frame(app.stats_frame)

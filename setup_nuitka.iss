@@ -1,7 +1,7 @@
 #define MyAppName "Casapro Nexus"
 #define MyAppVersion "1.7.1"
-#define MyAppPublisher "Casapro"
-#define MyAppURL "http://www.example.com/"
+#define MyAppPublisher "rafael3gn@gmail.com"
+#define MyAppURL "rafael3gn@gmail.com"
 #define MyAppExeName "Casapro Nexus.exe"
 #define NuitkaStandaloneDir "app.dist"
 

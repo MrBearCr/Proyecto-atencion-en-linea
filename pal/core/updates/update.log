@@ -1,9 +1,0 @@
-2026-07-02 20:25:01,061 - INFO - checkpass: log file created
-2026-07-02 20:25:01,062 - INFO - Instalando actualización...
-2026-07-02 20:25:01,466 - INFO - Instalador más reciente encontrado: C:\Users\IT y Sistemas\post-warp\Proyecto-atencion-en-linea\pal\core\updates\extracted\NEXUS-Setup-v1.7.1.exe
-2026-07-02 20:25:01,467 - INFO - Lanzando el instalador a través del script: C:\Users\IT y Sistemas\post-warp\Proyecto-atencion-en-linea\pal\core\updates\extracted\NEXUS-Setup-v1.7.1.exe
-2026-07-02 20:25:01,472 - INFO - Script batch de actualización iniciado.
-2026-07-02 20:25:01,472 - INFO - checkpass: installer launched via batch script
-2026-07-02 20:25:01,472 - INFO - Llamando a restart_callback para cerrar la aplicación.
-2026-07-02 20:25:01,641 - INFO - checkpass: application closing
-2026-07-02 20:25:01,642 - INFO - install_update completado exitosamente.

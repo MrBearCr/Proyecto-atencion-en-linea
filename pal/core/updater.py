@@ -104,6 +104,9 @@ class UpdateManager:
         if getattr(sys, 'frozen', False):
             # Ejecutable compilado con PyInstaller
             self.app_dir = os.path.dirname(sys.executable)
+        elif '__compiled__' in dir():
+            # Ejecutable compilado con Nuitka
+            self.app_dir = os.path.dirname(sys.executable)
         else:
             # Ejecutándose desde código fuente
             self.app_dir = os.path.dirname(os.path.abspath(__file__))
@@ -354,53 +357,66 @@ class UpdateManager:
             self.logger.info(f"Lanzando el instalador a través del script: {installer_path}")
             
             try:
-                # Generar script batch dinámico para la actualización
                 import tempfile
                 import uuid
-                
-                pid = os.getpid()
-                bat_path = os.path.join(tempfile.gettempdir(), f'updater_{uuid.uuid4().hex}.bat')
-                
-                # El script batch:
-                # 1. Espera usando un bucle con tasklist hasta que el PID de la app desaparezca
-                # 2. Inicia el instalador con parámetros silenciosos
-                # 3. Se borra a sí mismo
-                bat_content = f"""@echo off
-setlocal
-set "PID={pid}"
-set "INSTALLER={installer_path}"
-set "APP_EXE={sys.executable}"
 
-:waitloop
-tasklist /FI "PID eq %PID%" 2>NUL | find /I "%PID%" >NUL
-if "%ERRORLEVEL%"=="0" (
-    timeout /t 1 /nobreak >NUL
-    goto waitloop
-)
+                pid     = os.getpid()
+                app_exe = sys.executable
 
-start /wait "" "%INSTALLER%" /SILENT /CLOSEAPPLICATIONS
-start "" "%APP_EXE%"
-del "%~f0"
-"""
+                # ----------------------------------------------------------------
+                # Estrategia: batch "watcher" (sin privilegios) espera que la app
+                # cierre, luego invoca PowerShell con -Verb RunAs para elevar UAC
+                # y ejecutar el instalador Inno Setup de forma silenciosa.
+                # PowerShell Start-Process -Verb RunAs es la forma canónica de
+                # solicitar elevación UAC desde scripts externos en Windows.
+                # ----------------------------------------------------------------
+
+                bat_path = os.path.join(
+                    tempfile.gettempdir(), f'nexus_updater_{uuid.uuid4().hex}.bat'
+                )
+
+                # Escapar rutas para PowerShell (comillas simples dentro de la cadena)
+                installer_ps = installer_path.replace("'", "''")
+                app_exe_ps   = app_exe.replace("'", "''")
+
+                # Comando PowerShell de una sola línea:
+                #   1. Lanza el instalador como admin y espera (-Wait)
+                #   2. Relanza la aplicación
+                ps_command = (
+                    f"Start-Process -FilePath '{installer_ps}' "
+                    f"-ArgumentList '/SP- /SILENT /CLOSEAPPLICATIONS' "
+                    f"-Verb RunAs -Wait; "
+                    f"Start-Process -FilePath '{app_exe_ps}'"
+                )
+
+                bat_content = (
+                    "@echo off\r\n"
+                    "setlocal\r\n"
+                    f"set \"PID={pid}\"\r\n"
+                    "\r\n"
+                    "REM Esperar a que la aplicación cierre\r\n"
+                    ":waitloop\r\n"
+                    "tasklist /FI \"PID eq %PID%\" 2>NUL | find /I \"%PID%\" >NUL\r\n"
+                    "if \"%ERRORLEVEL%\"==\"0\" (\r\n"
+                    "    timeout /t 1 /nobreak >NUL\r\n"
+                    "    goto waitloop\r\n"
+                    ")\r\n"
+                    "\r\n"
+                    "REM Elevar UAC y ejecutar instalador via PowerShell\r\n"
+                    f"powershell -ExecutionPolicy Bypass -Command \"{ps_command}\"\r\n"
+                    "\r\n"
+                    "del \"%~f0\"\r\n"
+                )
+
                 with open(bat_path, 'w', encoding='utf-8') as f:
                     f.write(bat_content)
-                    
-                self.logger.debug(f"Generated updater script at: {bat_path}")
-                
-                # Ejecutar el script batch en segundo plano, sin ventana
-                startupinfo = subprocess.STARTUPINFO()
-                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                startupinfo.wShowWindow = subprocess.SW_HIDE
-                
-                CREATE_NO_WINDOW = 0x08000000
-                
-                command = ['cmd.exe', '/c', bat_path]
-                self.logger.debug(f"Executing batch command: {command}")
-                
+
+                self.logger.debug(f"Generated updater watcher batch at: {bat_path}")
+
+                # Lanzar el batch en segundo plano, completamente desacoplado
                 subprocess.Popen(
-                    command,
-                    creationflags=CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS,
-                    startupinfo=startupinfo,
+                    ['cmd.exe', '/c', bat_path],
+                    creationflags=subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS,
                     close_fds=True
                 )
                 self.logger.info("Script batch de actualización iniciado.")

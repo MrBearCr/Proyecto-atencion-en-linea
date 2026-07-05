@@ -995,157 +995,6 @@ class DatabaseApp:
     def _background_load_ventas_tra_v3_deprecated(self):
         # Esta función ha sido reemplazada por la versión optimizada al final del archivo
         pass
-
-        
-        # Parámetros de cache
-        cache_key = f"tra_{self.tra_sede_codigo}_{self.tra_fecha_inicio}_{self.tra_fecha_fin}"
-        
-        try:
-            # Verificar cache primero
-            if self._check_tra_cache(cache_key):
-                self.log("[TRA] Usando datos desde cache", "INFO")
-                self.root.after(0, self.aplicar_filtro_tra)
-                return
-            
-            # Inicializar variables de control
-            chunk_count = 0
-            total_loaded = 0
-            consecutive_failures = 0
-            max_consecutive_failures = 3
-            
-            # Usar dict para evitar duplicados y optimizar búsquedas
-            existentes = {r[0]: r for r in (self.cached_ventas_tra or [])}
-            initial_count = len(existentes)
-            
-            self.log(f"🚀 [TRA] Iniciando carga adaptativa - Cache: {cache_key}, Registros existentes: {initial_count}", "INFO")
-            
-            start_row = 1
-            
-            while True:
-                chunk_start_time = time.perf_counter()
-                
-                # Obtener chunk usando consulta optimizada con índices
-                rows = self._fetch_tra_chunk_optimized(
-                    self.tra_fecha_inicio, 
-                    self.tra_fecha_fin, 
-                    self.tra_sede_codigo, 
-                    start_row=start_row, 
-                    fetch_size=controller.size
-                )
-                
-                chunk_query_time = time.perf_counter() - chunk_start_time
-                
-                if not rows:
-                    consecutive_failures += 1
-                    # Solo loggear si es el primer fallo o el último antes de terminar
-                    if consecutive_failures == 1 or consecutive_failures >= max_consecutive_failures:
-                        self.tra_debug_log(
-                            f"Chunk {chunk_count + 1}: Sin datos (fallo {consecutive_failures}/{max_consecutive_failures})",
-                            level="WARNING"
-                        )
-                    
-                    if consecutive_failures >= max_consecutive_failures:
-                        self.log(f"[TRA] Carga finalizada - {consecutive_failures} chunks consecutivos sin datos", "INFO")
-                        break
-                    
-                    # Ajustar parámetros para siguiente intento
-                    start_row += controller.size
-                    time.sleep(1.0)  # Pausa tras error
-                    continue
-                else:
-                    consecutive_failures = 0  # Reset en éxito
-                
-                chunk_count += 1
-                new_records = 0
-                updated_records = 0
-                
-                # Procesar registros del chunk
-                for r in rows:
-                    codigo_str = str(r[0])
-                    if codigo_str in existentes:
-                        updated_records += 1
-                    else:
-                        new_records += 1
-                    existentes[codigo_str] = r
-                
-                # Ajuste adaptativo: delegar en el controlador (EMA + cooldown)
-                controller.update(chunk_query_time, len(rows))
-                
-                # OPTIMIZACIÓN: Guardar en cache sin clasificar (clasificamos solo al final)
-                # Esto ahorra muchísimo tiempo en consultas largas (180 días)
-                if chunk_count % 10 == 0:  # Cada 10 chunks (menos frecuente)
-                    self._save_tra_cache(cache_key, list(existentes.values()))
-                
-                total_loaded += len(rows)
-                
-                # Logging optimizado - solo cada 5 chunks o si es importante
-                total_time = time.perf_counter() - load_start_time
-                avg_latency = total_time / chunk_count
-                records_per_sec = total_loaded / total_time if total_time > 0 else 0
-                
-                # Log cada 5 chunks, al inicio, o si hay problemas de rendimiento
-                should_log = (
-                    chunk_count <= 2 or  # Primeros 2 chunks siempre
-                    chunk_count % 5 == 0 or  # Cada 5 chunks
-                    chunk_query_time > target_latency * 1.5 or  # Si es muy lento
-                    len(rows) < controller.size  # Último chunk
-                )
-                
-                if should_log:
-                    self.tra_debug_log(
-                        f"Chunk {chunk_count}: {len(rows)} filas | Nuevos: {new_records} | "
-                        f"Total: {len(existentes)} | Latencia: {chunk_query_time:.2f}s | "
-                        f"Size: {controller.size} | Velocidad: {records_per_sec:.0f} reg/s",
-                        level="INFO",
-                        throttle_key="chunk_progress",
-                        throttle_seconds=3.0
-                    )
-                
-                # Actualizar UI de forma eficiente (cada 3 chunks o al final para reducir overhead)
-                if chunk_count % 3 == 0 or len(rows) < controller.size:
-                    try:
-                        self.root.after(0, self._update_tra_ui_after_chunk, len(existentes), chunk_count, records_per_sec)
-                    except Exception as e:
-                        self.tra_debug_log(f"Error actualizando UI TRA: {e}", level="ERROR")
-                
-                start_row += len(rows)
-                
-                # Pausa adaptativa según rendimiento (recomendación del controlador)
-                time.sleep(controller.recommend_sleep(chunk_query_time))
-                
-                # Condición de salida optimizada
-                if len(rows) < controller.size:
-                    self.log(f"[TRA] Último chunk cargado: {len(rows)} registros", "INFO")
-                    break
-            
-            # Clasificación final y guardado en cache
-            from pal.services.tra import clasificar_rotacion_tra
-            self.cached_ventas_tra = clasificar_rotacion_tra(list(existentes.values()))
-            self._save_tra_cache(cache_key, self.cached_ventas_tra)
-            
-            # Estadísticas finales
-            total_time = time.perf_counter() - load_start_time
-            final_count = len(existentes)
-            net_new = final_count - initial_count
-            avg_chunk_time = total_time / chunk_count if chunk_count > 0 else 0
-            
-            self.log(
-                f"✅ [TRA] Carga adaptativa completada: {chunk_count} chunks | "
-                f"{final_count} registros totales | {net_new} nuevos | "
-                f"Tiempo: {total_time:.2f}s | Promedio/chunk: {avg_chunk_time:.2f}s | "
-                f"Velocidad final: {final_count / total_time:.0f} reg/s", 
-                "SUCCESS"
-            )
-            
-            # Aplicar filtros con datos completos
-            try:
-                self.root.after(0, self.aplicar_filtro_tra)
-            except Exception as e:
-                self.log(f"Error aplicando filtros TRA tras carga: {e}", "ERROR")
-            
-        except Exception as e:
-            load_time = time.perf_counter() - load_start_time
-            self.log(f"Error en carga adaptativa TRA (tiempo: {load_time:.2f}s): {str(e)}", "ERROR")
     
     def _check_tra_cache(self, cache_key):
         """Verifica si existe cache válido para los parámetros TRA dados"""
@@ -8547,7 +8396,12 @@ class DatabaseApp:
                 
                 # Si nunca se ha verificado o pasaron 12 horas
                 if last_check is None or (now - last_check) > timedelta(hours=12):
-                    print(f"[DEBUG] Ejecutando comprobación obligatoria de actualizaciones...", flush=True)
+                    print(f"[DEBUG] Ejecutando comprobacion obligatoria de actualizaciones...", flush=True)
+                    
+                    if hasattr(self, 'splash') and self.splash:
+                        self.splash.set_update_status("Buscando actualizaciones...", "#004C97")
+                        self.splash.set_progress(0.1)
+                        self.root.update_idletasks()
                     
                     # Asegurar que tenemos UpdateManager
                     if not hasattr(self, 'update_manager') or self.update_manager is None:
@@ -8558,15 +8412,34 @@ class DatabaseApp:
                             update_url=update_url
                         )
                     
-                    # Verificar si hay actualización
+                    # Verificar si hay actualizaci�n
                     if self.update_manager.check_for_updates():
                         latest_info = self.update_manager.get_latest_version_info()
                         if latest_info:
-                            # Programar diálogo mandatorio en el hilo principal
-                            self.root.after(100, lambda: self.show_mandatory_update_dialog(latest_info))
-                            return False, "Actualización obligatoria disponible"
-                    
-                    # Guardar fecha de comprobación exitosa
+                            if hasattr(self, 'splash') and self.splash:
+                                self.splash.set_update_status(f"Descargando actualizacion ({latest_info.get('version', '')})...", "#10B981")
+                                self.root.update_idletasks()
+                            
+                            def _progress_cb(p):
+                                if hasattr(self, 'splash') and self.splash:
+                                    self.splash.set_progress(p)
+                                    self.root.update_idletasks()
+                                    
+                            if self.update_manager.download_update(progress_callback=_progress_cb):
+                                if hasattr(self, 'splash') and self.splash:
+                                    self.splash.set_update_status("Instalando actualizacion...", "#10B981")
+                                    self.root.update_idletasks()
+                                self.update_manager.install_update(restart_callback=self.shutdown)
+                                return False, "Actualizando aplicacion..."
+                            else:
+                                if hasattr(self, 'splash') and self.splash:
+                                    self.splash.set_update_status("Error al actualizar", "#EF4444")
+                                return False, "Error al descargar actualizacion"
+                    else:
+                        if hasattr(self, 'splash') and self.splash:
+                            self.splash.set_update_status("Plataforma de Administracion Local", self.splash.text_secondary)
+                            self.root.update_idletasks()
+                    # Guardar fecha de comprobaci�n exitosa
                     save_last_update_check(now)
                     
             except Exception as e:
@@ -10352,13 +10225,8 @@ class DatabaseApp:
             return False
         
     def _save_modules_config(self):
-        # Tomar valores de los BooleanVar y guardar en ini
-        new_cfg = {k: v.get() for k, v in self.mod_vars.items()}
-        save_modules_config(new_cfg)
-        messagebox.showinfo(
-            "Módulos Actualizados",
-            "Los cambios se guardaron correctamente.\nReinicie la aplicación para que tengan efecto."
-        )
+        """Deprecated: módulos ahora se controlan por BD (pal_usuarios_modulos). Ver _save_user_modules_admin."""
+        pass
 
     def actualizar_descripcion(self, texto: str):
         self.descripcion.config(state='normal')

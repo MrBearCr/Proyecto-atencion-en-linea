@@ -115,8 +115,8 @@ class ClientesEstadisticasTab(ttk.Frame):
         type_frame = ttk.Frame(controls_frame)
         type_frame.pack(side=tk.LEFT, padx=(0, 20))
         ttk.Label(type_frame, text="Ver:", font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT, padx=(0, 5))
-        self.tipo_stats_combo = ttk.Combobox(type_frame, state='readonly', width=20, font=("Segoe UI", 10))
-        self.tipo_stats_combo['values'] = ("Compras (USD)", "Atención por Cajera")
+        self.tipo_stats_combo = ttk.Combobox(type_frame, state='readonly', width=22, font=("Segoe UI", 10))
+        self.tipo_stats_combo['values'] = ("Compras (USD)", "Atención por Cajera", "Mapa de Calor (Horas)")
         self.tipo_stats_combo.current(0)
         self.tipo_stats_combo.pack(side=tk.LEFT)
 
@@ -188,7 +188,7 @@ class ClientesEstadisticasTab(ttk.Frame):
         tipo_stats = self.tipo_stats_combo.get()
         
         # El RIF solo es obligatorio para estadísticas de clientes
-        if not ids_raw and tipo_stats != "Atención por Cajera":
+        if not ids_raw and tipo_stats not in ["Atención por Cajera", "Mapa de Calor (Horas)"]:
             messagebox.showwarning("Faltan Datos", "Debe ingresar al menos un RIF de cliente.")
             return
 
@@ -268,6 +268,10 @@ class ClientesEstadisticasTab(ttk.Frame):
                     conn_sede, client_ids, fecha_inicio, fecha_fin, progress_callback=update_progress,
                     usuarios_map=usuarios_map
                 )
+            elif tipo_stats == "Mapa de Calor (Horas)":
+                data = self.controller.db_manager.get_client_heatmap_history(
+                    conn_sede, client_ids, fecha_inicio, fecha_fin, progress_callback=update_progress
+                )
             else:
                 data = self.controller.db_manager.get_client_purchase_history(
                     conn_sede, client_ids, fecha_inicio, fecha_fin, progress_callback=update_progress
@@ -279,7 +283,8 @@ class ClientesEstadisticasTab(ttk.Frame):
             self.after(0, lambda: self._on_data_loaded(data, tipo_stats, metrica, estilo))
             
         except Exception as e:
-            self.after(0, lambda: self._on_load_error(str(e)))
+            err_msg = str(e)
+            self.after(0, lambda msg=err_msg: self._on_load_error(msg))
 
     def _on_data_loaded(self, rows, tipo_stats, metrica, estilo):
         """Maneja la carga exitosa de datos"""
@@ -321,7 +326,71 @@ class ClientesEstadisticasTab(ttk.Frame):
         main_container.add(right_panel, stretch="never")
         
         use_count = (metrica == "Conteo (Facturas)")
-        
+
+        if tipo_stats == "Mapa de Calor (Horas)":
+            import numpy as np
+            
+            heatmap_data = np.zeros((7, 24)) # 7 días, 24 horas
+            day_names = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo']
+            
+            total_valor = 0
+            
+            for row in rows:
+                rif, name, fecha, hora, total_usd = row
+                if isinstance(fecha, str):
+                    try:
+                        fecha = datetime.strptime(fecha.split(' ')[0], '%Y-%m-%d')
+                    except:
+                        pass
+                if hasattr(fecha, 'weekday'):
+                    day_idx = fecha.weekday()
+                    if 0 <= hora < 24:
+                        valor_a_sumar = 1 if use_count else total_usd
+                        heatmap_data[day_idx, hora] += valor_a_sumar
+                        total_valor += valor_a_sumar
+            
+            fig = Figure(figsize=(8, 6), dpi=100)
+            ax = fig.add_subplot(111)
+            
+            im = ax.imshow(heatmap_data, cmap='YlOrRd', aspect='auto')
+            
+            ax.set_xticks(np.arange(24))
+            ax.set_yticks(np.arange(7))
+            ax.set_xticklabels([f"{h:02d}:00" for h in range(24)], rotation=45, ha="right", fontsize=8)
+            ax.set_yticklabels(day_names)
+            
+            ax.set_title("Mapa de Calor de Facturación (Por Día y Hora)", pad=20, fontsize=12, fontweight='bold')
+            ax.set_xlabel("Hora del Día", fontsize=10)
+            ax.set_ylabel("Día de la Semana", fontsize=10)
+            
+            label_color = "Cantidad de Facturas" if use_count else "Monto Facturado (USD)"
+            fig.colorbar(im, ax=ax, label=label_color)
+            
+            canvas = FigureCanvasTkAgg(fig, master=left_panel)
+            canvas.draw()
+            canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+            
+            toolbar_frame = tk.Frame(left_panel, bg="white")
+            toolbar_frame.pack(fill=tk.X)
+            NavigationToolbar2Tk(canvas, toolbar_frame)
+            
+            ttk.Label(right_panel, text="Resumen del Mapa", font=("Segoe UI", 12, "bold"), background="#F9FAFB").pack(pady=(15, 10), padx=10, anchor=tk.W)
+            
+            if use_count:
+                ttk.Label(right_panel, text=f"Total Registros: {int(total_valor)}", font=("Segoe UI", 10), background="#F9FAFB").pack(pady=5, padx=10, anchor=tk.W)
+            else:
+                ttk.Label(right_panel, text=f"Total USD: ${total_valor:,.2f}", font=("Segoe UI", 10), background="#F9FAFB").pack(pady=5, padx=10, anchor=tk.W)
+            
+            if total_valor > 0:
+                max_val = np.max(heatmap_data)
+                max_pos = np.unravel_index(np.argmax(heatmap_data), heatmap_data.shape)
+                ttk.Label(right_panel, text=f"Pico: {day_names[max_pos[0]]} a las {max_pos[1]:02d}:00", font=("Segoe UI", 10), background="#F9FAFB", foreground="#EF4444").pack(pady=5, padx=10, anchor=tk.W)
+                if use_count:
+                    ttk.Label(right_panel, text=f"Max Facturas/Hora: {int(max_val)}", font=("Segoe UI", 10), background="#F9FAFB").pack(pady=5, padx=10, anchor=tk.W)
+                else:
+                    ttk.Label(right_panel, text=f"Max USD/Hora: ${max_val:,.2f}", font=("Segoe UI", 10), background="#F9FAFB").pack(pady=5, padx=10, anchor=tk.W)
+            return
+
         # Organizar datos por entidad
         entities_data = defaultdict(lambda: {'name': '', 'dates': [], 'values': [], 'invoices': []})
         totals_metadata = defaultdict(float) 

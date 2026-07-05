@@ -92,11 +92,12 @@ class SplashScreen(tk.Toplevel):
                   bg=self.bg_color,
                   fg=self.text_primary).pack()
         
-        tk.Label(self.container, 
+        self.subtitle_label = tk.Label(self.container, 
                   text="Plataforma de Administración Local", 
                   font=("Segoe UI", 11),
                   bg=self.bg_color,
-                  fg=self.text_secondary).pack(pady=(0, 20))
+                  fg=self.text_secondary)
+        self.subtitle_label.pack(pady=(0, 20))
         
         # Barra de progreso VERDE
         self.progress = ttk.Progressbar(self.container, 
@@ -303,6 +304,15 @@ class SplashScreen(tk.Toplevel):
             self.btn_login.config(state=tk.NORMAL)
             self.username.focus_set()
             self.login_status.config(text="Ingrese sus credenciales de acceso", fg=self.accent_color)
+        except Exception:
+            pass
+
+    def set_update_status(self, text: str, color: str = "#F59E0B"):
+        """Actualiza el subtítulo con un mensaje de actualización.
+        Seguro para llamar desde hilos de fondo vía after()."""
+        try:
+            if self.winfo_exists():
+                self.subtitle_label.config(text=text, fg=color)
         except Exception:
             pass
 

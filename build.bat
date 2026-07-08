@@ -48,7 +48,11 @@ echo Limpiando builds anteriores...
 if exist "app.dist"          rmdir /s /q "app.dist"
 if exist "app.build"         rmdir /s /q "app.build"
 if exist "app.onefile-build" rmdir /s /q "app.onefile-build"
+if exist "updater_main.build" rmdir /s /q "updater_main.build"
+if exist "updater_main.dist" rmdir /s /q "updater_main.dist"
+if exist "updater_main.onefile-build" rmdir /s /q "updater_main.onefile-build"
 if exist "Casapro Nexus.exe" del /q "Casapro Nexus.exe"
+if exist "nexus_updater.exe" del /q "nexus_updater.exe"
 echo [OK] Limpieza completada.
 echo.
 
@@ -81,11 +85,11 @@ python -m nuitka ^
   --enable-plugin=tk-inter ^
   --windows-icon-from-ico=pal/ui/image.ico ^
   --windows-uac-admin ^
-  --windows-company-name="Casapro" ^
+  --windows-company-name="rafael3gn@gmail.com" ^
   --windows-product-name="Casapro Nexus" ^
   --windows-file-description="Casapro Nexus - Plataforma de Administracion Local" ^
-  --windows-file-version=1.7.1.0 ^
-  --windows-product-version=1.7.1.0 ^
+  --windows-file-version=1.7.3.0 ^
+  --windows-product-version=1.7.3.0 ^
   --onefile-tempdir-spec="{TEMP}/CasaproNexus" ^
   --include-package=cryptography ^
   --include-package=keyring ^
@@ -110,6 +114,47 @@ python -m nuitka ^
   --windows-disable-console ^
   --output-filename="Casapro Nexus.exe" ^
   app.py
+
+if errorlevel 1 (
+    echo ============================================================
+    echo   BUILD FALLIDO [APP PRINCIPAL]
+    echo   Revisa los mensajes de error anteriores.
+    echo ============================================================
+    pause & exit /b 1
+)
+
+echo.
+echo Iniciando compilacion del actualizador nexus_updater.exe...
+echo Este ejecutable se compila con permisos de Administrador para elevar UAC directamente.
+echo.
+
+python -m nuitka ^
+  --standalone ^
+  --onefile ^
+  --windows-icon-from-ico=pal/ui/image.ico ^
+  --windows-uac-admin ^
+  --windows-company-name="rafael3gn@gmail.com" ^
+  --windows-product-name="Casapro Nexus Updater" ^
+  --windows-file-description="Casapro Nexus - Actualizador" ^
+  --windows-file-version=1.7.3.0 ^
+  --windows-product-version=1.7.3.0 ^
+  --onefile-tempdir-spec="{TEMP}/CasaproNexusUpdater" ^
+  --windows-disable-console ^
+  --output-filename="nexus_updater.exe" ^
+  updater_main.py
+
+if errorlevel 1 (
+    echo ============================================================
+    echo   BUILD FALLIDO [ACTUALIZADOR]
+    echo   Revisa los mensajes de error anteriores.
+    echo ============================================================
+    pause & exit /b 1
+)
+
+if exist "app.dist" (
+    copy /Y "nexus_updater.exe" "app.dist\nexus_updater.exe" >nul
+    echo [OK] Actualizador copiado a app.dist\nexus_updater.exe
+)
 
 echo.
 echo Hora de inicio: %INICIO_BUILD%
@@ -144,14 +189,23 @@ if exist "app.dist" (
 REM --- Verificar resultado ---
 if "%BUILD_MODE%"=="1" (
     if exist "app.dist\Casapro Nexus.exe" (
-        echo ============================================================
-        echo   BUILD EXITOSO [STANDALONE]
-        echo   Directorio generado: app.dist\
-        echo   Ejecutable: app.dist\Casapro Nexus.exe
-        echo ============================================================
-        echo.
-        echo Para probar: app.dist\"Casapro Nexus.exe"
-        for %%A in ("app.dist\Casapro Nexus.exe") do echo Tamanio: %%~zA bytes
+        if exist "app.dist\nexus_updater.exe" (
+            echo ============================================================
+            echo   BUILD EXITOSO [STANDALONE]
+            echo   Directorio generado: app.dist\
+            echo   Ejecutable: app.dist\Casapro Nexus.exe
+            echo   Actualizador: app.dist\nexus_updater.exe
+            echo ============================================================
+            echo.
+            echo Para probar: app.dist\"Casapro Nexus.exe"
+            for %%A in ("app.dist\Casapro Nexus.exe") do echo Tamanio app: %%~zA bytes
+            for %%A in ("app.dist\nexus_updater.exe") do echo Tamanio updater: %%~zA bytes
+        ) else (
+            echo ============================================================
+            echo   BUILD FALLIDO [STANDALONE]
+            echo   No se encontro app.dist\nexus_updater.exe
+            echo ============================================================
+        )
     ) else (
         echo ============================================================
         echo   BUILD FALLIDO [STANDALONE]
@@ -168,9 +222,12 @@ if "%BUILD_MODE%"=="1" (
         echo Copiando a dist\ para compatibilidad con setup_nuitka.iss...
         if not exist "dist" mkdir dist
         copy /Y "Casapro Nexus.exe" "dist\Casapro Nexus.exe" >nul
+        copy /Y "nexus_updater.exe" "dist\nexus_updater.exe" >nul
         echo [OK] Copia en dist\Casapro Nexus.exe
+        echo [OK] Copia en dist\nexus_updater.exe
         echo.
-        for %%A in ("Casapro Nexus.exe") do echo Tamanio: %%~zA bytes
+        for %%A in ("Casapro Nexus.exe") do echo Tamanio app: %%~zA bytes
+        for %%A in ("nexus_updater.exe") do echo Tamanio updater: %%~zA bytes
     ) else (
         echo ============================================================
         echo   BUILD FALLIDO [ONEFILE]

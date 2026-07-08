@@ -1,8 +1,9 @@
 #define MyAppName "Casapro Nexus"
-#define MyAppVersion "1.7.1"
+#define MyAppVersion "1.7.3"
 #define MyAppPublisher "rafael3gn@gmail.com"
 #define MyAppURL "rafael3gn@gmail.com"
 #define MyAppExeName "Casapro Nexus.exe"
+#define MyUpdaterExeName "nexus_updater.exe"
 #define NuitkaStandaloneDir "app.dist"
 
 [Setup]
@@ -44,6 +45,8 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 
 ; Incluir el ejecutable principal primero
 Source: "{#NuitkaStandaloneDir}\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion restartreplace
+; Incluir el actualizador externo con manifiesto de Administrador
+Source: "{#NuitkaStandaloneDir}\{#MyUpdaterExeName}"; DestDir: "{app}"; Flags: ignoreversion restartreplace
 ; Incluir todo el contenido recursivo de la carpeta app.dist
 Source: "{#NuitkaStandaloneDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 

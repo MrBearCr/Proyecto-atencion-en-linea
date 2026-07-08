@@ -27,5 +27,10 @@ desuso
 posmigra/nexus-example
 pal/theme_config.json
 pal/deprecated
+app.build/
 app.dist/
 Casapro Nexus.exe
+nexus_updater.exe
+updater_main.build/
+updater_main.dist/
+updater_main.onefile-build/

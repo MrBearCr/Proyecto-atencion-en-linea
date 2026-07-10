@@ -88,8 +88,8 @@ python -m nuitka ^
   --windows-company-name="rafael3gn@gmail.com" ^
   --windows-product-name="Casapro Nexus" ^
   --windows-file-description="Casapro Nexus - Plataforma de Administracion Local" ^
-  --windows-file-version=1.7.3.0 ^
-  --windows-product-version=1.7.3.0 ^
+  --windows-file-version=1.7.5.0 ^
+  --windows-product-version=1.7.5.0 ^
   --onefile-tempdir-spec="{TEMP}/CasaproNexus" ^
   --include-package=cryptography ^
   --include-package=keyring ^
@@ -136,8 +136,8 @@ python -m nuitka ^
   --windows-company-name="rafael3gn@gmail.com" ^
   --windows-product-name="Casapro Nexus Updater" ^
   --windows-file-description="Casapro Nexus - Actualizador" ^
-  --windows-file-version=1.7.3.0 ^
-  --windows-product-version=1.7.3.0 ^
+  --windows-file-version=1.7.5.0 ^
+  --windows-product-version=1.7.5.0 ^
   --onefile-tempdir-spec="{TEMP}/CasaproNexusUpdater" ^
   --windows-disable-console ^
   --output-filename="nexus_updater.exe" ^

@@ -19,16 +19,18 @@ class SedesServidoresTab(ttk.Frame):
         list_frame = ttk.LabelFrame(self, text="Sedes Configuradas", padding=10)
         list_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-        self.tree = ttk.Treeview(list_frame, columns=("ID", "Nombre", "IP", "BD", "Estado"), show="headings")
+        self.tree = ttk.Treeview(list_frame, columns=("ID", "Nombre", "IP Principal", "IP Secundaria", "BD", "Estado"), show="headings")
         self.tree.heading("ID", text="ID")
         self.tree.heading("Nombre", text="Nombre")
-        self.tree.heading("IP", text="IP")
+        self.tree.heading("IP Principal", text="IP Principal")
+        self.tree.heading("IP Secundaria", text="IP Secundaria")
         self.tree.heading("BD", text="BD")
         self.tree.heading("Estado", text="Estado")
         
         self.tree.column("ID", width=30)
         self.tree.column("Nombre", width=120)
-        self.tree.column("IP", width=100)
+        self.tree.column("IP Principal", width=100)
+        self.tree.column("IP Secundaria", width=100)
         self.tree.column("BD", width=80)
         self.tree.column("Estado", width=60)
         
@@ -47,7 +49,8 @@ class SedesServidoresTab(ttk.Frame):
 
         fields = [
             ("Nombre Sede:", "nombre"),
-            ("IP Servidor:", "ip"),
+            ("IP Principal:", "ip"),
+            ("IP Secundaria:", "ip_secundaria"),
             ("Nombre BD:", "bd"),
             ("Usuario BD:", "user"),
             ("Password BD:", "pass")
@@ -78,7 +81,7 @@ class SedesServidoresTab(ttk.Frame):
             sedes = self.db_manager.get_sedes_config() # Retorna lista de dicts
             for s in sedes:
                 estado = "Activa" if s['activa'] else "Inactiva"
-                self.tree.insert("", tk.END, values=(s['id'], s['nombre_sede'], s['ip_servidor'], s['nombre_bd'], estado))
+                self.tree.insert("", tk.END, values=(s['id'], s['nombre_sede'], s['ip_servidor'], s.get('ip_secundaria', ''), s['nombre_bd'], estado))
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo cargar las sedes: {e}")
 
@@ -98,6 +101,7 @@ class SedesServidoresTab(ttk.Frame):
         if sede:
             self.vars['nombre'].set(sede['nombre_sede'])
             self.vars['ip'].set(sede['ip_servidor'])
+            self.vars['ip_secundaria'].set(sede.get('ip_secundaria', ''))
             self.vars['bd'].set(sede['nombre_bd'])
             self.vars['user'].set(sede['usuario_bd'] or "")
             self.vars['pass'].set("") # No mostramos la pass por seguridad, si se deja vacía al guardar no se cambia? 
@@ -115,6 +119,7 @@ class SedesServidoresTab(ttk.Frame):
         data = {
             'nombre_sede': self.vars['nombre'].get(),
             'ip_servidor': self.vars['ip'].get(),
+            'ip_secundaria': self.vars['ip_secundaria'].get() or None,
             'nombre_bd': self.vars['bd'].get(),
             'usuario_bd': self.vars['user'].get(),
             'activa': 1 if self.var_activa.get() else 0

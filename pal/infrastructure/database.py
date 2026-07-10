@@ -2063,7 +2063,7 @@ class DatabaseManager:
         Retorna una lista de diccionarios con los detalles de conexión de cada sede.
         """
         query = """
-            SELECT id, nombre_sede, ip_servidor, nombre_bd, usuario_bd, password_bd_enc, activa
+            SELECT id, nombre_sede, ip_servidor, ip_secundaria, nombre_bd, usuario_bd, password_bd_enc, activa
             FROM pal_sedes_configuracion
             WHERE activa = 1
             ORDER BY nombre_sede ASC
@@ -2077,10 +2077,11 @@ class DatabaseManager:
                     'id': row[0],
                     'nombre_sede': row[1],
                     'ip_servidor': row[2],
-                    'nombre_bd': row[3],
-                    'usuario_bd': row[4],
-                    'password_bd_enc': row[5],
-                    'activa': row[6]
+                    'ip_secundaria': row[3],
+                    'nombre_bd': row[4],
+                    'usuario_bd': row[5],
+                    'password_bd_enc': row[6],
+                    'activa': row[7]
                 })
             return sedes
         except Exception as e:
@@ -2094,11 +2095,13 @@ class DatabaseManager:
         Establece una conexión pyodbc temporal a la base de datos VAD20 de una sede específica.
         Requiere un diccionario de configuración de sede obtenido de get_sedes_config().
         La contraseña se desencripta usando SecureCredentialsManager.
+        Si falla la conexión a la IP principal, intenta automáticamente con la IP secundaria si está configurada.
         """
         if not sede_config:
             raise Exception("Configuración de sede no proporcionada")
 
         server = sede_config.get('ip_servidor')
+        server_secondary = sede_config.get('ip_secundaria')
         database = sede_config.get('nombre_bd')
         user = sede_config.get('usuario_bd')
         encrypted_password = sede_config.get('password_bd_enc')
@@ -2115,30 +2118,55 @@ class DatabaseManager:
                 # fallback al password en texto plano si existe o seguir sin pass
                 password = encrypted_password # Intento desesperado si no estaba encriptado realmente
 
-        # Cadena de conexión simplificada para mayor compatibilidad
-        # Algunos drivers antiguos fallan con Encrypt/TrustServerCertificate
-        conn_str = (
-            f"DRIVER={{SQL Server}};"
-            f"SERVER={server};"
-            f"DATABASE={database};"
-        )
+        # Función interna para intentar conexión a un servidor específico
+        def _try_connect(target_server, is_fallback=False):
+            if not target_server:
+                return None
+            
+            # Cadena de conexión simplificada para mayor compatibilidad
+            # Algunos drivers antiguos fallan con Encrypt/TrustServerCertificate
+            conn_str = (
+                f"DRIVER={{SQL Server}};"
+                f"SERVER={target_server};"
+                f"DATABASE={database};"
+            )
 
-        if user:
-            conn_str += f"UID={user};PWD={password or ''};"
-        else:
-            conn_str += "Trusted_Connection=yes;"
-        
-        # Agregar timeouts básicos
-        conn_str += "Connection Timeout=30;"
-        
-        try:
-            self._log(f"Intentando conectar a VAD20 ({sede_config.get('nombre_sede')}) en {server}...", "INFO")
-            temp_conn = pyodbc.connect(conn_str)
-            self._log(f"Conectado exitosamente a VAD20 para sede: {sede_config.get('nombre_sede')}", "INFO")
-            return temp_conn
-        except Exception as e:
-            self._log(f"Fallo al conectar a VAD20 para sede {sede_config.get('nombre_sede')}: {e}", "ERROR")
-            raise Exception(f"Fallo al conectar a VAD20 para {sede_config.get('nombre_sede')}. Verifique IP {server} y red.")
+            if user:
+                conn_str += f"UID={user};PWD={password or ''};"
+            else:
+                conn_str += "Trusted_Connection=yes;"
+            
+            # Agregar timeouts básicos
+            conn_str += "Connection Timeout=30;"
+            
+            try:
+                prefix = "FALLBACK a" if is_fallback else "Intentando conectar a"
+                self._log(f"{prefix} VAD20 ({sede_config.get('nombre_sede')}) en {target_server}...", "INFO")
+                temp_conn = pyodbc.connect(conn_str)
+                self._log(f"Conectado exitosamente a VAD20 para sede: {sede_config.get('nombre_sede')} (IP: {target_server})", "INFO")
+                return temp_conn
+            except Exception as e:
+                self._log(f"Fallo al conectar a VAD20 para sede {sede_config.get('nombre_sede')} en {target_server}: {e}", "ERROR")
+                return None
+
+        # Intentar primero con la IP principal
+        conn = _try_connect(server, is_fallback=False)
+        if conn:
+            return conn
+
+        # Si falló y existe IP secundaria, intentar con ella
+        if server_secondary:
+            self._log(f"IP principal falló para {sede_config.get('nombre_sede')}, intentando IP secundaria...", "WARNING")
+            conn = _try_connect(server_secondary, is_fallback=True)
+            if conn:
+                return conn
+
+        # Si ambas fallaron, lanzar excepción
+        error_msg = f"Fallo al conectar a VAD20 para {sede_config.get('nombre_sede')}. Verifique IPs: {server}"
+        if server_secondary:
+            error_msg += f" (secundaria: {server_secondary})"
+        error_msg += " y red."
+        raise Exception(error_msg)
 
     def connect_to_vad10_sede(self, sede_config):
         """
@@ -2190,12 +2218,13 @@ class DatabaseManager:
         """Agrega una nueva sede a la tabla pal_sedes_configuracion."""
         query = """
             INSERT INTO pal_sedes_configuracion 
-            (nombre_sede, ip_servidor, nombre_bd, usuario_bd, password_bd_enc, activa)
-            VALUES (?, ?, ?, ?, ?, ?)
+            (nombre_sede, ip_servidor, ip_secundaria, nombre_bd, usuario_bd, password_bd_enc, activa)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
         """
         params = (
             sede_data['nombre_sede'],
             sede_data['ip_servidor'],
+            sede_data.get('ip_secundaria'), # Usar .get por si es None
             sede_data['nombre_bd'],
             sede_data['usuario_bd'],
             sede_data.get('password_bd_enc'), # Usar .get por si es None
@@ -2209,6 +2238,7 @@ class DatabaseManager:
             UPDATE pal_sedes_configuracion SET
             nombre_sede = ?,
             ip_servidor = ?,
+            ip_secundaria = ?,
             nombre_bd = ?,
             usuario_bd = ?,
             password_bd_enc = ?,
@@ -2219,6 +2249,7 @@ class DatabaseManager:
         params = (
             sede_data['nombre_sede'],
             sede_data['ip_servidor'],
+            sede_data.get('ip_secundaria'),
             sede_data['nombre_bd'],
             sede_data['usuario_bd'],
             sede_data.get('password_bd_enc'),

@@ -8,9 +8,10 @@ import sys
 import os
 
 class SplashScreen(tk.Toplevel):
-    def __init__(self, parent):
+    def __init__(self, parent, version=None):
         super().__init__(parent)
         self.title("Cargando...")
+        self.app_version = version
         # Reducir tamaño del splash para que sea más elegante
         self.splash_width = 750
         self.splash_height = 620
@@ -156,6 +157,17 @@ class SplashScreen(tk.Toplevel):
         self.login_status.grid(row=5, column=0, pady=(15, 0))
         
         self.bind("<Return>", self._on_enter)
+        
+        # Versión de la aplicación en la esquina inferior derecha
+        if self.app_version:
+            self.version_label = tk.Label(self.container, 
+                      text=f"v{self.app_version}", 
+                      font=("Segoe UI", 10, "bold"),
+                      bg=self.bg_color,
+                      fg=self.accent_color)
+            self.version_label.pack(side="bottom", anchor="e", padx=20, pady=10)
+        else:
+            self.version_label = None
         
         # --- MOUSE DRAGGING SUPPORT ---
         self._drag_data = {"x": 0, "y": 0}

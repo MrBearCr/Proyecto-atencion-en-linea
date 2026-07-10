@@ -347,6 +347,7 @@ def export_stock_excel(filename: str, datos_exportar: List, seleccionadas: List[
         
         headers.append('Stock Total')
 
+        # Último Proveedor
         if mostrar_proveedores:
             headers.append('Últ. Proveedor')
         
@@ -538,11 +539,12 @@ def export_stock_excel(filename: str, datos_exportar: List, seleccionadas: List[
                 
                 # Stock Total
                 ws_main.cell(row=row, column=current_stock_col, value=s_tot)
+                current_stock_col += 1
 
-                current_dyn_col = 18
+                # Último Proveedor
                 if mostrar_proveedores:
-                    ws_main.cell(row=row, column=current_dyn_col, value=proveedor_map_stock.get(codigo_s, 'SIN COMPRAS'))
-                    current_dyn_col += 1
+                    ws_main.cell(row=row, column=current_stock_col, value=proveedor_map_stock.get(codigo_s, 'SIN COMPRAS'))
+                    current_stock_col += 1
 
                 # Columnas económicas
                 if mostrar_costo_utilidad:
@@ -553,17 +555,17 @@ def export_stock_excel(filename: str, datos_exportar: List, seleccionadas: List[
                     precio_iva = precio_base * (1 + (iva_pct / 100))
                     utilidad_pct = ((precio_base - costo_val) / precio_base * 100) if precio_base > 0 else 0
                     
-                    c_p = ws_main.cell(row=row, column=current_dyn_col, value=precio_iva)
+                    c_p = ws_main.cell(row=row, column=current_stock_col, value=precio_iva)
                     c_p.number_format = '#,##0.00'
-                    current_dyn_col += 1
+                    current_stock_col += 1
                     
-                    c_c = ws_main.cell(row=row, column=current_dyn_col, value=costo_val)
+                    c_c = ws_main.cell(row=row, column=current_stock_col, value=costo_val)
                     c_c.number_format = '#,##0.00'
-                    current_dyn_col += 1
+                    current_stock_col += 1
                     
-                    c_u = ws_main.cell(row=row, column=current_dyn_col, value=utilidad_pct)
+                    c_u = ws_main.cell(row=row, column=current_stock_col, value=utilidad_pct)
                     c_u.number_format = '0.00 "%"'
-                    current_dyn_col += 1
+                    current_stock_col += 1
 
                 # Reportar progreso
                 if progress_cb:

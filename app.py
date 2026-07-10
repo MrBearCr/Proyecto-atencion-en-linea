@@ -45,7 +45,7 @@ from pal.core.config_manager import ConfigManager
 CONFIG_FILE = 'db_config.ini'
 LICENSE_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTdAdOg6pI7tOF-9UdFDzw0P5aSpNRc-jGIYHwOHmXb7qqOtag9QTYAi4JU0U2VoIZLd_TjvK_7cxX9/pub?output=csv"
 LICENSE_CLIENT_NAME = "PALPY"
-APP_VERSION = "1.7.3" # Versión actual de la aplicación
+APP_VERSION = "1.7.5" # Versión actual de la aplicación
 UPDATE_URL_DEFAULT = "https://raw.githubusercontent.com/MrBearCr/nexus/main/updates"  # URL base por defecto para actualizaciones (formato raw)
 
 def load_update_url():
@@ -250,7 +250,7 @@ class DatabaseApp:
         self.root.withdraw()  # Ocultar ventana principal
 
         # Mostrar splash screen
-        self.splash = SplashScreen(self.root)
+        self.splash = SplashScreen(self.root, version=APP_VERSION)
         self.splash.start_animation()
 
         # Validar licencia ANTES de inicializar el resto de la app
@@ -8389,13 +8389,13 @@ class DatabaseApp:
             if not self.auth or not self.db_manager.conn:
                 return False, "Base de datos no conectada"
             
-            # 1. Verificación de actualizaciones obligatorias (cada 12h)
+            # 1. Verificación de actualizaciones obligatorias (cada 1h)
             try:
                 last_check = load_last_update_check()
                 now = datetime.now()
                 
-                # Si nunca se ha verificado o pasaron 12 horas
-                if last_check is None or (now - last_check) > timedelta(hours=12):
+                # Si nunca se ha verificado o pasaron 1 hora
+                if last_check is None or (now - last_check) > timedelta(hours=1):
                     print(f"[DEBUG] Ejecutando comprobacion obligatoria de actualizaciones...", flush=True)
                     
                     if hasattr(self, 'splash') and self.splash:
@@ -8810,7 +8810,7 @@ class DatabaseApp:
         from pal.ui.splash import SplashScreen
         
         # Crear splash de login
-        login_splash = SplashScreen(self.root)
+        login_splash = SplashScreen(self.root, version=APP_VERSION)
         login_splash.title("Iniciar Sesión")
         
         # Configurar como pantalla de login (sin progreso ni loops)

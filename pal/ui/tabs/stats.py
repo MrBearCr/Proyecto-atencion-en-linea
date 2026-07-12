@@ -805,6 +805,271 @@ def _stats_draw_providers_universe(app, ventas_total_universo, total_universo, c
         _ttk.Label(app.graph_container, text=f"Error generando estadísticas por proveedor: {e}").pack(pady=20)
 
 
+# Mapeo de nombre de sede a prefijo de depósito según convenciones del proyecto.
+# Ref: docs/contexto/convenciones.md
+_SEDE_NOMBRE_A_CODIGO = {
+    "barinas":   "01",
+    "cabudare":  "03",
+    "guanare":   "04",
+    "araure":    "05",
+}
+# Colores por sede para el gráfico multi-línea
+_SEDE_COLORES = {
+    "01": "#1F77B4",  # Barinas - azul
+    "03": "#FF7F0E",  # Cabudare - naranja
+    "04": "#2CA02C",  # Guanare - verde
+    "05": "#D62728",  # Araure - rojo
+}
+
+
+def _sede_val_to_codigo(sede_val: str) -> str:
+    """Convierte la cadena del combo de sede a código de depósito."""
+    v = sede_val.strip()
+    if "ICH" in v or v.startswith("00"):
+        return "ICH"
+    # Formato "01 - Barinas"
+    parte = v.split(" ")[0].strip()
+    if parte.isdigit():
+        return parte.zfill(2)
+    # Fallback: buscar por nombre
+    return _SEDE_NOMBRE_A_CODIGO.get(v.lower(), "ICH")
+
+
+def _stats_compute_and_draw_timeline(app):
+    import threading
+    _stats_clear_container(app)
+
+    try:
+        fecha_ini = getattr(app, 'stats_timeline_fecha_inicio', None)
+        fecha_fin = getattr(app, 'stats_timeline_fecha_fin', None)
+        if not fecha_ini or not fecha_fin:
+            ttk.Label(app.graph_container, text="Seleccione el rango de fechas.").pack(pady=20)
+            return
+
+        start_date = fecha_ini.get_date()
+        end_date = fecha_fin.get_date()
+
+        sede_var = getattr(app, 'stats_timeline_sede_var', None)
+        sede_val = sede_var.get() if sede_var else "00 - ICH"
+        sede_codigo = _sede_val_to_codigo(sede_val)
+
+        metrica_var = getattr(app, 'stats_timeline_metric_var', None)
+        is_dollars = bool(metrica_var and "Monto" in metrica_var.get())
+
+        lbl_loading = ttk.Label(app.graph_container, text="⏳ Consultando historial de ventas... por favor espere.")
+        lbl_loading.pack(pady=30)
+
+        def task():
+            # Modo ICH: una consulta por cada sede configurada
+            if sede_codigo == "ICH":
+                try:
+                    sedes_config = app.db_manager.get_sedes_config()
+                except Exception:
+                    sedes_config = []
+
+                series = {}  # {label: {fecha: valor}}
+                for sc in sedes_config:
+                    nombre = sc.get('nombre_sede', 'Sede')
+                    cod = _SEDE_NOMBRE_A_CODIGO.get(nombre.lower(), None)
+                    if not cod:
+                        continue
+                    rows = app.db_manager.get_ventas_timeline(start_date, end_date, cod, include_monto=is_dollars)
+                    series[nombre] = _aggregate_rows(rows, is_dollars)
+
+                app.root.after(0, lambda s=series: _stats_render_timeline_multiline(
+                    app, s, is_dollars, lbl_loading, sede_val))
+            else:
+                data = app.db_manager.get_ventas_timeline(start_date, end_date, sede_codigo, include_monto=is_dollars)
+                app.root.after(0, lambda d=data: _stats_render_timeline_result(
+                    app, d, is_dollars, lbl_loading, sede_val, sede_codigo))
+
+        threading.Thread(target=task, daemon=True).start()
+    except Exception as e:
+        _stats_clear_container(app)
+        ttk.Label(app.graph_container, text=f"Error al iniciar consulta: {e}").pack(pady=20)
+
+
+def _aggregate_rows(rows, is_dollars):
+    """Agrupa filas (fecha, unidades[, monto]) en {fecha: valor_total}.
+    
+    Cuando include_monto=True la query ya devuelve (fecha, unidades, monto).
+    Cuando include_monto=False devuelve (fecha, unidades).
+    """
+    from datetime import date as _date
+    acumulado = {}
+    for r in (rows or []):
+        if not r or len(r) < 2:
+            continue
+        fecha = r[0]
+        # Normalizar a datetime.date
+        if hasattr(fecha, 'date'):
+            fecha = fecha.date()
+        if is_dollars:
+            # columna 2 = monto ya calculado en SQL
+            valor = float(r[2] if len(r) > 2 else 0) if r[2] else 0.0
+        else:
+            valor = float(r[1] or 0)
+        if valor <= 0:
+            continue
+        acumulado[fecha] = acumulado.get(fecha, 0.0) + valor
+    return acumulado
+
+
+def _stats_render_timeline_result(app, data, is_dollars, lbl_loading, sede_val, sede_codigo):
+    """Renderiza una única línea (sede específica)."""
+    try:
+        lbl_loading.destroy()
+    except Exception:
+        pass
+    _stats_clear_container(app)
+
+    ventas_por_dia = _aggregate_rows(data, is_dollars)
+
+    if not ventas_por_dia:
+        ttk.Label(app.graph_container,
+                  text=f"No se encontraron ventas para '{sede_val}' en el período seleccionado.").pack(pady=20)
+        return
+
+    try:
+        from datetime import datetime
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+        import matplotlib.dates as mdates
+
+        fechas_ordenadas = sorted(ventas_por_dia.keys())
+        # Convertir datetime.date a datetime.datetime para matplotlib
+        fechas_dt = [datetime(f.year, f.month, f.day) for f in fechas_ordenadas]
+        valores = [ventas_por_dia[f] for f in fechas_ordenadas]
+
+        color = _SEDE_COLORES.get(sede_codigo, '#1F77B4')
+        eje_y = "Monto ($)" if is_dollars else "Unidades Netas"
+
+        fig = Figure(figsize=(9, 5), dpi=100)
+        ax = fig.add_subplot(111)
+        line, = ax.plot(fechas_dt, valores, marker='o', markersize=4, linestyle='-',
+                        color=color, linewidth=2, label=sede_val)
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%d/%m'))
+        fig.autofmt_xdate()
+        ax.set_ylabel(eje_y)
+        ax.set_title(f"Comportamiento de Ventas — {sede_val}")
+        ax.grid(True, linestyle='--', alpha=0.5)
+
+        annot = ax.annotate("", xy=(0, 0), xytext=(12, 12), textcoords="offset points",
+                            bbox=dict(boxstyle="round,pad=0.4", fc="#FFFDE7", ec="#333"),
+                            arrowprops=dict(arrowstyle="->"))
+        annot.set_visible(False)
+
+        def hover(event):
+            if event.inaxes != ax:
+                if annot.get_visible():
+                    annot.set_visible(False)
+                    fig.canvas.draw_idle()
+                return
+            cont, ind = line.contains(event)
+            if cont:
+                idx = ind["ind"][0]
+                f = fechas_ordenadas[idx]  # datetime.date original
+                v = valores[idx]
+                annot.xy = (fechas_dt[idx], v)
+                val_str = f"${v:,.2f}" if is_dollars else f"{v:,.0f} unds"
+                annot.set_text(f"{f.strftime('%d/%m/%Y')}\n{val_str}")
+                annot.set_visible(True)
+                fig.canvas.draw_idle()
+            else:
+                if annot.get_visible():
+                    annot.set_visible(False)
+                    fig.canvas.draw_idle()
+
+        canvas = FigureCanvasTkAgg(fig, master=app.graph_container)
+        canvas.mpl_connect("motion_notify_event", hover)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+    except Exception as e:
+        _stats_clear_container(app)
+        ttk.Label(app.graph_container, text=f"Error renderizando: {e}").pack(pady=20)
+
+
+def _stats_render_timeline_multiline(app, series, is_dollars, lbl_loading, sede_val):
+    """Renderiza múltiples líneas (ICH = una línea por sede)."""
+    try:
+        lbl_loading.destroy()
+    except Exception:
+        pass
+    _stats_clear_container(app)
+
+    if not any(v for v in series.values()):
+        ttk.Label(app.graph_container, text="No se encontraron ventas para ninguna sede en el período.").pack(pady=20)
+        return
+
+    try:
+        from datetime import datetime
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+        import matplotlib.dates as mdates
+
+        fig = Figure(figsize=(9, 5), dpi=100)
+        ax = fig.add_subplot(111)
+        eje_y = "Monto ($)" if is_dollars else "Unidades Netas"
+
+        all_lines = []  # (nombre, fechas_dt, fechas_orig, valores, line_obj)
+        for nombre, ventas in series.items():
+            if not ventas:
+                continue
+            fechas_orig = sorted(ventas.keys())
+            fechas_dt = [datetime(f.year, f.month, f.day) for f in fechas_orig]
+            valores = [ventas[f] for f in fechas_orig]
+            cod = _SEDE_NOMBRE_A_CODIGO.get(nombre.lower(), '01')
+            color = _SEDE_COLORES.get(cod, '#1F77B4')
+            line, = ax.plot(fechas_dt, valores, marker='o', markersize=4, linestyle='-',
+                            color=color, linewidth=2, label=nombre)
+            all_lines.append((nombre, fechas_dt, fechas_orig, valores, line))
+
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%d/%m'))
+        fig.autofmt_xdate()
+        ax.set_ylabel(eje_y)
+        ax.set_title("Comportamiento de Ventas — Todas las Sedes (ICH)")
+        ax.grid(True, linestyle='--', alpha=0.5)
+        ax.legend(loc='upper left', fontsize=9)
+
+        annot = ax.annotate("", xy=(0, 0), xytext=(12, 12), textcoords="offset points",
+                            bbox=dict(boxstyle="round,pad=0.4", fc="#FFFDE7", ec="#333"),
+                            arrowprops=dict(arrowstyle="->"))
+        annot.set_visible(False)
+
+        def hover(event):
+            if event.inaxes != ax:
+                if annot.get_visible():
+                    annot.set_visible(False)
+                    fig.canvas.draw_idle()
+                return
+            found = False
+            for (nombre, fechas_dt_l, fechas_orig_l, valores_l, line) in all_lines:
+                cont, ind = line.contains(event)
+                if cont:
+                    idx = ind["ind"][0]
+                    f = fechas_orig_l[idx]
+                    v = valores_l[idx]
+                    annot.xy = (fechas_dt_l[idx], v)
+                    val_str = f"${v:,.2f}" if is_dollars else f"{v:,.0f} unds"
+                    annot.set_text(f"{nombre}\n{f.strftime('%d/%m/%Y')}\n{val_str}")
+                    annot.set_visible(True)
+                    fig.canvas.draw_idle()
+                    found = True
+                    break
+            if not found and annot.get_visible():
+                annot.set_visible(False)
+                fig.canvas.draw_idle()
+
+        canvas = FigureCanvasTkAgg(fig, master=app.graph_container)
+        canvas.mpl_connect("motion_notify_event", hover)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+    except Exception as e:
+        _stats_clear_container(app)
+        ttk.Label(app.graph_container, text=f"Error renderizando ICH: {e}").pack(pady=20)
+
+
+
 def _stats_compute_and_draw(app):
     # Determinar tipo de gráfico (pie o barras)
     chart_mode = getattr(app, 'stats_chart_type_var', None)
@@ -816,7 +1081,7 @@ def _stats_compute_and_draw(app):
     except Exception:
         chart_type = 'pie'
 
-    # Determinar modo de vista (Jerarquía TRA, Proveedores, MBRP días sin venta, Mapa de Calor)
+    # Determinar modo de vista (Jerarquía TRA, Proveedores, MBRP días sin venta, Mapa de Calor, Línea de tiempo)
     view_mode_var = getattr(app, 'stats_view_mode_var', None)
     stats_mode = 'hierarchy'
     try:
@@ -828,8 +1093,14 @@ def _stats_compute_and_draw(app):
                 stats_mode = 'mbrp_days'
             elif 'Mapa de Calor' in sel or 'calor' in sel.lower():
                 stats_mode = 'heatmap'
+            elif 'Comportamiento de Ventas' in sel or 'Línea de tiempo' in sel:
+                stats_mode = 'timeline'
     except Exception:
         stats_mode = 'hierarchy'
+        
+    if stats_mode == 'timeline':
+        _stats_compute_and_draw_timeline(app)
+        return
 
     # Si el usuario seleccionó vista basada en MBRP (días sin venta), delegar a rutina específica
     if stats_mode == 'mbrp_days':
@@ -1684,7 +1955,13 @@ def _stats_on_view_mode_change(app):
     
     sel = (view_mode_var.get() or '').strip()
     is_heatmap = 'Mapa de Calor' in sel or 'calor' in sel.lower()
+    is_timeline = 'Comportamiento de Ventas' in sel or 'Línea de tiempo' in sel
     
+    if hasattr(app, 'heatmap_controls_frame'):
+        app.heatmap_controls_frame.pack_forget()
+    if hasattr(app, 'timeline_controls_frame'):
+        app.timeline_controls_frame.pack_forget()
+        
     if is_heatmap:
         # Mostrar controles de mapa de calor
         app.heatmap_controls_frame.pack(fill=tk.X, pady=(8, 4))
@@ -1697,9 +1974,17 @@ def _stats_on_view_mode_change(app):
         # Limpiar contenedor y mostrar mensaje instructivo
         _stats_clear_container(app)
         ttk.Label(app.graph_container, text="Configure los parámetros y presione 'Generar Mapa'").pack(pady=20)
+    elif is_timeline:
+        # Mostrar controles de línea de tiempo
+        app.timeline_controls_frame.pack(fill=tk.X, pady=(8, 4))
+        if hasattr(app, 'stats_breadcrumb_var'):
+            try:
+                app.stats_breadcrumb_var.set("Comportamiento de Ventas")
+            except:
+                pass
+        _stats_clear_container(app)
+        ttk.Label(app.graph_container, text="Configure los parámetros y presione 'Generar Gráfico'").pack(pady=20)
     else:
-        # Ocultar controles de mapa de calor
-        app.heatmap_controls_frame.pack_forget()
         # Refrescar gráficos solo para otros modos
         getattr(app, 'mostrar_estadisticas', lambda: None)()
 
@@ -1884,12 +2169,13 @@ def setup_stats_tab(app):
         top_bar,
         textvariable=app.stats_view_mode_var,
         state='readonly',
-        width=32,
+        width=36,
         values=[
             "Jerarquía productos (Depto/Grupo/Sub)",
             "Distribución por Proveedor",
             "MBRP — Días sin venta (Depto/Grupo/Sub)",
             "Mapa de Calor (Facturación por Hora)",
+            "Comportamiento de Ventas (Línea de tiempo)"
         ],
     )
     view_mode_combo.pack(side=tk.RIGHT, padx=(5, 0))
@@ -1973,16 +2259,53 @@ def setup_stats_tab(app):
     
     # Ocultar controles de mapa de calor inicialmente
     app.heatmap_controls_frame.pack_forget()
+
+    # === Controles de Línea de Tiempo ===
+    app.timeline_controls_frame = ttk.Frame(top_bar)
     
-    # Cargar sedes
+    ttk.Label(app.timeline_controls_frame, text="Sede:").pack(side=tk.LEFT, padx=(0, 5))
+    app.stats_timeline_sede_var = tk.StringVar(value="00 - ICH")
+    app.stats_timeline_sede_combo = ttk.Combobox(app.timeline_controls_frame, textvariable=app.stats_timeline_sede_var, state='readonly', width=15)
+    app.stats_timeline_sede_combo.pack(side=tk.LEFT, padx=(0, 10))
+    
+    ttk.Label(app.timeline_controls_frame, text="Métrica:").pack(side=tk.LEFT, padx=(0, 5))
+    app.stats_timeline_metric_var = tk.StringVar(value="Unidades Netas")
+    app.stats_timeline_metric_combo = ttk.Combobox(app.timeline_controls_frame, textvariable=app.stats_timeline_metric_var, state='readonly', width=15, values=["Unidades Netas", "Monto (USD)"])
+    app.stats_timeline_metric_combo.pack(side=tk.LEFT, padx=(0, 10))
+    
+    ttk.Label(app.timeline_controls_frame, text="Desde:").pack(side=tk.LEFT, padx=(0, 5))
+    app.stats_timeline_fecha_inicio = DateEntry(app.timeline_controls_frame, width=10, background='#004C97', foreground='white', date_pattern='dd/mm/yyyy', year=default_start.year, month=default_start.month, day=default_start.day)
+    app.stats_timeline_fecha_inicio.pack(side=tk.LEFT, padx=(0, 5))
+    
+    ttk.Label(app.timeline_controls_frame, text="Hasta:").pack(side=tk.LEFT, padx=(0, 5))
+    app.stats_timeline_fecha_fin = DateEntry(app.timeline_controls_frame, width=10, background='#004C97', foreground='white', date_pattern='dd/mm/yyyy')
+    app.stats_timeline_fecha_fin.pack(side=tk.LEFT, padx=(0, 10))
+    
+    ttk.Button(app.timeline_controls_frame, text="Generar Gráfico", command=lambda: _stats_compute_and_draw_timeline(app)).pack(side=tk.LEFT, padx=(0, 5))
+    
+    app.timeline_controls_frame.pack_forget()
+    
+    # Cargar sedes compartidas — formato "01 - Barinas" para extraer código fácilmente
+    _CODIGO_A_NOMBRE_SEDE = {v: k.capitalize() for k, v in _SEDE_NOMBRE_A_CODIGO.items()}
     try:
         sedes_config = app.db_manager.get_sedes_config()
         sede_nombres = [s['nombre_sede'] for s in sedes_config]
         app.stats_heatmap_sede_combo['values'] = sede_nombres
         if sede_nombres:
             app.stats_heatmap_sede_combo.current(0)
+        
+        # Para timeline construir etiquetas con código: "01 - Barinas", "03 - Cabudare", ...
+        timeline_vals = ["00 - ICH"]
+        for nombre in sede_nombres:
+            cod = _SEDE_NOMBRE_A_CODIGO.get(nombre.lower())
+            if cod:
+                timeline_vals.append(f"{cod} - {nombre}")
+            else:
+                timeline_vals.append(nombre)
+        app.stats_timeline_sede_combo['values'] = timeline_vals
+        app.stats_timeline_sede_combo.current(0)
     except Exception as e:
-        app.log(f"Error cargando sedes para mapa de calor: {e}", "ERROR")
+        app.log(f"Error cargando sedes para controles: {e}", "ERROR")
 
     # Contenedor para gráficos
     app.graph_container = ttk.Frame(app.stats_frame)

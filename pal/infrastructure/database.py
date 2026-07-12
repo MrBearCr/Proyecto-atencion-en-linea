@@ -1924,6 +1924,91 @@ class DatabaseManager:
     # Métodos legacy obtener_alertas_stock, obtener_alertas_stock_chunk y obtener_alertas_stock_multiples removidos.
     # Se reemplazan por obtener_quiebres_directos para el módulo Quiebre de Stock.
 
+    def get_ventas_timeline(self, fecha_inicio, fecha_fin, sede_codigo, include_monto=False):
+        """
+        Obtiene ventas agrupadas por fecha para la gráfica de comportamiento.
+
+        Args:
+            fecha_inicio: Fecha inicio
+            fecha_fin: Fecha fin
+            sede_codigo: Código de sede (p.e. '01') o 'ICH' para todas.
+            include_monto: Si True, hace JOIN con MA_PRODUCTOS y devuelve
+                           (fecha, unidades_netas, monto_neto_usd) agrupado solo por fecha.
+                           Si False, devuelve (fecha, unidades_netas) agrupado por fecha.
+
+        Returns:
+            list: Lista de tuplas según el modo elegido.
+        """
+        try:
+            global_query = (sede_codigo in (None, '%', '00', 'ICH', 'ALL'))
+            dep_filter = ""
+            params = [fecha_inicio, fecha_fin]
+
+            if not global_query:
+                dep_filter = "AND i.c_Deposito LIKE ?"
+                params.append(f"{sede_codigo}%")
+
+            if include_monto:
+                # Agrupa por fecha + producto para poder multiplicar por precio,
+                # luego suma todo en una subconsulta -> una fila por fecha
+                query = f"""
+                    SELECT
+                        fecha,
+                        SUM(unidades_netas)  AS unidades_netas,
+                        SUM(unidades_netas * COALESCE(p.n_precio1, 0)
+                            * (1.0 + COALESCE(p.n_impuesto1, 0) / 100.0)) AS monto_usd
+                    FROM (
+                        SELECT
+                            CONVERT(DATE, i.f_fecha) AS fecha,
+                            RTRIM(LTRIM(i.c_Codarticulo)) AS codigo,
+                            SUM(CASE
+                                WHEN i.c_Concepto = 'VEN' THEN i.n_Cantidad
+                                WHEN i.c_Concepto = 'DEV' THEN -i.n_Cantidad
+                                ELSE 0
+                            END) AS unidades_netas
+                        FROM TR_INVENTARIO i WITH (NOLOCK)
+                        WHERE i.f_fecha BETWEEN CONVERT(DATE, ?, 105) AND CONVERT(DATE, ?, 105)
+                            AND i.c_Concepto IN ('VEN', 'DEV')
+                            {dep_filter}
+                        GROUP BY CONVERT(DATE, i.f_fecha), RTRIM(LTRIM(i.c_Codarticulo))
+                        HAVING SUM(CASE
+                            WHEN i.c_Concepto = 'VEN' THEN i.n_Cantidad
+                            WHEN i.c_Concepto = 'DEV' THEN -i.n_Cantidad
+                            ELSE 0
+                        END) > 0
+                    ) sub
+                    LEFT JOIN MA_PRODUCTOS p WITH (NOLOCK) ON p.C_CODIGO = sub.codigo
+                    GROUP BY fecha
+                    ORDER BY fecha ASC
+                """
+            else:
+                # Agrupamos directamente por fecha, sin código -> una fila por día
+                query = f"""
+                    SELECT
+                        CONVERT(DATE, i.f_fecha) AS fecha,
+                        SUM(CASE
+                            WHEN i.c_Concepto = 'VEN' THEN i.n_Cantidad
+                            WHEN i.c_Concepto = 'DEV' THEN -i.n_Cantidad
+                            ELSE 0
+                        END) AS unidades_netas
+                    FROM TR_INVENTARIO i WITH (NOLOCK)
+                    WHERE i.f_fecha BETWEEN CONVERT(DATE, ?, 105) AND CONVERT(DATE, ?, 105)
+                        AND i.c_Concepto IN ('VEN', 'DEV')
+                        {dep_filter}
+                    GROUP BY CONVERT(DATE, i.f_fecha)
+                    HAVING SUM(CASE
+                        WHEN i.c_Concepto = 'VEN' THEN i.n_Cantidad
+                        WHEN i.c_Concepto = 'DEV' THEN -i.n_Cantidad
+                        ELSE 0
+                    END) > 0
+                    ORDER BY fecha ASC
+                """
+
+            return self.fetch_data(query, params)
+        except Exception as e:
+            self._log(f"Error en get_ventas_timeline: {e}", "ERROR")
+            return []
+
     def obtener_ventas_persisted_tra(self, sede="0301", dias_rango=365):
         """
         Carga la vista TRA completa desde la tabla de persistencia pal_productos_rotacion 

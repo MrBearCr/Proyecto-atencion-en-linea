@@ -35,10 +35,19 @@ class TestRecepciones(unittest.TestCase):
         ]
         user_id = 99
         
-        # Mock para generar numero REC
+        # Mock para generar numero REC y consultas internas
         self.mock_db.fetch_data.side_effect = [
             [[0]], # Max ID recepciones (para generar REC-000001)
             [[500]], # ID de la nueva recepcion insertada (IDENT_CURRENT)
+            # Item 1 (sug_id=101, cantidad=10)
+            [[1001]], # ID del detalle insertado (IDENT_CURRENT)
+            [("PROD1", "01", "03", 20.0, 1)], # sql_sug_info
+            [[10.0]], # cantidad_recibida_total
+            # Item 2 (sug_id=102, cantidad=0)
+            [[1002]], # ID del detalle insertado (IDENT_CURRENT)
+            [("PROD2", "01", "03", 10.0, 1)], # sql_sug_info
+            [[0.0]], # cantidad_recibida_total
+            # Final
             [[1]] # Count pendientes (para estado global: queda 1 pendiente)
         ]
 
@@ -85,6 +94,9 @@ class TestRecepciones(unittest.TestCase):
         self.mock_db.fetch_data.side_effect = [
             [[10]], # Max ID rec
             [[510]], # New ID
+            [[1002]], # ID del detalle insertado (IDENT_CURRENT)
+            [("PROD1", "01", "03", 50.0, 1)], # sql_sug_info
+            [[50.0]], # cantidad_recibida_total
             [[0]] # Count pendientes = 0 (Todo completo)
         ]
 

@@ -29,8 +29,16 @@
 - **NO ignorar validación de conexión a BD**: Siempre usar `ensure_connection()` antes de operar.
 
 ## Tests
-- Dónde van: Carpeta `tests/`.
-- Qué se testea sí o sí: [PENDIENTE: Definir casos críticos obligatorios].
+- Dónde van: Carpeta `tests/`, organizados según la arquitectura de la aplicación:
+  - `tests/core/`: Pruebas para autenticación, gestión de configuración, cifrado y licencias.
+  - `tests/infrastructure/`: Pruebas de conexión a base de datos y consistencia de esquemas.
+  - `tests/services/`: Pruebas para la lógica de negocio (Abastecimiento, TRA, MBRP, filtros y exportaciones).
+- Qué se testea sí o sí:
+  - **Algoritmos de negocio**: El cálculo de promedios de venta, días para quiebre, stock mínimo/máximo y sugerencias de abastecimiento.
+  - **Seguridad**: Cifrado y descifrado de credenciales mediante `SecureCredentialsManager` para evitar contraseñas en texto plano.
+  - **Saneamiento de exportaciones**: La función `clean_for_excel()` para garantizar la eliminación de caracteres de control invisibles en Excel.
+  - **Gestión de Permisos (RBAC)**: Reglas de acceso a módulos y verificación de roles críticos.
+  - **Consultas con parámetros dinámicos**: Generación segura de sentencias SQL (ej. listas variables de parámetros en cláusulas `IN`).
 
 ## Commits
 - Formato: Conventional Commits (ej. `feat: ...`, `chore: ...`, `fix: ...`).
